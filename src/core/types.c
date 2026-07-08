@@ -62,13 +62,45 @@ void tool_call_free(tool_call_t *tc) {
     free(tc->arguments);
 }
 
+void content_part_free(content_part_t *part) {
+    if (!part)
+        return;
+    free(part->type);
+    free(part->text);
+    free(part->image_url.url);
+}
+
+void message_content_free(message_content_t *content) {
+    if (!content)
+        return;
+    free(content->string);
+    for (int i = 0; i < content->part_count; i++)
+        content_part_free(&content->parts[i]);
+    free(content->parts);
+}
+
 void message_free(message_t *msg) {
     if (!msg)
         return;
-    free(msg->content);
+    message_content_free(&msg->content);
     free(msg->name);
     free(msg->tool_call_id);
     for (int i = 0; i < msg->tool_call_count; i++)
         tool_call_free(&msg->tool_calls[i]);
     free(msg->tool_calls);
+}
+
+void tool_free(tool_t *tool) {
+    if (!tool)
+        return;
+    free(tool->type);
+    free(tool->function.name);
+    free(tool->function.description);
+    free(tool->function.parameters_json);
+}
+
+void tool_choice_free(tool_choice_t *choice) {
+    if (!choice)
+        return;
+    free(choice->function_name);
 }

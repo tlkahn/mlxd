@@ -5,3 +5,5 @@ mlxd
 tests/test_*
 !tests/test_*.c
 .DS_Store
+.clangd
+compile_commands.json
