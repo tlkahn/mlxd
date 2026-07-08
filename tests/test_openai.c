@@ -684,6 +684,98 @@ static void test_invalid_utf8_write_behavior(void) {
     yyjson_mut_doc_free(mdoc);
 }
 
+/* --- Fix 1: parse_messages must parse assistant tool_calls --------------- */
+
+static void test_chat_request_parse_assistant_tool_calls(void) {
+    const char *json =
+        "{\"model\":\"m\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"hi\"},"
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
+        "{\"id\":\"call_123\",\"type\":\"function\","
+        "\"function\":{\"name\":\"get_weather\","
+        "\"arguments\":\"{\\\"location\\\":\\\"Tokyo\\\"}\"}}]}"
+        "]}";
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    assert(doc != NULL);
+    chat_completion_request_t req;
+    const char *err = NULL;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.message_count == 2);
+    message_t *asst = &req.messages[1];
+    assert(asst->role == ROLE_ASSISTANT);
+    assert(asst->tool_call_count == 1);
+    assert(strcmp(asst->tool_calls[0].id, "call_123") == 0);
+    assert(strcmp(asst->tool_calls[0].function_name, "get_weather") == 0);
+    assert(strcmp(asst->tool_calls[0].arguments, "{\"location\":\"Tokyo\"}") == 0);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+}
+
+/* --- Fix 2: tool_choice object must require function.name ---------------- */
+
+static void test_chat_request_parse_toolchoice_missing_function(void) {
+    const char *json1 =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"tool_choice\":{\"type\":\"function\"}}";
+    yyjson_doc *doc1 = yyjson_read(json1, strlen(json1), 0);
+    assert(doc1 != NULL);
+    chat_completion_request_t req;
+    const char *err = NULL;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc1), &err) == -1);
+    yyjson_doc_free(doc1);
+
+    const char *json2 =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"tool_choice\":{\"type\":\"function\",\"function\":{}}}";
+    yyjson_doc *doc2 = yyjson_read(json2, strlen(json2), 0);
+    assert(doc2 != NULL);
+    err = NULL;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc2), &err) == -1);
+    yyjson_doc_free(doc2);
+}
+
+/* --- Fix 3: free-after-early-error must be safe (memset before check) ---- */
+
+static void test_parse_free_after_early_error_is_safe(void) {
+    const char *arr_json = "[]";
+    yyjson_doc *doc = yyjson_read(arr_json, strlen(arr_json), 0);
+    assert(doc != NULL);
+    const char *err = NULL;
+
+    chat_completion_request_t creq;
+    memset(&creq, 0xAB, sizeof(creq));
+    assert(chat_completion_request_parse(&creq, yyjson_doc_get_root(doc), &err) == -1);
+    chat_completion_request_free(&creq);
+
+    completion_request_t cpreq;
+    memset(&cpreq, 0xAB, sizeof(cpreq));
+    err = NULL;
+    assert(completion_request_parse(&cpreq, yyjson_doc_get_root(doc), &err) == -1);
+    completion_request_free(&cpreq);
+
+    embedding_request_t ereq;
+    memset(&ereq, 0xAB, sizeof(ereq));
+    err = NULL;
+    assert(embedding_request_parse(&ereq, yyjson_doc_get_root(doc), &err) == -1);
+    embedding_request_free(&ereq);
+
+    yyjson_doc_free(doc);
+}
+
+/* --- Fix 4: stop array with non-string element must fail ----------------- */
+
+static void test_chat_request_parse_stop_non_string_element(void) {
+    const char *json =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"stop\":[42,\"END\"]}";
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    assert(doc != NULL);
+    chat_completion_request_t req;
+    const char *err = NULL;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == -1);
+    yyjson_doc_free(doc);
+}
+
 int main(void) {
     test_helper_reads_and_parses_error_envelope();
     test_error_envelope_serialize();
@@ -705,6 +797,10 @@ int main(void) {
     test_finish_reason_never_leaks_cancelled();
     test_escaping_control_quote_backslash_roundtrip();
     test_invalid_utf8_write_behavior();
+    test_chat_request_parse_assistant_tool_calls();
+    test_chat_request_parse_toolchoice_missing_function();
+    test_parse_free_after_early_error_is_safe();
+    test_chat_request_parse_stop_non_string_element();
     printf("test_openai: all passed\n");
     return 0;
 }

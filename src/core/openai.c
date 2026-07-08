@@ -27,16 +27,23 @@ static char *json_str_dup(yyjson_val *v) {
 
 /* Parse an OpenAI "stop" value: a string becomes a 1-element array; an array of
  * strings becomes n elements; absent -> NULL/0. Returns 0, or -1 on OOM. */
-static int parse_stop(yyjson_val *v, char ***out, int *count) {
+static int parse_stop(yyjson_val *v, char ***out, int *count, const char **err) {
     *out = NULL;
     *count = 0;
     if (!v)
         return 0;
     if (yyjson_is_str(v)) {
         char **arr = malloc(sizeof(char *));
-        if (!arr)
+        if (!arr) {
+            *err = "out of memory";
             return -1;
+        }
         arr[0] = dup_str(yyjson_get_str(v));
+        if (!arr[0]) {
+            free(arr);
+            *err = "out of memory";
+            return -1;
+        }
         *out = arr;
         *count = 1;
         return 0;
@@ -46,12 +53,21 @@ static int parse_stop(yyjson_val *v, char ***out, int *count) {
         if (n == 0)
             return 0;
         char **arr = calloc(n, sizeof(char *));
-        if (!arr)
+        if (!arr) {
+            *err = "out of memory";
             return -1;
+        }
         size_t idx, max;
         yyjson_val *item;
         yyjson_arr_foreach(v, idx, max, item) {
             arr[idx] = json_str_dup(item);
+            if (!arr[idx]) {
+                for (size_t i = 0; i < idx; i++)
+                    free(arr[i]);
+                free(arr);
+                *err = "stop values must be strings";
+                return -1;
+            }
         }
         *out = arr;
         *count = (int)n;
@@ -200,10 +216,17 @@ static int parse_tool_choice(tool_choice_t *tc, yyjson_val *v, const char **err)
         return 0;
     }
     if (yyjson_is_obj(v)) {
-        tc->kind = TOOL_CHOICE_FUNCTION;
         yyjson_val *fn = yyjson_obj_get(v, "function");
-        if (yyjson_is_obj(fn))
-            tc->function_name = json_str_dup(yyjson_obj_get(fn, "name"));
+        if (!yyjson_is_obj(fn)) {
+            *err = "tool_choice object missing function";
+            return -1;
+        }
+        tc->function_name = json_str_dup(yyjson_obj_get(fn, "name"));
+        if (!tc->function_name) {
+            *err = "tool_choice function missing name";
+            return -1;
+        }
+        tc->kind = TOOL_CHOICE_FUNCTION;
     }
     return 0;
 }
@@ -234,6 +257,29 @@ static int parse_messages(chat_completion_request_t *req, yyjson_val *msgs, cons
         }
         msg->name = json_str_dup(yyjson_obj_get(m, "name"));
         msg->tool_call_id = json_str_dup(yyjson_obj_get(m, "tool_call_id"));
+        yyjson_val *tcs = yyjson_obj_get(m, "tool_calls");
+        if (yyjson_is_arr(tcs)) {
+            size_t tc_n = yyjson_arr_size(tcs);
+            if (tc_n > 0) {
+                msg->tool_calls = calloc(tc_n, sizeof(tool_call_t));
+                if (!msg->tool_calls) {
+                    *err = "out of memory";
+                    return -1;
+                }
+                msg->tool_call_count = (int)tc_n;
+                size_t tc_idx, tc_max;
+                yyjson_val *tc;
+                yyjson_arr_foreach(tcs, tc_idx, tc_max, tc) {
+                    tool_call_t *call = &msg->tool_calls[tc_idx];
+                    call->id = json_str_dup(yyjson_obj_get(tc, "id"));
+                    yyjson_val *fn = yyjson_obj_get(tc, "function");
+                    if (yyjson_is_obj(fn)) {
+                        call->function_name = json_str_dup(yyjson_obj_get(fn, "name"));
+                        call->arguments = json_str_dup(yyjson_obj_get(fn, "arguments"));
+                    }
+                }
+            }
+        }
     }
     return 0;
 }
@@ -252,11 +298,11 @@ static void parse_sampling(gen_params_t *params, yyjson_val *root) {
 
 int chat_completion_request_parse(chat_completion_request_t *req, yyjson_val *root,
                                   const char **err) {
+    memset(req, 0, sizeof(*req));
     if (!yyjson_is_obj(root)) {
         *err = "request body must be a JSON object";
         return -1;
     }
-    memset(req, 0, sizeof(*req));
     req->params.sampling = SAMPLING_PARAMS_DEFAULT;
     req->params.n = 1;
     req->tool_choice.kind = TOOL_CHOICE_UNSET;
@@ -297,10 +343,8 @@ int chat_completion_request_parse(chat_completion_request_t *req, yyjson_val *ro
             req->include_usage = yyjson_get_bool(iu);
     }
 
-    if (parse_stop(yyjson_obj_get(root, "stop"), &req->params.stop, &req->params.stop_count) != 0) {
-        *err = "out of memory";
+    if (parse_stop(yyjson_obj_get(root, "stop"), &req->params.stop, &req->params.stop_count, err) != 0)
         goto fail;
-    }
     if (parse_tools(req, yyjson_obj_get(root, "tools"), err) != 0)
         goto fail;
     if (parse_tool_choice(&req->tool_choice, yyjson_obj_get(root, "tool_choice"), err) != 0)
@@ -486,11 +530,11 @@ void chat_completion_chunk_free(chat_completion_chunk_t *chunk) {
 }
 
 int completion_request_parse(completion_request_t *req, yyjson_val *root, const char **err) {
+    memset(req, 0, sizeof(*req));
     if (!yyjson_is_obj(root)) {
         *err = "request body must be a JSON object";
         return -1;
     }
-    memset(req, 0, sizeof(*req));
     req->params.sampling = SAMPLING_PARAMS_DEFAULT;
     req->params.n = 1;
 
@@ -521,10 +565,8 @@ int completion_request_parse(completion_request_t *req, yyjson_val *root, const 
     yyjson_val *stream = yyjson_obj_get(root, "stream");
     if (yyjson_is_bool(stream))
         req->params.stream = yyjson_get_bool(stream);
-    if (parse_stop(yyjson_obj_get(root, "stop"), &req->params.stop, &req->params.stop_count) != 0) {
-        *err = "out of memory";
+    if (parse_stop(yyjson_obj_get(root, "stop"), &req->params.stop, &req->params.stop_count, err) != 0)
         goto fail;
-    }
     return 0;
 
 fail:
@@ -570,11 +612,11 @@ void completion_response_free(completion_response_t *resp) {
 }
 
 int embedding_request_parse(embedding_request_t *req, yyjson_val *root, const char **err) {
+    memset(req, 0, sizeof(*req));
     if (!yyjson_is_obj(root)) {
         *err = "request body must be a JSON object";
         return -1;
     }
-    memset(req, 0, sizeof(*req));
 
     yyjson_val *model = yyjson_obj_get(root, "model");
     if (!yyjson_is_str(model)) {
@@ -595,11 +637,19 @@ int embedding_request_parse(embedding_request_t *req, yyjson_val *root, const ch
         goto fail;
     }
     req->input = json_str_dup(input);
+    if (!req->input) {
+        *err = "out of memory";
+        goto fail;
+    }
 
     /* encoding_format defaults to "float" when absent. dimensions and user are
      * accepted on the wire but ignored here (deferred to the engine layer). */
     yyjson_val *ef = yyjson_obj_get(root, "encoding_format");
     req->encoding_format = yyjson_is_str(ef) ? json_str_dup(ef) : dup_str("float");
+    if (!req->encoding_format) {
+        *err = "out of memory";
+        goto fail;
+    }
     return 0;
 
 fail:
