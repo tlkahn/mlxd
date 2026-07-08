@@ -1,0 +1,8 @@
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion.chunk",
+  "created": 1728933352,
+  "model": "qwen3-4b",
+  "choices": [],
+  "usage": { "prompt_tokens": 9, "completion_tokens": 12, "total_tokens": 21 }
+}

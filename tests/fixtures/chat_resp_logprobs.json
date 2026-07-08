@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-logprobs1",
+  "object": "chat.completion",
+  "created": 1728933352,
+  "model": "qwen3-4b",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "Hi there" },
+      "logprobs": {
+        "content": [
+          {
+            "token": "Hi",
+            "logprob": -0.31725305,
+            "top_logprobs": [
+              { "token": "Hi", "logprob": -0.31725305 },
+              { "token": "Hello", "logprob": -1.3190403 }
+            ]
+          },
+          {
+            "token": " there",
+            "logprob": -0.02380986,
+            "top_logprobs": []
+          }
+        ]
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11 }
+}

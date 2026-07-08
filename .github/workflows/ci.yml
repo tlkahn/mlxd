@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install mlx mlx-c libuv llhttp
+
+      - name: Build
+        run: make
+
+      - name: Test
+        run: make test
+
+      - name: Check no manual JSON escaping
+        run: |
+          if grep -rn 'json_escape\|json_quote\|escape_json' src/ --include='*.c' --include='*.h' | grep -v 'src/core/'; then
+            echo "ERROR: manual JSON escape helper found outside src/core/"
+            exit 1
+          fi

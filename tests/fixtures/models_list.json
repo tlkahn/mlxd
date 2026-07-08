@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "qwen3-4b",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "mlxd"
+    },
+    {
+      "id": "gemma4-12b",
+      "object": "model",
+      "created": 1705953180,
+      "owned_by": "mlxd"
+    }
+  ]
+}

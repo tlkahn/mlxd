@@ -1,0 +1,30 @@
+{
+  "model": "gemma4-12b",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "What is in this image?" },
+        { "type": "image_url", "image_url": { "url": "https://example.com/cat.png" } }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather in a given location",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "City and state, e.g. San Francisco, CA" },
+            "unit": { "type": "string", "enum": ["celsius", "fahrenheit"] }
+          },
+          "required": ["location"]
+        }
+      }
+    }
+  ],
+  "tool_choice": { "type": "function", "function": { "name": "get_weather" } }
+}

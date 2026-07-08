@@ -1,0 +1,6 @@
+{
+  "model": "bert-base",
+  "input": "The food was delicious.",
+  "encoding_format": "float",
+  "dimensions": 256
+}

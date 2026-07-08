@@ -1,0 +1,15 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "index": 0,
+      "embedding": "bYIzPBRJGLwj0Dy7"
+    }
+  ],
+  "model": "bert-base",
+  "usage": {
+    "prompt_tokens": 8,
+    "total_tokens": 8
+  }
+}

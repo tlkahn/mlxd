@@ -1,0 +1,13 @@
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion.chunk",
+  "created": 1728933352,
+  "model": "qwen3-4b",
+  "choices": [
+    {
+      "index": 0,
+      "delta": { "role": "assistant", "content": "Hello" },
+      "finish_reason": null
+    }
+  ]
+}

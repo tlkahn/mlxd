@@ -1,0 +1,17 @@
+{
+  "model": "qwen3-4b",
+  "messages": [
+    { "role": "user", "content": "Book a table for two." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "book_table",
+        "parameters": { "type": "object", "properties": { "guests": { "type": "integer" } } }
+      }
+    }
+  ],
+  "tool_choice": "required",
+  "stop": ["\n\n", "END"]
+}
