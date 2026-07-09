@@ -104,6 +104,9 @@ install: mlxd
 	install -d $(PREFIX)/bin
 	install -m 755 mlxd $(PREFIX)/bin/mlxd
 
+compile_commands.json: Makefile
+	bear -- $(MAKE) clean mlxd
+
 .PHONY: test test-gpu clean install analyze coverage clean-coverage
 
 # --- Debug/Release shortcuts --------------------------------------------------
