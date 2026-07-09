@@ -60,9 +60,11 @@ vendor/jinja_cpp/%.o: vendor/jinja_cpp/%.cpp
 
 # --- Tests --------------------------------------------------------------------
 
-TEST_SRCS  := $(wildcard tests/test_*.c)
-TEST_BINS  := $(TEST_SRCS:.c=)
-LIB_OBJS   := $(filter-out src/main.o, $(ALL_OBJS))
+TEST_SRCS      := $(filter-out tests/test_%_gpu.c, $(wildcard tests/test_*.c))
+TEST_BINS      := $(TEST_SRCS:.c=)
+TEST_GPU_SRCS  := $(wildcard tests/test_*_gpu.c)
+TEST_GPU_BINS  := $(TEST_GPU_SRCS:.c=)
+LIB_OBJS       := $(filter-out src/main.o, $(ALL_OBJS))
 
 tests/test_%: tests/test_%.c $(LIB_OBJS)
 	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(LIB_OBJS) $(ALL_LDFLAGS)
@@ -70,6 +72,19 @@ tests/test_%: tests/test_%.c $(LIB_OBJS)
 test: $(TEST_BINS)
 	@pass=0; fail=0; \
 	for t in $(TEST_BINS); do \
+		printf "  %-40s" "$$(basename $$t)"; \
+		if ./$$t > /dev/null 2>&1; then \
+			printf "OK\n"; pass=$$((pass + 1)); \
+		else \
+			printf "FAIL\n"; fail=$$((fail + 1)); \
+		fi; \
+	done; \
+	printf "\n%d passed, %d failed\n" $$pass $$fail; \
+	[ $$fail -eq 0 ]
+
+test-gpu: $(TEST_GPU_BINS)
+	@pass=0; fail=0; \
+	for t in $(TEST_GPU_BINS); do \
 		printf "  %-40s" "$$(basename $$t)"; \
 		if ./$$t > /dev/null 2>&1; then \
 			printf "OK\n"; pass=$$((pass + 1)); \
@@ -89,7 +104,7 @@ install: mlxd
 	install -d $(PREFIX)/bin
 	install -m 755 mlxd $(PREFIX)/bin/mlxd
 
-.PHONY: test clean install analyze
+.PHONY: test test-gpu clean install analyze
 
 # --- Debug/Release shortcuts --------------------------------------------------
 
