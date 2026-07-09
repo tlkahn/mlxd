@@ -116,6 +116,9 @@ static void test_model_list_serialize(void) {
     assert(strcmp(yyjson_get_str(yyjson_obj_get(m0, "owned_by")), "mlxd") == 0);
     yyjson_val *m1 = yyjson_arr_get(data, 1);
     assert(strcmp(yyjson_get_str(yyjson_obj_get(m1, "id")), "gemma4-12b") == 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(m1, "object")), "model") == 0);
+    assert(yyjson_get_sint(yyjson_obj_get(m1, "created")) == 1705953180);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(m1, "owned_by")), "mlxd") == 0);
 
     yyjson_doc_free(doc);
     yyjson_mut_doc_free(mdoc);
@@ -432,7 +435,7 @@ static void test_chunk_serialize_tool_call_delta(void) {
          .id = "call_abc123",
          .type = "function",
          .function_name = "get_weather",
-         .arguments = ""}, /* present-and-empty */
+         .arguments = ""},                           /* present-and-empty */
         {.index = 0, .arguments = "{\"location\":"}, /* id/type/name NULL -> omitted */
     };
     chat_completion_chunk_t chunk = {
@@ -650,7 +653,8 @@ static void test_escaping_control_quote_backslash_roundtrip(void) {
     assert(strcmp(args, inner) == 0);
     yyjson_doc *idoc = yyjson_read(args, strlen(args), 0);
     assert(idoc != NULL);
-    assert(strcmp(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(idoc), "text")), corpus_s) == 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(idoc), "text")), corpus_s) ==
+           0);
     yyjson_doc_free(idoc);
 
     free(json);
@@ -670,7 +674,10 @@ static void test_escaping_control_quote_backslash_roundtrip(void) {
  * escape is exactly one byte (0xFF) followed by "cd". */
 static void test_invalid_utf8_write_behavior(void) {
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *s = yyjson_mut_strncpy(mdoc, "ab\xFF" "cd", 5);
+    yyjson_mut_val *s = yyjson_mut_strncpy(mdoc,
+                                           "ab\xFF"
+                                           "cd",
+                                           5);
     assert(s != NULL);
     yyjson_mut_doc_set_root(mdoc, s);
 
@@ -687,14 +694,13 @@ static void test_invalid_utf8_write_behavior(void) {
 /* --- Fix 1: parse_messages must parse assistant tool_calls --------------- */
 
 static void test_chat_request_parse_assistant_tool_calls(void) {
-    const char *json =
-        "{\"model\":\"m\",\"messages\":["
-        "{\"role\":\"user\",\"content\":\"hi\"},"
-        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
-        "{\"id\":\"call_123\",\"type\":\"function\","
-        "\"function\":{\"name\":\"get_weather\","
-        "\"arguments\":\"{\\\"location\\\":\\\"Tokyo\\\"}\"}}]}"
-        "]}";
+    const char *json = "{\"model\":\"m\",\"messages\":["
+                       "{\"role\":\"user\",\"content\":\"hi\"},"
+                       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
+                       "{\"id\":\"call_123\",\"type\":\"function\","
+                       "\"function\":{\"name\":\"get_weather\","
+                       "\"arguments\":\"{\\\"location\\\":\\\"Tokyo\\\"}\"}}]}"
+                       "]}";
     yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
     assert(doc != NULL);
     chat_completion_request_t req;
@@ -714,9 +720,8 @@ static void test_chat_request_parse_assistant_tool_calls(void) {
 /* --- Fix 2: tool_choice object must require function.name ---------------- */
 
 static void test_chat_request_parse_toolchoice_missing_function(void) {
-    const char *json1 =
-        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
-        "\"tool_choice\":{\"type\":\"function\"}}";
+    const char *json1 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+                        "\"tool_choice\":{\"type\":\"function\"}}";
     yyjson_doc *doc1 = yyjson_read(json1, strlen(json1), 0);
     assert(doc1 != NULL);
     chat_completion_request_t req;
@@ -724,9 +729,8 @@ static void test_chat_request_parse_toolchoice_missing_function(void) {
     assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc1), &err) == -1);
     yyjson_doc_free(doc1);
 
-    const char *json2 =
-        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
-        "\"tool_choice\":{\"type\":\"function\",\"function\":{}}}";
+    const char *json2 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+                        "\"tool_choice\":{\"type\":\"function\",\"function\":{}}}";
     yyjson_doc *doc2 = yyjson_read(json2, strlen(json2), 0);
     assert(doc2 != NULL);
     err = NULL;
@@ -765,9 +769,8 @@ static void test_parse_free_after_early_error_is_safe(void) {
 /* --- Fix 4: stop array with non-string element must fail ----------------- */
 
 static void test_chat_request_parse_stop_non_string_element(void) {
-    const char *json =
-        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
-        "\"stop\":[42,\"END\"]}";
+    const char *json = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+                       "\"stop\":[42,\"END\"]}";
     yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
     assert(doc != NULL);
     chat_completion_request_t req;
