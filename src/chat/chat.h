@@ -2,6 +2,7 @@
 #define MLXD_CHAT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 typedef struct {
     const char *tmpl;
@@ -9,6 +10,10 @@ typedef struct {
     const char *tools_json;
     const char *extra_json;
     bool        add_generation_prompt;
+    size_t      tmpl_len;
+    size_t      messages_json_len;
+    size_t      tools_json_len;
+    size_t      extra_json_len;
 } chat_render_params_t;
 
 typedef struct {

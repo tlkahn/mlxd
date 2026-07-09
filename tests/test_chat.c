@@ -119,6 +119,98 @@ static void test_diagnostics_free_idempotent(void) {
     chat_diagnostics_free(&diag);
 }
 
+/* --- tools_json and extra_json pass-through ------------------------------ */
+
+static void test_render_tools_json(void) {
+    chat_render_params_t p = {
+        .tmpl = "{{ tools | length }}",
+        .messages_json = "[]",
+        .tools_json = "[{\"type\":\"function\"}]",
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r != NULL);
+    assert(diag.error == NULL);
+    assert(strcmp(r, "1") == 0);
+    free(r);
+    chat_diagnostics_free(&diag);
+}
+
+static void test_render_extra_json(void) {
+    chat_render_params_t p = {
+        .tmpl = "{{ bos_token }}hello{{ eos_token }}",
+        .messages_json = "[]",
+        .extra_json = "{\"bos_token\":\"<s>\",\"eos_token\":\"</s>\"}",
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r != NULL);
+    assert(diag.error == NULL);
+    assert(strcmp(r, "<s>hello</s>") == 0);
+    free(r);
+    chat_diagnostics_free(&diag);
+}
+
+/* --- NUL-byte rejection -------------------------------------------------- */
+
+static void test_nul_in_template(void) {
+    const char tmpl[] = "hi\0there";
+    chat_render_params_t p = {
+        .tmpl = tmpl,
+        .messages_json = "[]",
+        .tmpl_len = sizeof(tmpl) - 1,
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r == NULL);
+    assert(diag.error != NULL);
+    chat_diagnostics_free(&diag);
+}
+
+static void test_nul_in_messages(void) {
+    const char msgs[] = "[]\0x";
+    chat_render_params_t p = {
+        .tmpl = "ok",
+        .messages_json = msgs,
+        .messages_json_len = sizeof(msgs) - 1,
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r == NULL);
+    assert(diag.error != NULL);
+    chat_diagnostics_free(&diag);
+}
+
+static void test_nul_in_tools(void) {
+    const char tools[] = "[]\0x";
+    chat_render_params_t p = {
+        .tmpl = "ok",
+        .messages_json = "[]",
+        .tools_json = tools,
+        .tools_json_len = sizeof(tools) - 1,
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r == NULL);
+    assert(diag.error != NULL);
+    chat_diagnostics_free(&diag);
+}
+
+static void test_nul_in_extra(void) {
+    const char extra[] = "{}\0x";
+    chat_render_params_t p = {
+        .tmpl = "ok",
+        .messages_json = "[]",
+        .extra_json = extra,
+        .extra_json_len = sizeof(extra) - 1,
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r == NULL);
+    assert(diag.error != NULL);
+    chat_diagnostics_free(&diag);
+}
+
 /* --- Invalid template (jinja error path) --------------------------------- */
 
 static void test_render_invalid_template(void) {
@@ -142,6 +234,12 @@ int main(void) {
     test_null_diag_empty_template();
     test_render_chatml();
     test_render_no_generation_prompt();
+    test_render_tools_json();
+    test_render_extra_json();
+    test_nul_in_template();
+    test_nul_in_messages();
+    test_nul_in_tools();
+    test_nul_in_extra();
     test_diagnostics_free_null();
     test_diagnostics_free_idempotent();
     test_render_invalid_template();
