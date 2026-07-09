@@ -104,7 +104,7 @@ install: mlxd
 	install -d $(PREFIX)/bin
 	install -m 755 mlxd $(PREFIX)/bin/mlxd
 
-.PHONY: test test-gpu clean install analyze
+.PHONY: test test-gpu clean install analyze coverage clean-coverage
 
 # --- Debug/Release shortcuts --------------------------------------------------
 
@@ -123,3 +123,53 @@ SCAN_BUILD ?= $(shell command -v scan-build 2>/dev/null || echo $(BREW_PREFIX)/o
 
 analyze:
 	$(SCAN_BUILD) --use-cc=$(CC) --status-bugs $(MAKE) clean mlxd
+
+# --- Coverage (clang source-based) --------------------------------------------
+
+LLVM_PREFIX   ?= $(BREW_PREFIX)/opt/llvm
+LLVM_PROFDATA := $(LLVM_PREFIX)/bin/llvm-profdata
+LLVM_COV      := $(LLVM_PREFIX)/bin/llvm-cov
+COV_DIR       := build/cov
+
+COV_CFLAGS  := -fprofile-instr-generate -fcoverage-mapping
+COV_LDFLAGS := -fprofile-instr-generate
+
+COV_ALL_OBJS := $(SRCS:.c=.cov.o)
+COV_LIB_OBJS := $(filter-out src/main.cov.o, $(COV_ALL_OBJS)) vendor/yyjson/yyjson.o $(JINJA_OBJS)
+
+.PRECIOUS: %.cov.o
+%.cov.o: %.c
+	$(CC) $(ALL_CFLAGS) $(COV_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -c -o $@ $<
+
+COV_TEST_SRCS := $(wildcard tests/test_*.c)
+COV_TEST_BINS := $(COV_TEST_SRCS:tests/test_%.c=$(COV_DIR)/test_%)
+
+$(COV_DIR)/test_%: tests/test_%.c $(COV_LIB_OBJS) | $(COV_DIR)
+	$(CC) $(ALL_CFLAGS) $(COV_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(COV_LIB_OBJS) $(ALL_LDFLAGS) $(COV_LDFLAGS)
+
+$(COV_DIR):
+	mkdir -p $@
+
+coverage: $(COV_TEST_BINS) | $(COV_DIR)
+	@rm -f $(COV_DIR)/*.profraw $(COV_DIR)/merged.profdata
+	@for t in $(COV_TEST_BINS); do \
+		LLVM_PROFILE_FILE="$(COV_DIR)/$$(basename $$t).profraw" ./$$t > /dev/null 2>&1 || true; \
+	done
+	$(LLVM_PROFDATA) merge -sparse $(COV_DIR)/*.profraw -o $(COV_DIR)/merged.profdata
+	@echo ""
+	@echo "--- Coverage summary ---"
+	@$(LLVM_COV) report $(firstword $(COV_TEST_BINS)) \
+		$(addprefix -object ,$(wordlist 2,$(words $(COV_TEST_BINS)),$(COV_TEST_BINS))) \
+		-instr-profile=$(COV_DIR)/merged.profdata \
+		-ignore-filename-regex='vendor/|tests/'
+	$(LLVM_COV) show $(firstword $(COV_TEST_BINS)) \
+		$(addprefix -object ,$(wordlist 2,$(words $(COV_TEST_BINS)),$(COV_TEST_BINS))) \
+		-instr-profile=$(COV_DIR)/merged.profdata \
+		-format=html -output-dir=$(COV_DIR)/html \
+		-ignore-filename-regex='vendor/|tests/'
+	@echo ""
+	@echo "HTML report: $(COV_DIR)/html/index.html"
+
+clean-coverage:
+	rm -rf build/cov
+	find src -name '*.cov.o' -delete

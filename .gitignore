@@ -7,3 +7,6 @@ tests/test_*
 .DS_Store
 .clangd
 compile_commands.json
+build/
+*.profraw
+*.profdata

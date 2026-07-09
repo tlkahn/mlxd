@@ -11,6 +11,7 @@ make debug        # -g -O0 -fsanitize=address,undefined
 make tsan         # -g -O1 -fsanitize=thread (data race detection)
 make test         # all CPU-only tests
 make analyze      # Clang Static Analyzer via scan-build
+make coverage     # clang source-based coverage -> build/cov/html/index.html
 make clean
 make install      # -> /usr/local/bin/mlxd
 ```
