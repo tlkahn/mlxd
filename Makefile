@@ -125,7 +125,7 @@ release: mlxd
 SCAN_BUILD ?= $(shell command -v scan-build 2>/dev/null || echo $(BREW_PREFIX)/opt/llvm/bin/scan-build)
 
 analyze:
-	$(SCAN_BUILD) --use-cc=$(CC) --status-bugs $(MAKE) clean mlxd
+	$(SCAN_BUILD) --use-cc=$(CC) --status-bugs --exclude vendor $(MAKE) clean mlxd
 
 # --- Coverage (clang source-based) --------------------------------------------
 
