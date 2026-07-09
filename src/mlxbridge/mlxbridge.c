@@ -28,9 +28,12 @@ int mlxbridge_get_shape(mlx_array arr, int *dims, int max_dims) {
 }
 
 void mlxbridge_print_array(const char *label, mlx_array arr) {
-    mlx_array_eval(arr);
+    if (!MLXB_CHECK(mlx_array_eval(arr))) return;
     mlx_string s = mlx_string_new();
-    mlx_array_tostring(&s, arr);
+    if (!MLXB_CHECK(mlx_array_tostring(&s, arr))) {
+        mlx_string_free(s);
+        return;
+    }
     log_debug("%s: %s", label, mlx_string_data(s));
     mlx_string_free(s);
 }

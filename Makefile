@@ -98,7 +98,7 @@ test-gpu: $(TEST_GPU_BINS)
 # --- Housekeeping -------------------------------------------------------------
 
 clean:
-	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) tests/test_*.d
+	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d
 
 install: mlxd
 	install -d $(PREFIX)/bin

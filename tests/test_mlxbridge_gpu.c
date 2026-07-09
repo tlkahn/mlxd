@@ -434,7 +434,8 @@ static void test_safetensors_io(void) {
     assert(MLXB_CHECK(mlx_map_string_to_array_insert(params, "w", arr)));
     mlx_map_string_to_string meta = mlx_map_string_to_string_new();
 
-    const char *path = "/tmp/mlxbridge_test.safetensors";
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/mlxbridge_test_%d.safetensors", getpid());
     assert(MLXB_CHECK(mlx_save_safetensors(path, params, meta)));
 
     mlx_map_string_to_array loaded_params = mlx_map_string_to_array_new();
