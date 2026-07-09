@@ -702,7 +702,9 @@ static void base64_encode(const uint8_t *in, size_t n, char *out) {
 static void add_embedding_base64(yyjson_mut_doc *doc, yyjson_mut_val *obj,
                                  const embedding_data_t *d) {
     size_t nbytes = (size_t)d->value_count * 4;
-    uint8_t *bytes = malloc(nbytes ? nbytes : 1);
+    uint8_t *bytes = calloc(nbytes ? nbytes : 1, 1);
+    if (!bytes)
+        return;
     for (int j = 0; j < d->value_count; j++) {
         uint32_t bits;
         memcpy(&bits, &d->values[j], 4);
@@ -712,6 +714,10 @@ static void add_embedding_base64(yyjson_mut_doc *doc, yyjson_mut_val *obj,
         bytes[j * 4 + 3] = (uint8_t)((bits >> 24) & 0xFF);
     }
     char *b64 = malloc(((nbytes + 2) / 3) * 4 + 1);
+    if (!b64) {
+        free(bytes);
+        return;
+    }
     base64_encode(bytes, nbytes, b64);
     yyjson_mut_obj_add_strcpy(doc, obj, "embedding", b64);
     free(bytes);

@@ -89,7 +89,7 @@ install: mlxd
 	install -d $(PREFIX)/bin
 	install -m 755 mlxd $(PREFIX)/bin/mlxd
 
-.PHONY: test clean install
+.PHONY: test clean install analyze
 
 # --- Debug/Release shortcuts --------------------------------------------------
 
@@ -97,5 +97,14 @@ debug: CFLAGS += -g -O0 -DDEBUG -fsanitize=address,undefined
 debug: LDFLAGS += -fsanitize=address,undefined
 debug: mlxd
 
+tsan: CFLAGS += -g -O1 -DDEBUG -fsanitize=thread
+tsan: LDFLAGS += -fsanitize=thread
+tsan: mlxd
+
 release: CFLAGS += -O2 -DNDEBUG
 release: mlxd
+
+SCAN_BUILD ?= $(shell command -v scan-build 2>/dev/null || echo $(BREW_PREFIX)/opt/llvm/bin/scan-build)
+
+analyze:
+	$(SCAN_BUILD) --use-cc=$(CC) --status-bugs $(MAKE) clean mlxd

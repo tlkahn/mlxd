@@ -8,7 +8,9 @@ Modular C11 rewrite of the mlx-serve text-generation core. Unix-philosophy modul
 make              # debug-friendly build (no optimization)
 make release      # -O2 -DNDEBUG
 make debug        # -g -O0 -fsanitize=address,undefined
+make tsan         # -g -O1 -fsanitize=thread (data race detection)
 make test         # all CPU-only tests
+make analyze      # Clang Static Analyzer via scan-build
 make clean
 make install      # -> /usr/local/bin/mlxd
 ```
