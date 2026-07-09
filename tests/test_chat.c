@@ -153,6 +153,21 @@ static void test_render_extra_json(void) {
 
 /* --- NUL-byte rejection -------------------------------------------------- */
 
+static void test_nul_at_position_zero(void) {
+    const char tmpl[] = "\0real_template";
+    chat_render_params_t p = {
+        .tmpl = tmpl,
+        .messages_json = "[]",
+        .tmpl_len = sizeof(tmpl) - 1,
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r == NULL);
+    assert(diag.error != NULL);
+    assert(strstr(diag.error, "NUL") != NULL);
+    chat_diagnostics_free(&diag);
+}
+
 static void test_nul_in_template(void) {
     const char tmpl[] = "hi\0there";
     chat_render_params_t p = {
@@ -164,6 +179,7 @@ static void test_nul_in_template(void) {
     char *r = chat_render(&p, &diag);
     assert(r == NULL);
     assert(diag.error != NULL);
+    assert(strstr(diag.error, "NUL") != NULL);
     chat_diagnostics_free(&diag);
 }
 
@@ -178,6 +194,7 @@ static void test_nul_in_messages(void) {
     char *r = chat_render(&p, &diag);
     assert(r == NULL);
     assert(diag.error != NULL);
+    assert(strstr(diag.error, "NUL") != NULL);
     chat_diagnostics_free(&diag);
 }
 
@@ -193,6 +210,7 @@ static void test_nul_in_tools(void) {
     char *r = chat_render(&p, &diag);
     assert(r == NULL);
     assert(diag.error != NULL);
+    assert(strstr(diag.error, "NUL") != NULL);
     chat_diagnostics_free(&diag);
 }
 
@@ -208,6 +226,39 @@ static void test_nul_in_extra(void) {
     char *r = chat_render(&p, &diag);
     assert(r == NULL);
     assert(diag.error != NULL);
+    assert(strstr(diag.error, "NUL") != NULL);
+    chat_diagnostics_free(&diag);
+}
+
+/* --- Clean string with explicit strlen len (no false positive) ----------- */
+
+static void test_sizeof_minus_one_is_clean(void) {
+    chat_render_params_t p = {
+        .tmpl = CHATML,
+        .messages_json = MESSAGES,
+        .tmpl_len = strlen(CHATML),
+        .messages_json_len = strlen(MESSAGES),
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r != NULL);
+    assert(diag.error == NULL);
+    free(r);
+    chat_diagnostics_free(&diag);
+}
+
+/* --- NUL check with default (zero) _len fields --------------------------- */
+
+static void test_nul_check_default_len_smoke(void) {
+    chat_render_params_t p = {
+        .tmpl = CHATML,
+        .messages_json = MESSAGES,
+    };
+    chat_diagnostics_t diag = {0};
+    char *r = chat_render(&p, &diag);
+    assert(r != NULL);
+    assert(diag.error == NULL);
+    free(r);
     chat_diagnostics_free(&diag);
 }
 
@@ -236,10 +287,13 @@ int main(void) {
     test_render_no_generation_prompt();
     test_render_tools_json();
     test_render_extra_json();
+    test_nul_at_position_zero();
     test_nul_in_template();
     test_nul_in_messages();
     test_nul_in_tools();
     test_nul_in_extra();
+    test_sizeof_minus_one_is_clean();
+    test_nul_check_default_len_smoke();
     test_diagnostics_free_null();
     test_diagnostics_free_idempotent();
     test_render_invalid_template();
