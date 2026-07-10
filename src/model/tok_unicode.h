@@ -27,7 +27,8 @@ bool uc_is_whitespace_cp(uint32_t cp);
 #define UC_BYTES_UNICODE_REV_SIZE 324
 
 typedef struct {
-    uint32_t byte_to_cp[256];
+    /* Max mapped codepoint is 323, so uint16_t suffices. */
+    uint16_t byte_to_cp[256];
     /* UINT16_MAX = no byte maps to this codepoint. */
     uint16_t cp_to_byte[UC_BYTES_UNICODE_REV_SIZE];
 } uc_bytes_unicode_t;

@@ -58,9 +58,10 @@ uc_cp_info uc_decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos) 
         cp = (cp << 6) | (text[pos + i] & 0x3F);
     }
 
-    /* Reject overlong, surrogates, and cp > U+10FFFF. */
-    static const uint32_t min_cp[] = {0, 0, 0x80, 0x800, 0x10000};
-    if (cp < min_cp[byte_len] || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
+    /* Reject overlong, surrogates, and cp > U+10FFFF.
+       byte_len is 2-4 here (ASCII returned above), hence the -2 index. */
+    static const uint32_t min_cp[] = {0x80, 0x800, 0x10000};
+    if (cp < min_cp[byte_len - 2] || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
         return (uc_cp_info){0xFFFD, 1};
 
     return (uc_cp_info){cp, byte_len};
@@ -122,9 +123,9 @@ void uc_build_bytes_to_unicode(uc_bytes_unicode_t *t) {
         if ((b >= '!' && b <= '~') ||
             (b >= 0xA1 && b <= 0xAC) ||
             (b >= 0xAE && b <= 0xFF)) {
-            t->byte_to_cp[b] = b;
+            t->byte_to_cp[b] = (uint16_t)b;
         } else {
-            t->byte_to_cp[b] = n;
+            t->byte_to_cp[b] = (uint16_t)n;
             n++;
         }
         assert(t->byte_to_cp[b] < UC_BYTES_UNICODE_REV_SIZE);
