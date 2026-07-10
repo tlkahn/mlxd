@@ -40,21 +40,21 @@ static void test_decode_4byte(void) {
 static void test_decode_invalid_lead(void) {
     const uint8_t text[] = "\xFF";
     cp_info r = decode_codepoint(text, 1, 0);
-    assert(r.cp == 0xFF);
+    assert(r.cp == 0xFFFD);
     assert(r.len == 1);
 }
 
 static void test_decode_truncated(void) {
     const uint8_t text[] = "\xC3";
     cp_info r = decode_codepoint(text, 1, 0);
-    assert(r.cp == 0xC3);
+    assert(r.cp == 0xFFFD);
     assert(r.len == 1);
 }
 
 static void test_decode_invalid_continuation(void) {
     const uint8_t text[] = "\xC3\x00";
     cp_info r = decode_codepoint(text, 2, 0);
-    assert(r.cp == 0xC3);
+    assert(r.cp == 0xFFFD);
     assert(r.len == 1);
 }
 
@@ -62,41 +62,52 @@ static void test_decode_overlong(void) {
     /* 2-byte overlong for U+0000 */
     const uint8_t ol2[] = "\xC0\x80";
     cp_info r = decode_codepoint(ol2, 2, 0);
-    assert(r.cp == 0xC0 && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
 
     /* 3-byte overlong for U+0000 */
     const uint8_t ol3[] = "\xE0\x80\x80";
     r = decode_codepoint(ol3, 3, 0);
-    assert(r.cp == 0xE0 && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
 
     /* 4-byte overlong for U+0000 */
     const uint8_t ol4[] = "\xF0\x80\x80\x80";
     r = decode_codepoint(ol4, 4, 0);
-    assert(r.cp == 0xF0 && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
 }
 
 static void test_decode_surrogate(void) {
     /* U+D800 (low surrogate start) */
     const uint8_t lo[] = "\xED\xA0\x80";
     cp_info r = decode_codepoint(lo, 3, 0);
-    assert(r.cp == 0xED && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
 
     /* U+DFFF (high surrogate end) */
     const uint8_t hi[] = "\xED\xBF\xBF";
     r = decode_codepoint(hi, 3, 0);
-    assert(r.cp == 0xED && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
 }
 
 static void test_decode_out_of_range(void) {
     /* U+110000 - one past the max valid codepoint */
     const uint8_t a[] = "\xF4\x90\x80\x80";
     cp_info r = decode_codepoint(a, 4, 0);
-    assert(r.cp == 0xF4 && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
 
     /* U+1FFFFF - max encodable by 4-byte form */
     const uint8_t b[] = "\xF7\xBF\xBF\xBF";
     r = decode_codepoint(b, 4, 0);
-    assert(r.cp == 0xF7 && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
+}
+
+static void test_decode_error_not_letter(void) {
+    /* Regression: a truncated 0xC0 lead must not surface as U+00C0 (A-grave),
+       which is a letter; error cps must never classify as letters. */
+    const uint8_t text[] = "\xC0\x20";
+    cp_info r = decode_codepoint(text, 2, 0);
+    assert(r.cp == 0xFFFD && r.len == 1);
+    assert(!is_letter(r.cp));
+    assert(!is_digit(r.cp));
+    assert(!is_whitespace_cp(r.cp));
 }
 
 static void test_decode_boundaries(void) {
@@ -151,7 +162,7 @@ static void test_decode_pos_overflow(void) {
     map[pos + 1] = 0x90;
 
     cp_info r = decode_codepoint(map, UINT32_MAX, pos);
-    assert(r.cp == 0xF0 && r.len == 1);
+    assert(r.cp == 0xFFFD && r.len == 1);
 
     munmap(map, sz);
 }
@@ -317,6 +328,7 @@ int main(void) {
     test_decode_overlong();
     test_decode_surrogate();
     test_decode_out_of_range();
+    test_decode_error_not_letter();
     test_decode_boundaries();
     test_decode_past_end();
     test_decode_pos_overflow();

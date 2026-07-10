@@ -18,6 +18,8 @@ static bool in_ranges(uint32_t cp, const uc_range *r, size_t n) {
     return false;
 }
 
+/* Invalid UTF-8 decodes as {U+FFFD, 1} so error bytes never classify as
+   letters/numbers/whitespace; callers needing the raw byte read text[pos]. */
 cp_info decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos) {
     if (pos >= len)
         return (cp_info){0, 0};
@@ -38,23 +40,23 @@ cp_info decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos) {
         byte_len = 4;
         cp = lead & 0x07;
     } else {
-        return (cp_info){lead, 1};
+        return (cp_info){0xFFFD, 1};
     }
 
     uint32_t avail = len - pos;
     if (byte_len > avail)
-        return (cp_info){lead, 1};
+        return (cp_info){0xFFFD, 1};
 
     for (uint32_t i = 1; i < byte_len; i++) {
         if ((text[pos + i] & 0xC0) != 0x80)
-            return (cp_info){lead, 1};
+            return (cp_info){0xFFFD, 1};
         cp = (cp << 6) | (text[pos + i] & 0x3F);
     }
 
-    /* Reject overlong, surrogates, and cp > U+10FFFF (matches std.unicode.utf8Decode). */
+    /* Reject overlong, surrogates, and cp > U+10FFFF. */
     static const uint32_t min_cp[] = {0, 0, 0x80, 0x800, 0x10000};
     if (cp < min_cp[byte_len] || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
-        return (cp_info){lead, 1};
+        return (cp_info){0xFFFD, 1};
 
     return (cp_info){cp, byte_len};
 }
