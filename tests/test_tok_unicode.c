@@ -1,11 +1,12 @@
+/* -D_POSIX_C_SOURCE hides MAP_ANON on Darwin; re-expose the OS extensions
+   instead of hardcoding the platform-specific flag value. */
+#define _DARWIN_C_SOURCE
+
 #include "model/tok_unicode.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <sys/mman.h>
-#ifndef MAP_ANON
-#define MAP_ANON 0x1000
-#endif
 
 /* --- uc_decode_codepoint ---------------------------------------------------- */
 
@@ -76,14 +77,14 @@ static void test_decode_overlong(void) {
 }
 
 static void test_decode_surrogate(void) {
-    /* U+D800 (low surrogate start) */
-    const uint8_t lo[] = "\xED\xA0\x80";
-    uc_cp_info r = uc_decode_codepoint(lo, 3, 0);
+    /* U+D800 (high surrogate range start, D800-DBFF) */
+    const uint8_t hs[] = "\xED\xA0\x80";
+    uc_cp_info r = uc_decode_codepoint(hs, 3, 0);
     assert(r.cp == 0xFFFD && r.len == 1);
 
-    /* U+DFFF (high surrogate end) */
-    const uint8_t hi[] = "\xED\xBF\xBF";
-    r = uc_decode_codepoint(hi, 3, 0);
+    /* U+DFFF (low/trail surrogate range end, DC00-DFFF) */
+    const uint8_t ls[] = "\xED\xBF\xBF";
+    r = uc_decode_codepoint(ls, 3, 0);
     assert(r.cp == 0xFFFD && r.len == 1);
 }
 
