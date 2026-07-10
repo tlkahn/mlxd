@@ -177,6 +177,18 @@ static void test_is_letter(void) {
     assert(!is_letter(0x00F7));
     assert(!is_letter('0'));
     assert(!is_letter(' '));
+
+    /* Exact \p{L}: non-letters inside old coarse blocks must be rejected */
+    assert(!is_letter(0x09E6));  /* BENGALI DIGIT ZERO (Nd) */
+    assert(!is_letter(0x0964));  /* DEVANAGARI DANDA (Po) */
+    assert(!is_letter(0x093E));  /* DEVANAGARI VOWEL SIGN AA (Mc) */
+
+    /* Exact \p{L}: letters outside old coarse blocks must be accepted */
+    assert(is_letter(0x0250));   /* LATIN SMALL LETTER TURNED A (Ll, IPA) */
+    assert(is_letter(0x02B0));   /* MODIFIER LETTER SMALL H (Lm) */
+    assert(is_letter(0x10400));  /* DESERET CAPITAL LETTER LONG I (Lu, astral) */
+
+    assert(!is_letter(0x1F600)); /* emoji (So) */
 }
 
 /* --- is_mark ------------------------------------------------------------- */
@@ -185,6 +197,15 @@ static void test_is_mark(void) {
     assert(is_mark(0x0300));
     assert(is_mark(0x0489));
     assert(!is_mark('A'));
+
+    /* Exact \p{M}: Devanagari non-marks inside the old block claim */
+    assert(!is_mark(0x0915));    /* DEVANAGARI LETTER KA (Lo) */
+    assert(!is_mark(0x0966));    /* DEVANAGARI DIGIT ZERO (Nd) */
+    assert(!is_mark(0x0964));    /* DEVANAGARI DANDA (Po) */
+
+    /* Exact \p{M}: real Devanagari marks stay in */
+    assert(is_mark(0x0901));     /* SIGN CANDRABINDU (Mn) */
+    assert(is_mark(0x093E));     /* VOWEL SIGN AA (Mc) */
 }
 
 /* --- is_digit ------------------------------------------------------------ */
@@ -193,7 +214,15 @@ static void test_is_digit(void) {
     assert(is_digit('0'));
     assert(is_digit('9'));
     assert(!is_digit('a'));
-    assert(!is_digit(0x0660));
+
+    /* Exact \p{N}: non-ASCII numbers count */
+    assert(is_digit(0x0660));    /* ARABIC-INDIC DIGIT ZERO (Nd) */
+    assert(is_digit(0x09E6));    /* BENGALI DIGIT ZERO (Nd) */
+    assert(is_digit(0x0966));    /* DEVANAGARI DIGIT ZERO (Nd) */
+    assert(is_digit(0x2160));    /* ROMAN NUMERAL ONE (Nl) */
+    assert(is_digit(0x00BD));    /* VULGAR FRACTION ONE HALF (No) */
+
+    assert(!is_digit(0x0965));   /* DEVANAGARI DOUBLE DANDA (Po) */
 }
 
 /* --- is_letter_or_mark --------------------------------------------------- */
@@ -202,6 +231,12 @@ static void test_is_letter_or_mark(void) {
     assert(is_letter_or_mark('A'));
     assert(is_letter_or_mark(0x0300));
     assert(!is_letter_or_mark('0'));
+
+    /* Exact L|M union: letters and marks in, digits and punctuation out */
+    assert(is_letter_or_mark(0x0915));   /* DEVANAGARI LETTER KA (Lo) */
+    assert(is_letter_or_mark(0x093E));   /* DEVANAGARI VOWEL SIGN AA (Mc) */
+    assert(!is_letter_or_mark(0x0964));  /* DEVANAGARI DANDA (Po) */
+    assert(!is_letter_or_mark(0x09E6));  /* BENGALI DIGIT ZERO (Nd) */
 }
 
 /* --- is_whitespace (byte) ------------------------------------------------ */

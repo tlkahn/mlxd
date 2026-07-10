@@ -1,6 +1,22 @@
 #include "model/tok_unicode.h"
+#include "model/tok_unicode_tables.h"
 
+#include <stddef.h>
 #include <string.h>
+
+static bool in_ranges(uint32_t cp, const uc_range *r, size_t n) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (cp < r[mid].lo)
+            hi = mid;
+        else if (cp > r[mid].hi)
+            lo = mid + 1;
+        else
+            return true;
+    }
+    return false;
+}
 
 cp_info decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos) {
     if (pos >= len)
@@ -43,57 +59,29 @@ cp_info decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos) {
     return (cp_info){cp, byte_len};
 }
 
-/* Approximate \p{L} by major script blocks; extend on false negatives.
-   U+00D7 (multiplication sign) and U+00F7 (division sign) are Sm, not letters.
-   One line per script keeps parity with the Zig reference (DO NOT merge ranges). */
+/* Exact \p{L} via generated UCD range table (see tok_unicode_tables.h). */
 bool is_letter(uint32_t cp) {
-    if (cp >= 'A' && cp <= 'Z') return true;                     /* Basic Latin */
-    if (cp >= 'a' && cp <= 'z') return true;                     /* Basic Latin */
-    if (cp >= 0xC0 && cp <= 0x024F) return cp != 0x00D7 && cp != 0x00F7; /* Latin Ext A/B */
-    if (cp >= 0x0370 && cp <= 0x03FF) return true;               /* Greek */
-    if (cp >= 0x0400 && cp <= 0x04FF) return true;               /* Cyrillic */
-    if (cp >= 0x0530 && cp <= 0x058F) return true;               /* Armenian */
-    if (cp >= 0x0590 && cp <= 0x05FF) return true;               /* Hebrew */
-    if (cp >= 0x0600 && cp <= 0x06FF) return true;               /* Arabic */
-    if (cp >= 0x0780 && cp <= 0x07BF) return true;               /* Thaana */
-    if (cp >= 0x0900 && cp <= 0x097F) return true;               /* Devanagari */
-    if (cp >= 0x0980 && cp <= 0x0DFF) return true;               /* Bengali..Sinhala (coarse; sweeps in Indic digits/marks by design) */
-    if (cp >= 0x0E00 && cp <= 0x0E7F) return true;               /* Thai */
-    if (cp >= 0x0E80 && cp <= 0x0EFF) return true;               /* Lao */
-    if (cp >= 0x10A0 && cp <= 0x10FF) return true;               /* Georgian */
-    if (cp >= 0x1100 && cp <= 0x11FF) return true;               /* Hangul Jamo */
-    if (cp >= 0x1E00 && cp <= 0x1EFF) return true;               /* Latin Extended Additional (Vietnamese) */
-    if (cp >= 0x3040 && cp <= 0x30FF) return true;               /* Hiragana + Katakana */
-    if (cp >= 0x3400 && cp <= 0x4DBF) return true;               /* CJK Ext A */
-    if (cp >= 0x4E00 && cp <= 0x9FFF) return true;               /* CJK Unified */
-    if (cp >= 0xAC00 && cp <= 0xD7AF) return true;               /* Korean Syllables */
-    return false;
+    if (cp < 0x80)
+        return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z');
+    return in_ranges(cp, uc_letter_ranges, UC_LETTER_RANGES_COUNT);
 }
 
-/* Approximate \p{M} - combining marks. Not exhaustive; expand on false negatives.
-   Overlap with is_letter is harmless for the tokenizer's regex approximation. */
+/* Exact \p{M} via generated UCD range table (see tok_unicode_tables.h). */
 bool is_mark(uint32_t cp) {
-    if (cp >= 0x0300 && cp <= 0x036F) return true;               /* Combining Diacriticals */
-    if (cp >= 0x0483 && cp <= 0x0489) return true;               /* Cyrillic combining */
-    if (cp >= 0x0591 && cp <= 0x05BD) return true;               /* Hebrew combining */
-    if (cp >= 0x064B && cp <= 0x065F) return true;               /* Arabic combining */
-    if (cp == 0x0670) return true;                               /* Arabic superscript Alef */
-    if (cp >= 0x06D6 && cp <= 0x06DC) return true;               /* Arabic small high ligature */
-    if (cp >= 0x0900 && cp <= 0x097F) return true;               /* Devanagari (overlap with letters; harmless) */
-    if (cp >= 0x1AB0 && cp <= 0x1AFF) return true;               /* Combining Diacriticals Extended */
-    if (cp >= 0x1DC0 && cp <= 0x1DFF) return true;               /* Combining Diacriticals Supplement */
-    if (cp >= 0x20D0 && cp <= 0x20FF) return true;               /* Combining Diacriticals for Symbols */
-    if (cp >= 0xFE20 && cp <= 0xFE2F) return true;               /* Combining Half Marks */
-    return false;
+    if (cp < 0x80)
+        return false;
+    return in_ranges(cp, uc_mark_ranges, UC_MARK_RANGES_COUNT);
 }
 
 bool is_letter_or_mark(uint32_t cp) {
     return is_letter(cp) || is_mark(cp);
 }
 
-/* ASCII-only \p{N} - deliberate simplification matching the Zig reference. */
+/* Exact \p{N} via generated UCD range table (see tok_unicode_tables.h). */
 bool is_digit(uint32_t cp) {
-    return cp >= '0' && cp <= '9';
+    if (cp < 0x80)
+        return cp >= '0' && cp <= '9';
+    return in_ranges(cp, uc_number_ranges, UC_NUMBER_RANGES_COUNT);
 }
 
 bool is_whitespace(uint8_t c) {

@@ -11,6 +11,8 @@ typedef struct {
 
 cp_info decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos);
 
+/* Exact Unicode \p{L}, \p{M}, \p{N} classifiers, backed by range tables
+   generated from the UCD (tok_unicode_tables.h, `make unicode-tables`). */
 bool is_letter(uint32_t cp);
 bool is_mark(uint32_t cp);
 bool is_letter_or_mark(uint32_t cp);
