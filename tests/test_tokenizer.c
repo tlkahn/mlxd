@@ -1,5 +1,6 @@
 #include "model/tok_bpe.h"
 #include "model/tok_map.h"
+#include "model/tok_unicode.h"
 #include "model/tokenizer.h"
 
 #include <assert.h>
@@ -359,6 +360,79 @@ static void test_bpe_version_restale(void) {
     tokenizer_free(tok);
 }
 
+/* Byte-level BPE with printable ASCII: both symbols are direct vocab hits, so
+ * this never enters the fallback (GPT-2 byte-to-unicode maps printables to
+ * themselves) - characterization of the direct-hit path under ByteLevel. */
+static void test_bpe_bytelevel_az(void) {
+    const char *json =
+        "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"vocab\":{\"a\":1,\"z\":99},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 2);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "az", 2, &out);
+    assert(count == 2);
+    assert(out[0] == 1);
+    assert(out[1] == 99);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
+/* Encode a codepoint <= 0x7FF as UTF-8 (enough for the byte table's max 323). */
+static int test_utf8_encode(uint32_t cp, char *buf) {
+    if (cp < 0x80) {
+        buf[0] = (char)cp;
+        return 1;
+    }
+    assert(cp < 0x800);
+    buf[0] = (char)(0xC0 | (cp >> 6));
+    buf[1] = (char)(0x80 | (cp & 0x3F));
+    return 2;
+}
+
+/* Byte-level fallback: input "\xC3\xA9" is ONE UTF-8 char ("é"), so it forms
+ * a single symbol that misses the vocab. The fallback must emit one token per
+ * RAW byte, keyed by the UTF-8 form of that byte's GPT-2 unicode mapping -
+ * which differs from the raw byte string for any byte >= 0x80. */
+static void test_bpe_bytelevel_fallback(void) {
+    uc_bytes_unicode_t table;
+    uc_build_bytes_to_unicode(&table);
+
+    char key_c3[5] = {0};
+    char key_a9[5] = {0};
+    test_utf8_encode(table.byte_to_cp[0xC3], key_c3);
+    test_utf8_encode(table.byte_to_cp[0xA9], key_a9);
+
+    char json[256];
+    int  n = snprintf(json, sizeof(json),
+                      "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+                      "\"model\":{\"vocab\":{\"%s\":50,\"%s\":51},\"merges\":[]}}",
+                      key_c3, key_a9);
+    assert(n > 0 && (size_t)n < sizeof(json));
+
+    tokenizer_t *tok = tokenizer_load_json(json, (size_t)n);
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 2);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "\xC3\xA9", 2, &out);
+    assert(count == 2);
+    assert(out[0] == 50);
+    assert(out[1] == 51);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_str_map_put_get();
     test_str_map_get_missing();
@@ -376,6 +450,8 @@ int main(void) {
     test_bpe_aaaaa();
     test_bpe_hellohello();
     test_bpe_version_restale();
+    test_bpe_bytelevel_az();
+    test_bpe_bytelevel_fallback();
     printf("All tokenizer tests passed.\n");
     return 0;
 }

@@ -59,6 +59,26 @@ static bool parse_merge_pair(yyjson_val *entry, const char **l, uint32_t *llen,
     return false;
 }
 
+/* Check if a pre_tokenizer JSON value contains a ByteLevel type, recursing
+ * into Sequence.pretokenizers. */
+static bool has_byte_level(yyjson_val *pt) {
+    if (!yyjson_is_obj(pt)) return false;
+    yyjson_val *t = yyjson_obj_get(pt, "type");
+    if (!yyjson_is_str(t)) return false;
+    if (strcmp(yyjson_get_str(t), "ByteLevel") == 0) return true;
+    if (strcmp(yyjson_get_str(t), "Sequence") == 0) {
+        yyjson_val *pts = yyjson_obj_get(pt, "pretokenizers");
+        if (yyjson_is_arr(pts)) {
+            size_t      idx, max;
+            yyjson_val *sub;
+            yyjson_arr_foreach(pts, idx, max, sub) {
+                if (has_byte_level(sub)) return true;
+            }
+        }
+    }
+    return false;
+}
+
 tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     yyjson_doc *doc = yyjson_read(json, len, 0);
     if (!doc) return NULL;
@@ -77,9 +97,17 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         return NULL;
     }
     tok->doc    = doc;
-    tok->type   = TOKENIZER_SENTENCEPIECE_BPE;
     tok->bos_id = -1;
     tok->eos_id = -1;
+    uc_build_bytes_to_unicode(&tok->bytes_unicode);
+
+    yyjson_val *model_type = yyjson_obj_get(model, "type");
+    if (yyjson_is_str(model_type) && strcmp(yyjson_get_str(model_type), "WordPiece") == 0)
+        tok->type = TOKENIZER_WORDPIECE;
+    else if (has_byte_level(yyjson_obj_get(root, "pre_tokenizer")))
+        tok->type = TOKENIZER_BPE;
+    else
+        tok->type = TOKENIZER_SENTENCEPIECE_BPE;
 
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
     size_t vocab_count = yyjson_obj_size(vocab_val);
@@ -125,6 +153,18 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 }
 
 /* --- BPE merge (heap + linked list) ---------------------------------------- */
+
+/* Encode a codepoint <= 0x7FF as UTF-8; the GPT-2 byte table's max mapped
+ * codepoint is 323, so two bytes always suffice. */
+static uint32_t utf8_encode_cp(uint32_t cp, char buf[4]) {
+    if (cp < 0x80) {
+        buf[0] = (char)cp;
+        return 1;
+    }
+    buf[0] = (char)(0xC0 | (cp >> 6));
+    buf[1] = (char)(0x80 | (cp & 0x3F));
+    return 2;
+}
 
 void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
 
@@ -249,8 +289,18 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
     for (int32_t cur = n_nodes > 0 ? 0 : -1; cur >= 0; cur = s->nodes[cur].next) {
         const bpe_node *n = &s->nodes[cur];
         uint32_t        id;
-        if (str_u32_map_get(&tok->vocab, input + n->start, n->end - n->start, &id))
+        if (str_u32_map_get(&tok->vocab, input + n->start, n->end - n->start, &id)) {
             s->ids[count++] = (int32_t)id;
+        } else if (tok->type == TOKENIZER_BPE) {
+            /* Byte-level BPE: every mapped byte is a base vocab token in any
+             * well-formed vocab, so a miss is pathological; skip it. */
+            for (uint32_t b = n->start; b < n->end; b++) {
+                char     buf[4];
+                uint32_t blen =
+                    utf8_encode_cp(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
+                if (str_u32_map_get(&tok->vocab, buf, blen, &id)) s->ids[count++] = (int32_t)id;
+            }
+        }
     }
     *out = s->ids;
     return count;
