@@ -453,6 +453,26 @@ static void test_bpe_sp_hexbyte(void) {
     tokenizer_free(tok);
 }
 
+/* SentencePiece without byte entries: unknown bytes fall back to <unk>. */
+static void test_bpe_sp_unk(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"a\":12,\"<unk>\":0},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 2);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "a\n", 2, &out);
+    assert(count == 2);
+    assert(out[0] == 12);
+    assert(out[1] == 0);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_str_map_put_get();
     test_str_map_get_missing();
@@ -473,6 +493,7 @@ int main(void) {
     test_bpe_bytelevel_az();
     test_bpe_bytelevel_fallback();
     test_bpe_sp_hexbyte();
+    test_bpe_sp_unk();
     printf("All tokenizer tests passed.\n");
     return 0;
 }

@@ -240,6 +240,39 @@ static bpe_cand bpe_heap_pop(encode_scratch *s) {
     return top;
 }
 
+/* Emit vocab IDs for one surviving symbol into ids[count...]: a direct vocab
+ * hit, else the tokenizer-type-specific per-byte fallback. Returns the new
+ * count. */
+static int bpe_emit_symbol(const tokenizer_t *tok, const char *input, const bpe_node *n,
+                           int32_t *ids, int count) {
+    uint32_t id;
+    if (str_u32_map_get(&tok->vocab, input + n->start, n->end - n->start, &id)) {
+        ids[count++] = (int32_t)id;
+        return count;
+    }
+    if (tok->type == TOKENIZER_BPE) {
+        /* Byte-level BPE: every mapped byte is a base vocab token in any
+         * well-formed vocab, so a miss is pathological; skip it. */
+        for (uint32_t b = n->start; b < n->end; b++) {
+            char     buf[4];
+            uint32_t blen = utf8_encode_cp(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
+            if (str_u32_map_get(&tok->vocab, buf, blen, &id)) ids[count++] = (int32_t)id;
+        }
+        return count;
+    }
+    /* SentencePiece byte fallback: unknown symbols become <0xNN> byte tokens,
+     * or <unk> for vocabs without byte entries. */
+    for (uint32_t b = n->start; b < n->end; b++) {
+        char buf[8];
+        int  blen = snprintf(buf, sizeof(buf), "<0x%02X>", (uint8_t)input[b]);
+        if (str_u32_map_get(&tok->vocab, buf, (uint32_t)blen, &id))
+            ids[count++] = (int32_t)id;
+        else if (str_u32_map_get(&tok->vocab, "<unk>", 5, &id))
+            ids[count++] = (int32_t)id;
+    }
+    return count;
+}
+
 int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size_t len,
               int32_t **out) {
     /* Split into individual UTF-8 characters. */
@@ -287,31 +320,8 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
 
     /* Map surviving symbols to vocab IDs. */
     int count = 0;
-    for (int32_t cur = n_nodes > 0 ? 0 : -1; cur >= 0; cur = s->nodes[cur].next) {
-        const bpe_node *n = &s->nodes[cur];
-        uint32_t        id;
-        if (str_u32_map_get(&tok->vocab, input + n->start, n->end - n->start, &id)) {
-            s->ids[count++] = (int32_t)id;
-        } else if (tok->type == TOKENIZER_BPE) {
-            /* Byte-level BPE: every mapped byte is a base vocab token in any
-             * well-formed vocab, so a miss is pathological; skip it. */
-            for (uint32_t b = n->start; b < n->end; b++) {
-                char     buf[4];
-                uint32_t blen =
-                    utf8_encode_cp(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
-                if (str_u32_map_get(&tok->vocab, buf, blen, &id)) s->ids[count++] = (int32_t)id;
-            }
-        } else {
-            /* SentencePiece byte fallback: unknown symbols become <0xNN>
-             * byte tokens. */
-            for (uint32_t b = n->start; b < n->end; b++) {
-                char buf[8];
-                int  blen = snprintf(buf, sizeof(buf), "<0x%02X>", (uint8_t)input[b]);
-                if (str_u32_map_get(&tok->vocab, buf, (uint32_t)blen, &id))
-                    s->ids[count++] = (int32_t)id;
-            }
-        }
-    }
+    for (int32_t cur = n_nodes > 0 ? 0 : -1; cur >= 0; cur = s->nodes[cur].next)
+        count = bpe_emit_symbol(tok, input, &s->nodes[cur], s->ids, count);
     *out = s->ids;
     return count;
 }
