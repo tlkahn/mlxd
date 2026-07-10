@@ -6,6 +6,7 @@
 
 #include <yyjson/yyjson.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -299,6 +300,15 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
                 uint32_t blen =
                     utf8_encode_cp(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
                 if (str_u32_map_get(&tok->vocab, buf, blen, &id)) s->ids[count++] = (int32_t)id;
+            }
+        } else {
+            /* SentencePiece byte fallback: unknown symbols become <0xNN>
+             * byte tokens. */
+            for (uint32_t b = n->start; b < n->end; b++) {
+                char buf[8];
+                int  blen = snprintf(buf, sizeof(buf), "<0x%02X>", (uint8_t)input[b]);
+                if (str_u32_map_get(&tok->vocab, buf, (uint32_t)blen, &id))
+                    s->ids[count++] = (int32_t)id;
             }
         }
     }
