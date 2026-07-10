@@ -88,6 +88,31 @@ static void test_decode_surrogate(void) {
     assert(r.cp == 0xFFFD && r.len == 1);
 }
 
+static void test_decode_semantic_reject_per_byte(void) {
+    /* Semantic rejections (surrogates, overlongs) return len=1, so a caller
+       iterating with pos += r.len emits one U+FFFD per byte of the bad
+       sequence (per-byte replacement, matching the Zig reference). */
+    const uint8_t hs[] = "\xED\xA0\x80"; /* U+D800 high surrogate */
+    uint32_t count = 0;
+    for (uint32_t pos = 0; pos < 3;) {
+        uc_cp_info r = uc_decode_codepoint(hs, 3, pos);
+        assert(r.cp == 0xFFFD && r.len == 1);
+        pos += r.len;
+        count++;
+    }
+    assert(count == 3);
+
+    const uint8_t ol3[] = "\xE0\x80\x80"; /* 3-byte overlong for U+0000 */
+    count = 0;
+    for (uint32_t pos = 0; pos < 3;) {
+        uc_cp_info r = uc_decode_codepoint(ol3, 3, pos);
+        assert(r.cp == 0xFFFD && r.len == 1);
+        pos += r.len;
+        count++;
+    }
+    assert(count == 3);
+}
+
 static void test_decode_out_of_range(void) {
     /* U+110000 - one past the max valid codepoint */
     const uint8_t a[] = "\xF4\x90\x80\x80";
@@ -279,6 +304,28 @@ static void test_uc_is_whitespace_cp(void) {
     assert(!uc_is_whitespace_cp('a'));
 }
 
+static void test_uc_is_whitespace_cp_exact(void) {
+    /* uc_is_whitespace_cp covers exactly the 25 codepoints with the Unicode
+       White_Space property (stable since Unicode 4.1). */
+    static const uint32_t ws[] = {
+        0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0,
+        0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+        0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F,
+        0x3000,
+    };
+    size_t n = sizeof(ws) / sizeof(ws[0]);
+    assert(n == 25);
+
+    size_t next = 0;
+    for (uint32_t cp = 0; cp <= 0x10FFFF; cp++) {
+        bool expect = next < n && cp == ws[next];
+        assert(uc_is_whitespace_cp(cp) == expect);
+        if (expect)
+            next++;
+    }
+    assert(next == n);
+}
+
 /* --- uc_build_bytes_to_unicode ---------------------------------------------- */
 
 static void test_bytes_to_unicode_identity(void) {
@@ -329,6 +376,7 @@ int main(void) {
     test_decode_invalid_continuation();
     test_decode_overlong();
     test_decode_surrogate();
+    test_decode_semantic_reject_per_byte();
     test_decode_out_of_range();
     test_decode_error_not_letter();
     test_decode_boundaries();
@@ -340,6 +388,7 @@ int main(void) {
     test_uc_is_letter_or_mark();
     test_uc_is_whitespace();
     test_uc_is_whitespace_cp();
+    test_uc_is_whitespace_cp_exact();
     test_bytes_to_unicode_identity();
     test_bytes_to_unicode_offset();
     test_bytes_to_unicode_roundtrip();

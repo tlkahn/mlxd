@@ -19,7 +19,11 @@ static bool in_ranges(uint32_t cp, const uc_range *r, size_t n) {
 }
 
 /* Invalid UTF-8 decodes as {U+FFFD, 1} so error bytes never classify as
-   letters/numbers/whitespace; callers needing the raw byte read text[pos]. */
+   letters/numbers/whitespace; callers needing the raw byte read text[pos].
+   Semantic rejections (overlong, surrogate, > U+10FFFF) also return len=1
+   even though the continuation bytes were structurally valid, so iterating
+   callers emit one U+FFFD per byte of the bad sequence (per-byte
+   replacement, matching the Zig reference; not W3C maximal-subpart). */
 uc_cp_info uc_decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos) {
     if (pos >= len)
         return (uc_cp_info){0, 0};
@@ -91,7 +95,7 @@ bool uc_is_whitespace(uint8_t c) {
            c == 0x0B || c == 0x0C;
 }
 
-/* Approximate \s beyond Latin-1; extend on false negatives. */
+/* Exact Unicode White_Space property (25 codepoints, stable since Unicode 4.1). */
 bool uc_is_whitespace_cp(uint32_t cp) {
     if (cp <= 0xFF)
         return uc_is_whitespace((uint8_t)cp) || cp == 0x0085 || cp == 0x00A0;
