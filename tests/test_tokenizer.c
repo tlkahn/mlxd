@@ -268,6 +268,49 @@ static void test_bpe_abcd(void) {
     tokenizer_free(tok);
 }
 
+static void test_bpe_aaa(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"a\":1,\"aa\":2},\"merges\":[[\"a\",\"a\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 3);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "aaa", 3, &out);
+    assert(count == 2);
+    assert(out[0] == 2); /* leftmost pair merges first: "aa" */
+    assert(out[1] == 1); /* trailing "a" survives */
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
+/* Five 'a's force >= 3 tied candidates in the heap at once: a heap without a
+ * leftmost tie-break pops (3,4) before (2,3) after the first merge, and the
+ * resulting stale candidates merge through unlinked nodes into "aaa" (a vocab
+ * miss). Leftmost-wins order gives [aa, aa, a]. */
+static void test_bpe_aaaaa(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"a\":1,\"aa\":2},\"merges\":[[\"a\",\"a\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 5);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "aaaaa", 5, &out);
+    assert(count == 3);
+    assert(out[0] == 2);
+    assert(out[1] == 2);
+    assert(out[2] == 1);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_str_map_put_get();
     test_str_map_get_missing();
@@ -281,6 +324,8 @@ int main(void) {
     test_load_json_minimal();
     test_load_json_gpt2_smoke();
     test_bpe_abcd();
+    test_bpe_aaa();
+    test_bpe_aaaaa();
     printf("All tokenizer tests passed.\n");
     return 0;
 }

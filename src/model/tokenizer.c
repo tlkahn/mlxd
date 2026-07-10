@@ -151,6 +151,14 @@ void encode_scratch_free(encode_scratch *s) {
     memset(s, 0, sizeof(*s));
 }
 
+/* Heap order (rank asc, left node index asc): node indices are creation order
+ * = text order and merges never create nodes, so the secondary key reproduces
+ * the naive scan's leftmost-wins tie-break exactly. */
+static bool bpe_cand_less(const bpe_cand *a, const bpe_cand *b) {
+    if (a->rank != b->rank) return a->rank < b->rank;
+    return a->left < b->left;
+}
+
 /* Push (l,r) as a candidate if the pair's current slices have a merge rank. */
 static void bpe_push_cand(const tokenizer_t *tok, encode_scratch *s, const char *input,
                           uint32_t l, uint32_t r) {
@@ -164,8 +172,8 @@ static void bpe_push_cand(const tokenizer_t *tok, encode_scratch *s, const char 
     uint32_t i             = s->heap_len - 1;
     while (i > 0) {
         uint32_t parent = (i - 1) / 2;
-        if (s->heap[parent].rank <= s->heap[i].rank) break;
-        bpe_cand tmp   = s->heap[parent];
+        if (!bpe_cand_less(&s->heap[i], &s->heap[parent])) break;
+        bpe_cand tmp    = s->heap[parent];
         s->heap[parent] = s->heap[i];
         s->heap[i]      = tmp;
         i               = parent;
@@ -180,8 +188,8 @@ static bpe_cand bpe_heap_pop(encode_scratch *s) {
         uint32_t smallest = i;
         uint32_t lc       = 2 * i + 1;
         uint32_t rc       = 2 * i + 2;
-        if (lc < s->heap_len && s->heap[lc].rank < s->heap[smallest].rank) smallest = lc;
-        if (rc < s->heap_len && s->heap[rc].rank < s->heap[smallest].rank) smallest = rc;
+        if (lc < s->heap_len && bpe_cand_less(&s->heap[lc], &s->heap[smallest])) smallest = lc;
+        if (rc < s->heap_len && bpe_cand_less(&s->heap[rc], &s->heap[smallest])) smallest = rc;
         if (smallest == i) break;
         bpe_cand tmp      = s->heap[smallest];
         s->heap[smallest] = s->heap[i];
@@ -217,6 +225,10 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
     while (s->heap_len > 0) {
         bpe_cand  c  = bpe_heap_pop(s);
         bpe_node *ns = s->nodes;
+
+        /* Stale-candidate guard: unlinking never clears the right node's own
+         * links, so check adjacency through the right node's prev pointer. */
+        if (ns[c.right].prev != (int32_t)c.left) continue;
 
         /* Merge right into left: extend range, unlink right. */
         ns[c.left].end  = ns[c.right].end;
