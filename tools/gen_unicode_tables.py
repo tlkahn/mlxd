@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Generate src/model/tok_unicode_tables.h from Python's bundled Unicode
+"""Generate src/model/tok_unicode_tables.{h,c} from Python's bundled Unicode
 Character Database (stdlib unicodedata; no network, no UCD download).
 
 Each table is a sorted list of inclusive {lo, hi} codepoint ranges for a
 Unicode general-category class, consumed by binary search in tok_unicode.c.
+The header carries extern declarations only; the definitions live in the
+generated .c so the data exists once regardless of how many TUs include
+the header.
 
 Regenerate with: make unicode-tables
 """
@@ -39,19 +42,22 @@ def collect_ranges(categories):
     return ranges
 
 
-def emit(out):
+def emit_banner(out, tables):
     out.write("/* GENERATED FILE - DO NOT EDIT.\n")
     out.write(" * Regenerate with `make unicode-tables` "
               "(tools/gen_unicode_tables.py).\n")
     out.write(" * Unicode Character Database version: %s "
               "(Python stdlib unicodedata).\n"
               % unicodedata.unidata_version)
-    for name, cats, label in TABLES:
-        ranges = collect_ranges(cats)
+    for _name, cats, label, ranges in tables:
         n_cps = sum(hi - lo + 1 for lo, hi in ranges)
         out.write(" * %s: %s -> %d ranges, %d codepoints.\n"
                   % (label, "+".join(cats), len(ranges), n_cps))
     out.write(" */\n")
+
+
+def emit_header(out, tables):
+    emit_banner(out, tables)
     out.write("#ifndef MLXD_TOK_UNICODE_TABLES_H\n")
     out.write("#define MLXD_TOK_UNICODE_TABLES_H\n\n")
     out.write("#include <stdint.h>\n\n")
@@ -59,27 +65,41 @@ def emit(out):
     out.write("    uint32_t lo;\n")
     out.write("    uint32_t hi;\n")
     out.write("} uc_range;\n")
-    for name, cats, label in TABLES:
-        ranges = collect_ranges(cats)
+    for name, cats, label, ranges in tables:
         out.write("\n/* %s (%s), inclusive ranges, sorted by lo. */\n"
                   % (label, "+".join(cats)))
         out.write("#define %s_COUNT %d\n" % (name.upper(), len(ranges)))
-        out.write("static const uc_range %s[%s_COUNT] = {\n"
+        out.write("extern const uc_range %s[%s_COUNT];\n"
+                  % (name, name.upper()))
+    out.write("\n#endif\n")
+
+
+def emit_source(out, tables):
+    emit_banner(out, tables)
+    out.write("#include \"model/tok_unicode_tables.h\"\n")
+    for name, cats, label, ranges in tables:
+        out.write("\n/* %s (%s), inclusive ranges, sorted by lo. */\n"
+                  % (label, "+".join(cats)))
+        out.write("const uc_range %s[%s_COUNT] = {\n"
                   % (name, name.upper()))
         for i in range(0, len(ranges), 4):
             row = ", ".join("{0x%04X, 0x%04X}" % r for r in ranges[i:i + 4])
             out.write("    %s,\n" % row)
         out.write("};\n")
-    out.write("\n#endif\n")
 
 
 def main():
+    tables = [(name, cats, label, collect_ranges(cats))
+              for name, cats, label in TABLES]
     here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "..", "src", "model", "tok_unicode_tables.h")
-    with open(path, "w") as f:
-        emit(f)
-    print("wrote %s (Unicode %s)"
-          % (os.path.relpath(path), unicodedata.unidata_version))
+    base = os.path.join(here, "..", "src", "model", "tok_unicode_tables")
+    with open(base + ".h", "w") as f:
+        emit_header(f, tables)
+    with open(base + ".c", "w") as f:
+        emit_source(f, tables)
+    for ext in (".h", ".c"):
+        print("wrote %s (Unicode %s)"
+              % (os.path.relpath(base + ext), unicodedata.unidata_version))
 
 
 if __name__ == "__main__":
