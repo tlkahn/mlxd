@@ -2,6 +2,10 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <sys/mman.h>
+#ifndef MAP_ANON
+#define MAP_ANON 0x1000
+#endif
 
 /* --- decode_codepoint ---------------------------------------------------- */
 
@@ -54,11 +58,102 @@ static void test_decode_invalid_continuation(void) {
     assert(r.len == 1);
 }
 
+static void test_decode_overlong(void) {
+    /* 2-byte overlong for U+0000 */
+    const uint8_t ol2[] = "\xC0\x80";
+    cp_info r = decode_codepoint(ol2, 2, 0);
+    assert(r.cp == 0xC0 && r.len == 1);
+
+    /* 3-byte overlong for U+0000 */
+    const uint8_t ol3[] = "\xE0\x80\x80";
+    r = decode_codepoint(ol3, 3, 0);
+    assert(r.cp == 0xE0 && r.len == 1);
+
+    /* 4-byte overlong for U+0000 */
+    const uint8_t ol4[] = "\xF0\x80\x80\x80";
+    r = decode_codepoint(ol4, 4, 0);
+    assert(r.cp == 0xF0 && r.len == 1);
+}
+
+static void test_decode_surrogate(void) {
+    /* U+D800 (low surrogate start) */
+    const uint8_t lo[] = "\xED\xA0\x80";
+    cp_info r = decode_codepoint(lo, 3, 0);
+    assert(r.cp == 0xED && r.len == 1);
+
+    /* U+DFFF (high surrogate end) */
+    const uint8_t hi[] = "\xED\xBF\xBF";
+    r = decode_codepoint(hi, 3, 0);
+    assert(r.cp == 0xED && r.len == 1);
+}
+
+static void test_decode_out_of_range(void) {
+    /* U+110000 - one past the max valid codepoint */
+    const uint8_t a[] = "\xF4\x90\x80\x80";
+    cp_info r = decode_codepoint(a, 4, 0);
+    assert(r.cp == 0xF4 && r.len == 1);
+
+    /* U+1FFFFF - max encodable by 4-byte form */
+    const uint8_t b[] = "\xF7\xBF\xBF\xBF";
+    r = decode_codepoint(b, 4, 0);
+    assert(r.cp == 0xF7 && r.len == 1);
+}
+
+static void test_decode_boundaries(void) {
+    /* Minimal valid encodings at each byte-length boundary */
+    const uint8_t u0080[] = "\xC2\x80";
+    cp_info r = decode_codepoint(u0080, 2, 0);
+    assert(r.cp == 0x0080 && r.len == 2);
+
+    const uint8_t u0800[] = "\xE0\xA0\x80";
+    r = decode_codepoint(u0800, 3, 0);
+    assert(r.cp == 0x0800 && r.len == 3);
+
+    const uint8_t u10000[] = "\xF0\x90\x80\x80";
+    r = decode_codepoint(u10000, 4, 0);
+    assert(r.cp == 0x10000 && r.len == 4);
+
+    /* Max valid codepoint U+10FFFF */
+    const uint8_t u10ffff[] = "\xF4\x8F\xBF\xBF";
+    r = decode_codepoint(u10ffff, 4, 0);
+    assert(r.cp == 0x10FFFF && r.len == 4);
+
+    /* Surrogate neighbors: U+D7FF and U+E000 must be accepted */
+    const uint8_t ud7ff[] = "\xED\x9F\xBF";
+    r = decode_codepoint(ud7ff, 3, 0);
+    assert(r.cp == 0xD7FF && r.len == 3);
+
+    const uint8_t ue000[] = "\xEE\x80\x80";
+    r = decode_codepoint(ue000, 3, 0);
+    assert(r.cp == 0xE000 && r.len == 3);
+}
+
 static void test_decode_past_end(void) {
     const uint8_t text[] = "A";
     cp_info r = decode_codepoint(text, 1, 1);
     assert(r.cp == 0);
     assert(r.len == 0);
+}
+
+static void test_decode_pos_overflow(void) {
+    size_t sz = (size_t)UINT32_MAX + 1;
+    uint8_t *map = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (map == MAP_FAILED) {
+        printf("  (skipping pos-overflow test: mmap failed)\n");
+        return;
+    }
+    /* Place a 4-byte lead at pos UINT32_MAX - 1 with only 2 bytes available.
+       pos + byte_len = 0xFFFFFFFE + 4 = wraps to 2 in uint32_t,
+       so the old code would not detect truncation. */
+    uint32_t pos = UINT32_MAX - 1;
+    map[pos] = 0xF0;
+    map[pos + 1] = 0x90;
+
+    cp_info r = decode_codepoint(map, UINT32_MAX, pos);
+    assert(r.cp == 0xF0 && r.len == 1);
+
+    munmap(map, sz);
 }
 
 /* --- is_letter ----------------------------------------------------------- */
@@ -73,6 +168,10 @@ static void test_is_letter(void) {
     assert(is_letter(0x10A0));
     assert(is_letter(0x4E00));
     assert(is_letter(0x3042));
+
+    assert(is_letter(0x1E00));
+    assert(is_letter(0x1EA0));
+    assert(is_letter(0x1EFF));
 
     assert(!is_letter(0x00D7));
     assert(!is_letter(0x00F7));
@@ -122,6 +221,8 @@ static void test_is_whitespace(void) {
 
 static void test_is_whitespace_cp(void) {
     assert(is_whitespace_cp(' '));
+    assert(is_whitespace_cp(0x0085));
+    assert(!is_whitespace_cp(0x0086));
     assert(is_whitespace_cp(0x00A0));
     assert(is_whitespace_cp(0x2003));
     assert(is_whitespace_cp(0x2009));
@@ -161,7 +262,13 @@ static void test_bytes_to_unicode_roundtrip(void) {
         uint32_t cp = t.byte_to_cp[b];
         assert(cp < BYTES_UNICODE_REV_SIZE);
         assert(t.cp_to_byte[cp] == (uint8_t)b);
+        assert(t.cp_to_byte_valid[cp]);
     }
+
+    assert(!t.cp_to_byte_valid[0x00]);
+    assert(!t.cp_to_byte_valid[0x20]);
+    assert(!t.cp_to_byte_valid[0x7F]);
+    assert(!t.cp_to_byte_valid[0xAD]);
 }
 
 int main(void) {
@@ -172,7 +279,12 @@ int main(void) {
     test_decode_invalid_lead();
     test_decode_truncated();
     test_decode_invalid_continuation();
+    test_decode_overlong();
+    test_decode_surrogate();
+    test_decode_out_of_range();
+    test_decode_boundaries();
     test_decode_past_end();
+    test_decode_pos_overflow();
     test_is_letter();
     test_is_mark();
     test_is_digit();

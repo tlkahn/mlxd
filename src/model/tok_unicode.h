@@ -18,11 +18,15 @@ bool is_digit(uint32_t cp);
 bool is_whitespace(uint8_t c);
 bool is_whitespace_cp(uint32_t cp);
 
+/* 188 printable bytes map to themselves; the 68 non-printable bytes map to
+   codepoints 256..323, so the reverse table needs 324 entries. */
 #define BYTES_UNICODE_REV_SIZE 324
 
 typedef struct {
     uint32_t byte_to_cp[256];
     uint8_t  cp_to_byte[BYTES_UNICODE_REV_SIZE];
+    /* cp_to_byte[cp] is only meaningful when cp_to_byte_valid[cp] is true. */
+    bool     cp_to_byte_valid[BYTES_UNICODE_REV_SIZE];
 } bytes_unicode_t;
 
 void build_bytes_to_unicode(bytes_unicode_t *t);
