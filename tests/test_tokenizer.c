@@ -1,3 +1,4 @@
+#include "model/tok_bpe.h"
 #include "model/tok_map.h"
 #include "model/tokenizer.h"
 
@@ -245,6 +246,28 @@ static void test_load_json_gpt2_smoke(void) {
     free(buf);
 }
 
+/* --- bpe_merge tests -------------------------------------------------------- */
+
+static void test_bpe_abcd(void) {
+    const char *json =
+        "{\"model\":{\"vocab\":{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"ab\":5,\"cd\":6,\"abcd\":7},"
+        "\"merges\":[[\"c\",\"d\"],[\"a\",\"b\"],[\"ab\",\"cd\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 4);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "abcd", 4, &out);
+    assert(count == 1);
+    assert(out[0] == 7);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_str_map_put_get();
     test_str_map_get_missing();
@@ -257,6 +280,7 @@ int main(void) {
     test_merge_map_miss();
     test_load_json_minimal();
     test_load_json_gpt2_smoke();
+    test_bpe_abcd();
     printf("All tokenizer tests passed.\n");
     return 0;
 }

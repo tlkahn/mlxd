@@ -1,5 +1,6 @@
 #include "model/tokenizer.h"
 
+#include "model/tok_bpe.h"
 #include "model/tok_map.h"
 #include "model/tok_unicode.h"
 
@@ -121,6 +122,121 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     }
 
     return tok;
+}
+
+/* --- BPE merge (heap + linked list) ---------------------------------------- */
+
+void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
+
+void encode_scratch_reserve(encode_scratch *s, size_t input_len) {
+    uint32_t len = input_len ? (uint32_t)input_len : 1;
+    if (s->nodes_cap < len) {
+        s->nodes     = realloc(s->nodes, len * sizeof(*s->nodes));
+        s->nodes_cap = len;
+    }
+    if (s->ids_cap < len) {
+        s->ids     = realloc(s->ids, len * sizeof(*s->ids));
+        s->ids_cap = len;
+    }
+    if (s->heap_cap < 3 * len) {
+        s->heap     = realloc(s->heap, 3 * len * sizeof(*s->heap));
+        s->heap_cap = 3 * len;
+    }
+}
+
+void encode_scratch_free(encode_scratch *s) {
+    free(s->nodes);
+    free(s->heap);
+    free(s->ids);
+    memset(s, 0, sizeof(*s));
+}
+
+/* Push (l,r) as a candidate if the pair's current slices have a merge rank. */
+static void bpe_push_cand(const tokenizer_t *tok, encode_scratch *s, const char *input,
+                          uint32_t l, uint32_t r) {
+    const bpe_node *ln = &s->nodes[l];
+    const bpe_node *rn = &s->nodes[r];
+    uint32_t        rank;
+    if (!merge_map_get(&tok->merges, input + ln->start, ln->end - ln->start, input + rn->start,
+                       rn->end - rn->start, &rank))
+        return;
+    s->heap[s->heap_len++] = (bpe_cand){rank, l, r, ln->ver, rn->ver};
+    uint32_t i             = s->heap_len - 1;
+    while (i > 0) {
+        uint32_t parent = (i - 1) / 2;
+        if (s->heap[parent].rank <= s->heap[i].rank) break;
+        bpe_cand tmp   = s->heap[parent];
+        s->heap[parent] = s->heap[i];
+        s->heap[i]      = tmp;
+        i               = parent;
+    }
+}
+
+static bpe_cand bpe_heap_pop(encode_scratch *s) {
+    bpe_cand top = s->heap[0];
+    s->heap[0]   = s->heap[--s->heap_len];
+    uint32_t i   = 0;
+    for (;;) {
+        uint32_t smallest = i;
+        uint32_t lc       = 2 * i + 1;
+        uint32_t rc       = 2 * i + 2;
+        if (lc < s->heap_len && s->heap[lc].rank < s->heap[smallest].rank) smallest = lc;
+        if (rc < s->heap_len && s->heap[rc].rank < s->heap[smallest].rank) smallest = rc;
+        if (smallest == i) break;
+        bpe_cand tmp      = s->heap[smallest];
+        s->heap[smallest] = s->heap[i];
+        s->heap[i]        = tmp;
+        i                 = smallest;
+    }
+    return top;
+}
+
+int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size_t len,
+              int32_t **out) {
+    /* Split into individual UTF-8 characters. */
+    uint32_t n_nodes = 0;
+    uint32_t pos     = 0;
+    while (pos < len) {
+        uc_cp_info info = uc_decode_codepoint((const uint8_t *)input, (uint32_t)len, pos);
+        uint32_t   end  = pos + info.len;
+        s->nodes[n_nodes] = (bpe_node){
+            .start = pos,
+            .end   = end,
+            .prev  = (int32_t)n_nodes - 1,
+            .next  = end < len ? (int32_t)n_nodes + 1 : -1,
+            .ver   = 0,
+        };
+        n_nodes++;
+        pos = end;
+    }
+
+    /* Seed the heap with every ranked adjacent pair. */
+    s->heap_len = 0;
+    for (uint32_t j = 0; j + 1 < n_nodes; j++) bpe_push_cand(tok, s, input, j, j + 1);
+
+    while (s->heap_len > 0) {
+        bpe_cand  c  = bpe_heap_pop(s);
+        bpe_node *ns = s->nodes;
+
+        /* Merge right into left: extend range, unlink right. */
+        ns[c.left].end  = ns[c.right].end;
+        ns[c.left].next = ns[c.right].next;
+        if (ns[c.right].next >= 0) ns[ns[c.right].next].prev = (int32_t)c.left;
+
+        if (ns[c.left].prev >= 0) bpe_push_cand(tok, s, input, (uint32_t)ns[c.left].prev, c.left);
+        if (ns[c.left].next >= 0) bpe_push_cand(tok, s, input, c.left, (uint32_t)ns[c.left].next);
+    }
+
+    /* Map surviving symbols to vocab IDs. */
+    int count = 0;
+    for (int32_t cur = n_nodes > 0 ? 0 : -1; cur >= 0; cur = s->nodes[cur].next) {
+        const bpe_node *n = &s->nodes[cur];
+        uint32_t        id;
+        if (str_u32_map_get(&tok->vocab, input + n->start, n->end - n->start, &id))
+            s->ids[count++] = (int32_t)id;
+    }
+    *out = s->ids;
+    return count;
 }
 
 void tokenizer_free(tokenizer_t *tok) {
