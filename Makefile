@@ -97,8 +97,8 @@ test-gpu: $(TEST_GPU_BINS)
 
 # --- Housekeeping -------------------------------------------------------------
 
-# Regenerate src/model/tok_unicode_tables.h from Python's bundled UCD.
-# The header is checked in; normal builds never run this.
+# Regenerate src/model/tok_unicode_tables.{h,c} from Python's bundled UCD.
+# Both files are checked in; normal builds never run this.
 unicode-tables:
 	python3 tools/gen_unicode_tables.py
 
