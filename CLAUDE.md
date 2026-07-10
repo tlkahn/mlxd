@@ -67,6 +67,7 @@ Dependency direction: arrows point upward. `core` and `mlxbridge` are leaves. `e
 - mlx-c externs in mlxbridge are hand-written; link-time only. GPU smoke tests validate signatures.
 - Tests are standalone `test_*.c` files in `tests/` with `main()` + `assert()`. Makefile `test` target runs all.
 - Test fixtures in `tests/fixtures/`, path injected via `-DMLXD_FIXTURES_DIR`.
+- `tokenizer_encode` (fixed-buffer, snprintf-style) is for tests and simple tools only; the server path must use `tokenizer_encode_alloc`.
 
 ## Subcommands
 
