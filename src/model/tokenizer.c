@@ -226,12 +226,17 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
         bpe_cand  c  = bpe_heap_pop(s);
         bpe_node *ns = s->nodes;
 
-        /* Stale-candidate guard: unlinking never clears the right node's own
-         * links, so check adjacency through the right node's prev pointer. */
-        if (ns[c.right].prev != (int32_t)c.left) continue;
+        /* Stale-candidate guard: any merge touching a node bumps its version,
+         * so a snapshot mismatch means the candidate references content that
+         * changed since the push - either an unlinked node or one whose slice
+         * grew (e.g. seeded (a,b) after (b,c) merged). */
+        if (ns[c.left].ver != c.lver || ns[c.right].ver != c.rver) continue;
 
-        /* Merge right into left: extend range, unlink right. */
-        ns[c.left].end  = ns[c.right].end;
+        /* Merge right into left: extend range, unlink right, invalidate every
+         * candidate that referenced either node's old content. */
+        ns[c.left].end = ns[c.right].end;
+        ns[c.left].ver++;
+        ns[c.right].ver++;
         ns[c.left].next = ns[c.right].next;
         if (ns[c.right].next >= 0) ns[ns[c.right].next].prev = (int32_t)c.left;
 

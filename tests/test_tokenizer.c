@@ -311,6 +311,54 @@ static void test_bpe_aaaaa(void) {
     tokenizer_free(tok);
 }
 
+/* Cascading merges: he+ll, hell+o build up through intermediate symbols. */
+static void test_bpe_hellohello(void) {
+    const char *json =
+        "{\"model\":{\"vocab\":{\"h\":1,\"e\":2,\"l\":3,\"o\":4,\"he\":5,\"ll\":6,\"hell\":7,"
+        "\"hello\":8},"
+        "\"merges\":[[\"h\",\"e\"],[\"l\",\"l\"],[\"he\",\"ll\"],[\"hell\",\"o\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 10);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "hellohello", 10, &out);
+    assert(count == 2);
+    assert(out[0] == 8);
+    assert(out[1] == 8);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
+/* Re-stale through a live node: after (b,c) merges, node 1 is still linked
+ * and adjacent to node 0, but its content grew from "b" to "bc" - the seeded
+ * (a,b) candidate must be rejected. Only version stamps catch this; the
+ * adjacency guard alone wrongly merges to "abc" = [5]. */
+static void test_bpe_version_restale(void) {
+    const char *json =
+        "{\"model\":{\"vocab\":{\"a\":1,\"b\":2,\"c\":3,\"bc\":4,\"abc\":5},"
+        "\"merges\":[[\"b\",\"c\"],[\"a\",\"b\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    encode_scratch_reserve(&s, 3);
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "abc", 3, &out);
+    assert(count == 2);
+    assert(out[0] == 1); /* "a" */
+    assert(out[1] == 4); /* "bc" */
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_str_map_put_get();
     test_str_map_get_missing();
@@ -326,6 +374,8 @@ int main(void) {
     test_bpe_abcd();
     test_bpe_aaa();
     test_bpe_aaaaa();
+    test_bpe_hellohello();
+    test_bpe_version_restale();
     printf("All tokenizer tests passed.\n");
     return 0;
 }
