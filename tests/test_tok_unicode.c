@@ -307,14 +307,15 @@ static void test_bytes_to_unicode_roundtrip(void) {
     for (uint32_t b = 0; b < 256; b++) {
         uint32_t cp = t.byte_to_cp[b];
         assert(cp < BYTES_UNICODE_REV_SIZE);
-        assert(t.cp_to_byte[cp] == (uint8_t)b);
-        assert(t.cp_to_byte_valid[cp]);
+        assert(t.cp_to_byte[cp] != UINT16_MAX);
+        assert(t.cp_to_byte[cp] == b);
     }
 
-    assert(!t.cp_to_byte_valid[0x00]);
-    assert(!t.cp_to_byte_valid[0x20]);
-    assert(!t.cp_to_byte_valid[0x7F]);
-    assert(!t.cp_to_byte_valid[0xAD]);
+    /* Non-printable byte values have no reverse mapping at their own cp. */
+    assert(t.cp_to_byte[0x00] == UINT16_MAX);
+    assert(t.cp_to_byte[0x20] == UINT16_MAX);
+    assert(t.cp_to_byte[0x7F] == UINT16_MAX);
+    assert(t.cp_to_byte[0xAD] == UINT16_MAX);
 }
 
 int main(void) {

@@ -109,23 +109,19 @@ _Static_assert(BYTES_UNICODE_REV_SIZE == 256 + (256 - 94 - 12 - 82),
                "reverse table must hold 256 + non-printable count");
 
 void build_bytes_to_unicode(bytes_unicode_t *t) {
-    memset(t, 0, sizeof(*t));
+    /* All-ones bytes read back as UINT16_MAX (= unmapped) in cp_to_byte. */
+    memset(t->cp_to_byte, 0xFF, sizeof(t->cp_to_byte));
     uint32_t n = 256;
 
     for (uint32_t b = 0; b < 256; b++) {
-        uint8_t byte = (uint8_t)b;
-        if ((byte >= '!' && byte <= '~') ||
-            (byte >= 0xA1 && byte <= 0xAC) ||
-            (byte >= 0xAE && byte <= 0xFF)) {
+        if ((b >= '!' && b <= '~') ||
+            (b >= 0xA1 && b <= 0xAC) ||
+            (b >= 0xAE && b <= 0xFF)) {
             t->byte_to_cp[b] = b;
         } else {
             t->byte_to_cp[b] = n;
             n++;
         }
-    }
-
-    for (uint32_t b = 0; b < 256; b++) {
-        t->cp_to_byte[t->byte_to_cp[b]] = (uint8_t)b;
-        t->cp_to_byte_valid[t->byte_to_cp[b]] = true;
+        t->cp_to_byte[t->byte_to_cp[b]] = (uint16_t)b;
     }
 }

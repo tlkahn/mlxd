@@ -26,9 +26,8 @@ bool is_whitespace_cp(uint32_t cp);
 
 typedef struct {
     uint32_t byte_to_cp[256];
-    uint8_t  cp_to_byte[BYTES_UNICODE_REV_SIZE];
-    /* cp_to_byte[cp] is only meaningful when cp_to_byte_valid[cp] is true. */
-    bool     cp_to_byte_valid[BYTES_UNICODE_REV_SIZE];
+    /* UINT16_MAX = no byte maps to this codepoint. */
+    uint16_t cp_to_byte[BYTES_UNICODE_REV_SIZE];
 } bytes_unicode_t;
 
 void build_bytes_to_unicode(bytes_unicode_t *t);
