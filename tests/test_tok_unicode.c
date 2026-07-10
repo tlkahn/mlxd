@@ -176,10 +176,9 @@ static void test_decode_pos_overflow(void) {
     size_t sz = (size_t)UINT32_MAX + 1;
     uint8_t *map = mmap(NULL, sz, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (map == MAP_FAILED) {
-        printf("  (skipping pos-overflow test: mmap failed)\n");
-        return;
-    }
+    /* Hard-fail rather than skip: make test redirects stdout/stderr to
+       /dev/null, so a skip message would silently drop this coverage. */
+    assert(map != MAP_FAILED);
     /* Place a 4-byte lead at pos UINT32_MAX - 1 with only 2 bytes available.
        pos + byte_len = 0xFFFFFFFE + 4 = wraps to 2 in uint32_t,
        so the old code would not detect truncation. */
