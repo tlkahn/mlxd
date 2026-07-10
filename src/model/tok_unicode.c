@@ -1,6 +1,7 @@
 #include "model/tok_unicode.h"
 #include "model/tok_unicode_tables.h"
 
+#include <assert.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -126,6 +127,7 @@ void uc_build_bytes_to_unicode(uc_bytes_unicode_t *t) {
             t->byte_to_cp[b] = n;
             n++;
         }
+        assert(t->byte_to_cp[b] < UC_BYTES_UNICODE_REV_SIZE);
         t->cp_to_byte[t->byte_to_cp[b]] = (uint16_t)b;
     }
 }
