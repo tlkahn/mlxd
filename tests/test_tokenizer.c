@@ -1,7 +1,9 @@
 #include "model/tok_map.h"
+#include "model/tokenizer.h"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void test_str_map_put_get(void) {
@@ -210,6 +212,39 @@ static void test_merge_map_miss(void) {
     merge_map_free(&m);
 }
 
+/* --- tokenizer_load_json tests --------------------------------------------- */
+
+static void test_load_json_minimal(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"a\":1,\"b\":2},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    assert(tokenizer_vocab_size(tok) == 2);
+    assert(strcmp(tokenizer_decode_token(tok, 1), "a") == 0);
+    assert(strcmp(tokenizer_decode_token(tok, 2), "b") == 0);
+    assert(tokenizer_decode_token(tok, 999) == NULL);
+    tokenizer_free(tok);
+}
+
+static void test_load_json_gpt2_smoke(void) {
+    const char *path = MLXD_FIXTURES_DIR "/gpt2/tokenizer.json";
+    FILE       *f    = fopen(path, "rb");
+    assert(f != NULL);
+    assert(fseek(f, 0, SEEK_END) == 0);
+    long sz = ftell(f);
+    assert(sz > 0);
+    assert(fseek(f, 0, SEEK_SET) == 0);
+    char *buf = malloc((size_t)sz);
+    assert(buf != NULL);
+    assert(fread(buf, 1, (size_t)sz, f) == (size_t)sz);
+    fclose(f);
+
+    tokenizer_t *tok = tokenizer_load_json(buf, (size_t)sz);
+    assert(tok != NULL);
+    assert(tokenizer_vocab_size(tok) == 50257);
+    tokenizer_free(tok);
+    free(buf);
+}
+
 int main(void) {
     test_str_map_put_get();
     test_str_map_get_missing();
@@ -220,6 +255,8 @@ int main(void) {
     test_merge_hash_split_positions_distinct();
     test_merge_map_put_get();
     test_merge_map_miss();
+    test_load_json_minimal();
+    test_load_json_gpt2_smoke();
     printf("All tokenizer tests passed.\n");
     return 0;
 }

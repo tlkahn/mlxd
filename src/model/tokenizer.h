@@ -16,6 +16,10 @@ typedef enum {
  * Returns NULL on error. Caller must free with tokenizer_free. */
 tokenizer_t *tokenizer_load(const char *path);
 
+/* Load a tokenizer from an in-memory tokenizer.json buffer.
+ * Returns NULL on error. Caller must free with tokenizer_free. */
+tokenizer_t *tokenizer_load_json(const char *json, size_t len);
+
 void tokenizer_free(tokenizer_t *tok);
 
 /* Encode text to token IDs.
