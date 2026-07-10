@@ -107,7 +107,7 @@ bool str_u32_map_get(const str_u32_map *m, const char *key, uint32_t key_len,
 
 static uint64_t merge_hash(const char *l, uint32_t llen, const char *r, uint32_t rlen) {
     uint64_t h = fnv1a_update(FNV_INIT, l, llen);
-    h ^= 0x00;
+    h ^= 0xFF;
     h *= FNV_PRIME;
     return fnv1a_update(h, r, rlen);
 }

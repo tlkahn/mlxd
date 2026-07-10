@@ -97,6 +97,80 @@ static void test_str_map_byte_range_keys(void) {
     str_u32_map_free(&m);
 }
 
+/* --- merge_hash exposing tests -------------------------------------------- */
+
+#define TEST_FNV_INIT  0xcbf29ce484222325ULL
+#define TEST_FNV_PRIME 0x100000001b3ULL
+
+static uint64_t test_fnv1a_update(uint64_t h, const char *data, uint32_t len) {
+    for (uint32_t i = 0; i < len; i++) {
+        h ^= (uint8_t)data[i];
+        h *= TEST_FNV_PRIME;
+    }
+    return h;
+}
+
+static uint64_t test_fnv1a(const char *data, uint32_t len) {
+    return test_fnv1a_update(TEST_FNV_INIT, data, len);
+}
+
+static uint64_t find_merge_hash(const merge_map *m, const char *l, uint32_t llen,
+                                const char *r, uint32_t rlen) {
+    for (uint32_t i = 0; i < m->cap; i++) {
+        const merge_entry *e = &m->entries[i];
+        if (e->l && e->llen == llen && e->rlen == rlen &&
+            memcmp(e->l, l, llen) == 0 && memcmp(e->r, r, rlen) == 0)
+            return e->hash;
+    }
+    assert(0 && "merge entry not found");
+    return 0;
+}
+
+static void test_merge_hash_separator_not_noop(void) {
+    merge_map m;
+    merge_map_init(&m, 16);
+
+    merge_map_put(&m, "ab", 2, "c", 1, 10);
+    uint64_t actual = find_merge_hash(&m, "ab", 2, "c", 1);
+
+    /* What a no-op separator (h ^= 0x00; h *= PRIME) would produce */
+    uint64_t h_noop = test_fnv1a("ab", 2);
+    h_noop *= TEST_FNV_PRIME;
+    h_noop = test_fnv1a_update(h_noop, "c", 1);
+
+    assert(actual != h_noop);
+
+    merge_map_free(&m);
+}
+
+static void test_merge_hash_split_positions_distinct(void) {
+    merge_map m;
+    merge_map_init(&m, 16);
+
+    const char *s = "abcd";
+    merge_map_put(&m, s, 1, s + 1, 3, 0);
+    merge_map_put(&m, s, 2, s + 2, 2, 1);
+    merge_map_put(&m, s, 3, s + 3, 1, 2);
+
+    uint64_t h1 = find_merge_hash(&m, s, 1, s + 1, 3);
+    uint64_t h2 = find_merge_hash(&m, s, 2, s + 2, 2);
+    uint64_t h3 = find_merge_hash(&m, s, 3, s + 3, 1);
+
+    assert(h1 != h2);
+    assert(h1 != h3);
+    assert(h2 != h3);
+
+    /* None should equal plain fnv1a("abcd") - separator must prevent this */
+    uint64_t plain = test_fnv1a("abcd", 4);
+    assert(h1 != plain);
+    assert(h2 != plain);
+    assert(h3 != plain);
+
+    merge_map_free(&m);
+}
+
+/* --- merge_map tests ------------------------------------------------------ */
+
 static void test_merge_map_put_get(void) {
     merge_map m;
     merge_map_init(&m, 16);
@@ -142,6 +216,8 @@ int main(void) {
     test_str_map_put_overwrites();
     test_str_map_growth();
     test_str_map_byte_range_keys();
+    test_merge_hash_separator_not_noop();
+    test_merge_hash_split_positions_distinct();
     test_merge_map_put_get();
     test_merge_map_miss();
     printf("All tokenizer tests passed.\n");
