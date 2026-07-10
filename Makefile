@@ -97,6 +97,11 @@ test-gpu: $(TEST_GPU_BINS)
 
 # --- Housekeeping -------------------------------------------------------------
 
+# Regenerate src/model/tok_unicode_tables.{h,c} from Python's bundled UCD.
+# Both files are checked in; normal builds never run this.
+unicode-tables:
+	python3 tools/gen_unicode_tables.py
+
 clean:
 	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d
 
@@ -107,7 +112,7 @@ install: mlxd
 compile_commands.json: Makefile
 	bear -- $(MAKE) clean mlxd
 
-.PHONY: test test-gpu clean install analyze coverage clean-coverage
+.PHONY: test test-gpu clean install analyze coverage clean-coverage unicode-tables
 
 # --- Debug/Release shortcuts --------------------------------------------------
 
