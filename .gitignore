@@ -11,3 +11,4 @@ build/
 *.profraw
 *.profdata
 .cache/
+tests/fixtures/gemma4/
