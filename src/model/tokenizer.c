@@ -211,7 +211,10 @@ static uint32_t utf8_encode_cp(uint32_t cp, char buf[4]) {
 void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
 
 bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
-    if (input_len > (size_t)INT32_MAX) return false;
+    /* heap_cap = 3 * len is uint32_t arithmetic: refuse any len that would
+     * wrap it. UINT32_MAX / 3 < INT32_MAX, so this also keeps node indices
+     * representable as int32_t. */
+    if (input_len > UINT32_MAX / 3) return false;
     uint32_t len = input_len ? (uint32_t)input_len : 1;
     if (s->nodes_cap < len) {
         bpe_node *nodes = realloc(s->nodes, (size_t)len * sizeof(*s->nodes));

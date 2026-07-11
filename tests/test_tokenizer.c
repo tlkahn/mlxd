@@ -300,6 +300,21 @@ static void test_reserve_rejects_oversized_input(void) {
     encode_scratch_free(&s);
 }
 
+/* heap_cap = 3 * len is computed in uint32_t: any len above UINT32_MAX / 3
+ * would wrap the stored capacity, so reserve must refuse it outright and
+ * leave a fresh scratch untouched. */
+static void test_scratch_reserve_rejects_len_overflowing_heap_cap(void) {
+    encode_scratch s;
+    encode_scratch_init(&s);
+
+    assert(!encode_scratch_reserve(&s, (size_t)UINT32_MAX / 3 + 1));
+    assert(s.nodes_cap == 0);
+    assert(s.ids_cap == 0);
+    assert(s.heap_cap == 0);
+
+    encode_scratch_free(&s);
+}
+
 /* len used to be truncated to uint32_t inside bpe_merge while the loop
  * compared pos < len in size_t: pos stopped advancing and n_nodes overran the
  * scratch. The guard must run before any input byte is read. */
@@ -614,6 +629,7 @@ int main(void) {
     test_load_rejects_non_integer_id();
     test_load_rejects_unigram_model_type();
     test_reserve_rejects_oversized_input();
+    test_scratch_reserve_rejects_len_overflowing_heap_cap();
     test_bpe_merge_rejects_oversized_len();
     test_bpe_merge_rejects_wordpiece();
     test_bpe_abcd();

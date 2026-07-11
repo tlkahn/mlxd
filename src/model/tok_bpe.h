@@ -44,9 +44,8 @@ typedef struct {
 void encode_scratch_init(encode_scratch *s);
 /* Grow buffers for an input of input_len bytes:
  * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len.
- * Returns false (scratch unchanged, still usable at its old capacity) if
- * input_len exceeds INT32_MAX - node indices are int32_t - or if an
- * allocation fails. */
+ * Returns false if input_len exceeds UINT32_MAX / 3 - heap_cap = 3*len is
+ * uint32_t arithmetic - or if an allocation fails. */
 bool encode_scratch_reserve(encode_scratch *s, size_t input_len);
 void encode_scratch_free(encode_scratch *s);
 
