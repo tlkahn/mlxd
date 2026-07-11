@@ -91,6 +91,15 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len);
 int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
                       int32_t **out);
 
+/* WordPiece encode (BERT-style): ASCII-lowercase, split on ASCII whitespace
+ * and punctuation, greedy longest-match per word with "##" continuations;
+ * an unmatchable word emits one unk id. Emits bos/eos around the body when
+ * set (Stage F relocates that wrap to the public entry point). Reserves
+ * scratch internally; *out points into scratch. Returns the id count, or -1
+ * on overflow/allocation failure. */
+int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                     int32_t **out);
+
 /* Byte-level BPE decode: concatenate token strings, then map each codepoint
  * back through the byte-to-unicode table (unmapped codepoints pass through as
  * raw UTF-8). Unknown ids are skipped. Returns a malloc'd NUL-terminated

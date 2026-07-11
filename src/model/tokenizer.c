@@ -20,6 +20,9 @@ struct tokenizer {
     yyjson_doc        *doc; /* owns all borrowed vocab/merge strings */
     str_u32_map        vocab;
     merge_map          merges;
+    /* Membership set (val unused) of added_tokens[].content with
+     * "special": true; keys borrowed from doc. Decode drops members. */
+    str_u32_map        special_tokens;
     const char       **id_to_token;
     uint32_t           id_to_token_cap;
     int                vocab_size;
@@ -123,9 +126,10 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     size_t merge_hint = merge_count ? merge_count * 2 : 16;
     if (vocab_hint > (1u << 30)) vocab_hint = 1u << 30;
     if (merge_hint > (1u << 30)) merge_hint = 1u << 30;
-    bool vocab_ok  = str_u32_map_init(&tok->vocab, (uint32_t)vocab_hint);
-    bool merges_ok = merge_map_init(&tok->merges, (uint32_t)merge_hint);
-    if (!vocab_ok || !merges_ok) {
+    bool vocab_ok    = str_u32_map_init(&tok->vocab, (uint32_t)vocab_hint);
+    bool merges_ok   = merge_map_init(&tok->merges, (uint32_t)merge_hint);
+    bool specials_ok = str_u32_map_init(&tok->special_tokens, 16);
+    if (!vocab_ok || !merges_ok || !specials_ok) {
         tokenizer_free(tok);
         return NULL;
     }
@@ -178,6 +182,30 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 
     uint32_t unk;
     if (str_u32_map_get(&tok->vocab, "<unk>", 5, &unk)) tok->unk_id = (int32_t)unk;
+
+    yyjson_val *added = yyjson_obj_get(root, "added_tokens");
+    if (yyjson_is_arr(added)) {
+        yyjson_val *entry;
+        yyjson_arr_foreach(added, idx, max, entry) {
+            yyjson_val *content = yyjson_obj_get(entry, "content");
+            if (!yyjson_is_str(content)) continue;
+            if (!yyjson_is_true(yyjson_obj_get(entry, "special"))) continue;
+            if (!str_u32_map_put(&tok->special_tokens, yyjson_get_str(content),
+                                 (uint32_t)yyjson_get_len(content), 1)) {
+                tokenizer_free(tok);
+                return NULL;
+            }
+        }
+    }
+
+    /* Stage-E-minimal special-id resolution: WordPiece names its specials
+     * [CLS]/[SEP]/[UNK]. Stage G generalizes this across tokenizer types. */
+    if (tok->type == TOKENIZER_WORDPIECE) {
+        uint32_t id;
+        if (str_u32_map_get(&tok->vocab, "[CLS]", 5, &id)) tok->bos_id = (int32_t)id;
+        if (str_u32_map_get(&tok->vocab, "[SEP]", 5, &id)) tok->eos_id = (int32_t)id;
+        if (str_u32_map_get(&tok->vocab, "[UNK]", 5, &id)) tok->unk_id = (int32_t)id;
+    }
 
     /* Resolve the per-byte fallback ids once, now that the vocab map is
      * built; bpe_emit_symbol then indexes instead of re-hashing per byte.
@@ -654,6 +682,91 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
     return total;
 }
 
+/* BERT punctuation: the four ASCII symbol runs around the alphanumerics. */
+static bool wp_is_punct(uint8_t c) {
+    return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) ||
+           (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E);
+}
+
+/* Greedy longest-match one lowercased word into s->out at *total: probe
+ * word[pos..end] (prefixed "##" via s->cand when pos > 0), shrink end by one
+ * UTF-8 char on a miss; a word with no match at pos becomes a single unk. */
+static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *word,
+                         uint32_t wlen, int32_t unk, int *total) {
+    uint32_t pos = 0;
+    while (pos < wlen) {
+        uint32_t end   = wlen;
+        bool     found = false;
+        while (end > pos) {
+            const char *key;
+            uint32_t    klen;
+            if (pos > 0) {
+                s->cand[0] = '#';
+                s->cand[1] = '#';
+                memcpy(s->cand + 2, word + pos, end - pos);
+                key  = s->cand;
+                klen = end - pos + 2;
+            } else {
+                key  = word + pos;
+                klen = end - pos;
+            }
+            uint32_t id;
+            if (str_u32_map_get(&tok->vocab, key, klen, &id)) {
+                s->out[(*total)++] = (int32_t)id;
+                pos   = end;
+                found = true;
+                break;
+            }
+            /* Shrink by one UTF-8 character: skip continuation bytes. */
+            end--;
+            while (end > pos && ((uint8_t)word[end] & 0xC0) == 0x80) end--;
+        }
+        if (!found) {
+            s->out[(*total)++] = unk;
+            return;
+        }
+    }
+}
+
+int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                     int32_t **out) {
+    if (len > (size_t)INT32_MAX) return -1;
+    /* len + 2: body emits at most len ids, plus the bos/eos wrap. */
+    if (!encode_scratch_reserve(s, len + 2)) return -1;
+
+    int total = 0;
+    /* Stage F seam: F4 moves this wrap to the public tokenizer_encode. */
+    if (tok->bos_id >= 0) s->out[total++] = tok->bos_id;
+
+    for (size_t i = 0; i < len; i++) {
+        char c     = text[i];
+        s->text[i] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+    }
+
+    int32_t unk = tok->unk_id >= 0 ? tok->unk_id : 0;
+
+    /* Split: ASCII whitespace drops, each punct byte is its own word. */
+    size_t wstart = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s->text[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (i > wstart)
+                wp_emit_word(tok, s, s->text + wstart, (uint32_t)(i - wstart), unk, &total);
+            wstart = i + 1;
+        } else if (wp_is_punct((uint8_t)c)) {
+            if (i > wstart)
+                wp_emit_word(tok, s, s->text + wstart, (uint32_t)(i - wstart), unk, &total);
+            wp_emit_word(tok, s, s->text + i, 1, unk, &total);
+            wstart = i + 1;
+        }
+    }
+    if (wstart < len) wp_emit_word(tok, s, s->text + wstart, (uint32_t)(len - wstart), unk, &total);
+
+    if (tok->eos_id >= 0) s->out[total++] = tok->eos_id;
+    *out = s->out;
+    return total;
+}
+
 /* --- Per-mode decoders ------------------------------------------------------- */
 
 /* Realloc-doubling byte accumulator for the decoders. buf is NUL-terminated
@@ -733,6 +846,7 @@ void tokenizer_free(tokenizer_t *tok) {
     if (!tok) return;
     str_u32_map_free(&tok->vocab);
     merge_map_free(&tok->merges);
+    str_u32_map_free(&tok->special_tokens);
     free((void *)tok->id_to_token);
     yyjson_doc_free(tok->doc);
     free(tok);
