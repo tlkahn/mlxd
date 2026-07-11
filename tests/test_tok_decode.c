@@ -113,11 +113,37 @@ static void test_sentencepiece_trailing_marker(void) {
     tokenizer_free(tok);
 }
 
+/* --- Capstone: real GPT-2 vocab round-trip ---------------------------------------- */
+
+static void test_gpt2_fixture_decode(void) {
+    const char *path = MLXD_FIXTURES_DIR "/gpt2/tokenizer.json";
+    FILE       *f    = fopen(path, "rb");
+    assert(f != NULL);
+    assert(fseek(f, 0, SEEK_END) == 0);
+    long sz = ftell(f);
+    assert(sz > 0);
+    assert(fseek(f, 0, SEEK_SET) == 0);
+    char *buf = malloc((size_t)sz);
+    assert(buf != NULL);
+    assert(fread(buf, 1, (size_t)sz, f) == (size_t)sz);
+    fclose(f);
+
+    tokenizer_t *tok = tokenizer_load_json(buf, (size_t)sz);
+    assert(tok != NULL);
+
+    /* Decode of the encode capstone's ids reproduces the input exactly. */
+    expect_decode(tok, (const int32_t[]){15496, 995}, 2, "Hello world");
+
+    tokenizer_free(tok);
+    free(buf);
+}
+
 int main(void) {
     test_byte_level_decode();
     test_wordpiece_decode();
     test_sentencepiece_decode();
     test_sentencepiece_trailing_marker();
+    test_gpt2_fixture_decode();
     printf("test_tok_decode: all tests passed\n");
     return 0;
 }

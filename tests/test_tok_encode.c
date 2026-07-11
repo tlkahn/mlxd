@@ -162,6 +162,39 @@ static void test_sentencepiece_encode(void) {
     tokenizer_free(tok);
 }
 
+/* --- Capstone: real GPT-2 vocab -------------------------------------------------- */
+
+static void test_gpt2_fixture_encode(void) {
+    const char *path = MLXD_FIXTURES_DIR "/gpt2/tokenizer.json";
+    FILE       *f    = fopen(path, "rb");
+    assert(f != NULL);
+    assert(fseek(f, 0, SEEK_END) == 0);
+    long sz = ftell(f);
+    assert(sz > 0);
+    assert(fseek(f, 0, SEEK_SET) == 0);
+    char *buf = malloc((size_t)sz);
+    assert(buf != NULL);
+    assert(fread(buf, 1, (size_t)sz, f) == (size_t)sz);
+    fclose(f);
+
+    tokenizer_t *tok = tokenizer_load_json(buf, (size_t)sz);
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    int32_t *ids;
+    int      n = encode_byte_level(tok, &s, "Hello world", 11, &ids);
+    /* Reference ids from the HF GPT-2 tokenizer: "Hello" = 15496,
+     * " world" = 995. */
+    assert(n == 2);
+    assert(ids[0] == 15496);
+    assert(ids[1] == 995);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+    free(buf);
+}
+
 int main(void) {
     test_byte_level_encode();
     test_wordpiece_encode_wrap();
@@ -171,6 +204,7 @@ int main(void) {
     test_wordpiece_lowercase();
     test_wordpiece_multi_shrink();
     test_sentencepiece_encode();
+    test_gpt2_fixture_encode();
     printf("test_tok_encode: all tests passed\n");
     return 0;
 }
