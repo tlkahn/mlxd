@@ -495,6 +495,12 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
         /* Pattern 2: optional non-LNN char + letter/mark run. */
         if (end == i) end = match_letters_run(text, tlen, i);
 
+        /* Pattern 3: exactly ONE \p{N} codepoint (no +). */
+        if (end == i) {
+            uc_cp_info c = uc_decode_codepoint(text, tlen, i);
+            if (uc_is_number(c.cp)) end = i + c.len;
+        }
+
         /* Fallback: single byte, so the scan always advances. */
         if (end == i) end = i + 1;
 

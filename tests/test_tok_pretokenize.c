@@ -56,6 +56,19 @@ static void test_word_space_word(void) {
     expect_pretokens("def total", want, 2);
 }
 
+/* --- D3: single-number pre-tokens ------------------------------------------- */
+
+static void test_digits_split(void) {
+    const char *want[] = {"1", "0", "0"};
+    expect_pretokens("100", want, 3);
+}
+
+static void test_arabic_indic_digits_split(void) {
+    /* \p{N} is one codepoint per slice even when multi-byte (U+0665). */
+    const char *want[] = {"\xD9\xA5", "\xD9\xA5"};
+    expect_pretokens("\xD9\xA5\xD9\xA5", want, 2);
+}
+
 int main(void) {
     test_contraction_t();
     test_contraction_re();
@@ -64,6 +77,9 @@ int main(void) {
 
     test_space_letters();
     test_word_space_word();
+
+    test_digits_split();
+    test_arabic_indic_digits_split();
 
     printf("All tok_pretokenize tests passed.\n");
     return 0;
