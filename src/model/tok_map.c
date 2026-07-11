@@ -32,10 +32,17 @@ static uint32_t next_pow2(uint32_t v) {
 
 /* --- str_u32_map ---------------------------------------------------------- */
 
-void str_u32_map_init(str_u32_map *m, uint32_t initial_cap) {
+/* next_pow2 wraps to 0 above 2^31; cap the hint so it never sees that range.
+ * The table still grows on demand, so clamping is functionally transparent. */
+#define MAP_MAX_INITIAL_CAP (1u << 30)
+
+bool str_u32_map_init(str_u32_map *m, uint32_t initial_cap) {
+    if (initial_cap > MAP_MAX_INITIAL_CAP)
+        initial_cap = MAP_MAX_INITIAL_CAP;
     m->cap = next_pow2(initial_cap < 4 ? 4 : initial_cap);
     m->count = 0;
     m->entries = calloc(m->cap, sizeof(str_u32_entry));
+    return m->entries != NULL;
 }
 
 void str_u32_map_free(str_u32_map *m) {
@@ -44,9 +51,14 @@ void str_u32_map_free(str_u32_map *m) {
     m->cap = m->count = 0;
 }
 
-static void str_u32_map_grow(str_u32_map *m) {
+/* On allocation failure keeps the old table and returns false. */
+static bool str_u32_map_grow(str_u32_map *m) {
+    if (m->cap > UINT32_MAX / 2)
+        return false;
     uint32_t new_cap = m->cap * 2;
     str_u32_entry *new_entries = calloc(new_cap, sizeof(str_u32_entry));
+    if (!new_entries)
+        return false;
     uint32_t mask = new_cap - 1;
     for (uint32_t i = 0; i < m->cap; i++) {
         str_u32_entry *e = &m->entries[i];
@@ -60,27 +72,32 @@ static void str_u32_map_grow(str_u32_map *m) {
     free(m->entries);
     m->entries = new_entries;
     m->cap = new_cap;
+    return true;
 }
 
-void str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t val) {
+bool str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t val) {
     if (m->count * 4 >= m->cap * 3)
-        str_u32_map_grow(m);
+        (void)str_u32_map_grow(m); /* failure tolerated: an update needs no slot */
     uint64_t h = fnv1a(key, key_len);
     uint32_t mask = m->cap - 1;
     uint32_t idx = (uint32_t)(h & mask);
     for (;;) {
         str_u32_entry *e = &m->entries[idx];
         if (!e->ptr) {
+            /* An insert into the last empty slot would leave _get with no
+             * NULL sentinel, so a miss probes forever: refuse it. */
+            if (m->count + 1 >= m->cap)
+                return false;
             e->ptr = key;
             e->len = key_len;
             e->hash = h;
             e->val = val;
             m->count++;
-            return;
+            return true;
         }
         if (e->hash == h && e->len == key_len && memcmp(e->ptr, key, key_len) == 0) {
             e->val = val;
-            return;
+            return true;
         }
         idx = (idx + 1) & mask;
     }
@@ -118,10 +135,13 @@ static bool merge_eq(const merge_entry *e, const char *l, uint32_t llen,
            memcmp(e->l, l, llen) == 0 && memcmp(e->r, r, rlen) == 0;
 }
 
-void merge_map_init(merge_map *m, uint32_t initial_cap) {
+bool merge_map_init(merge_map *m, uint32_t initial_cap) {
+    if (initial_cap > MAP_MAX_INITIAL_CAP)
+        initial_cap = MAP_MAX_INITIAL_CAP;
     m->cap = next_pow2(initial_cap < 4 ? 4 : initial_cap);
     m->count = 0;
     m->entries = calloc(m->cap, sizeof(merge_entry));
+    return m->entries != NULL;
 }
 
 void merge_map_free(merge_map *m) {
@@ -130,9 +150,14 @@ void merge_map_free(merge_map *m) {
     m->cap = m->count = 0;
 }
 
-static void merge_map_grow(merge_map *m) {
+/* On allocation failure keeps the old table and returns false. */
+static bool merge_map_grow(merge_map *m) {
+    if (m->cap > UINT32_MAX / 2)
+        return false;
     uint32_t new_cap = m->cap * 2;
     merge_entry *new_entries = calloc(new_cap, sizeof(merge_entry));
+    if (!new_entries)
+        return false;
     uint32_t mask = new_cap - 1;
     for (uint32_t i = 0; i < m->cap; i++) {
         merge_entry *e = &m->entries[i];
@@ -146,18 +171,23 @@ static void merge_map_grow(merge_map *m) {
     free(m->entries);
     m->entries = new_entries;
     m->cap = new_cap;
+    return true;
 }
 
-void merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,
+bool merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,
                    uint32_t rlen, uint32_t rank) {
     if (m->count * 4 >= m->cap * 3)
-        merge_map_grow(m);
+        (void)merge_map_grow(m); /* failure tolerated: an update needs no slot */
     uint64_t h = merge_hash(l, llen, r, rlen);
     uint32_t mask = m->cap - 1;
     uint32_t idx = (uint32_t)(h & mask);
     for (;;) {
         merge_entry *e = &m->entries[idx];
         if (!e->l) {
+            /* An insert into the last empty slot would leave _get with no
+             * NULL sentinel, so a miss probes forever: refuse it. */
+            if (m->count + 1 >= m->cap)
+                return false;
             e->l = l;
             e->r = r;
             e->llen = llen;
@@ -165,11 +195,11 @@ void merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,
             e->hash = h;
             e->rank = rank;
             m->count++;
-            return;
+            return true;
         }
         if (e->hash == h && merge_eq(e, l, llen, r, rlen)) {
             e->rank = rank;
-            return;
+            return true;
         }
         idx = (idx + 1) & mask;
     }

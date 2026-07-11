@@ -16,6 +16,10 @@ typedef enum {
  * Returns NULL on error. Caller must free with tokenizer_free. */
 tokenizer_t *tokenizer_load(const char *path);
 
+/* Load a tokenizer from an in-memory tokenizer.json buffer.
+ * Returns NULL on error. Caller must free with tokenizer_free. */
+tokenizer_t *tokenizer_load_json(const char *json, size_t len);
+
 void tokenizer_free(tokenizer_t *tok);
 
 /* Encode text to token IDs.
@@ -32,6 +36,9 @@ const char *tokenizer_decode_token(const tokenizer_t *tok, int32_t id);
 char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count);
 
 /* Accessors */
+/* Number of vocab entries (HF get_vocab_size convention). For a sparse vocab
+ * this can be less than max_id + 1; embedding/output sizing must come from
+ * config.json, not from this. */
 int tokenizer_vocab_size(const tokenizer_t *tok);
 int32_t tokenizer_bos_id(const tokenizer_t *tok);
 int32_t tokenizer_eos_id(const tokenizer_t *tok);
