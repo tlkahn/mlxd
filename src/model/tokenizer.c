@@ -461,11 +461,12 @@ static uint32_t scan_letter_mark_run(const uint8_t *text, uint32_t len, uint32_t
 }
 
 /* Pattern 2: `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+`. The optional codepoint may
- * be whitespace or punct - anything but \r, \n, letter, number. Returns end
- * position of the match, or i if no letters at the right place. */
-static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i) {
-    uc_cp_info first = uc_decode_codepoint(text, len, i);
-    bool       lm    = uc_is_letter_or_mark(first.cp);
+ * be whitespace or punct - anything but \r, \n, letter, number. `first` is
+ * the already-decoded codepoint at i. Returns end position of the match, or
+ * i if no letters at the right place. */
+static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i,
+                                  uc_cp_info first) {
+    bool lm = uc_is_letter_or_mark(first.cp);
 
     /* A letter/mark at i starts the run itself (a mark reaches the same
      * match end whether taken as the optional char or as run start, since
@@ -487,14 +488,15 @@ static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i)
  * exactly the byte 0x20 (regex literal), not any other whitespace. Returns
  * end position of the match, or i if no punct/symbol run at the right
  * place. */
-static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i) {
+static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i,
+                                  uc_cp_info first) {
     uint32_t p = i;
     if (text[p] == ' ') p++;
     if (p >= len) return i;
 
     uint32_t end = p;
     while (end < len) {
-        uc_cp_info c = uc_decode_codepoint(text, len, end);
+        uc_cp_info c = end == i ? first : uc_decode_codepoint(text, len, end);
         if (uc_is_whitespace_cp(c.cp) || uc_is_letter_or_mark(c.cp) || uc_is_number(c.cp))
             break;
         end += c.len;
@@ -507,10 +509,11 @@ static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i)
 /* Pattern 5: `\s*[\r\n]+`. Whitespace is codepoint-level (NBSP, ideographic
  * space, ...), the newline run is literal bytes. Returns end position, or i
  * if no \r\n follows the \s* prefix. */
-static uint32_t match_ws_newline(const uint8_t *text, uint32_t len, uint32_t i) {
+static uint32_t match_ws_newline(const uint8_t *text, uint32_t len, uint32_t i,
+                                 uc_cp_info first) {
     uint32_t p = i;
     while (p < len && text[p] != '\r' && text[p] != '\n') {
-        uc_cp_info c = uc_decode_codepoint(text, len, p);
+        uc_cp_info c = p == i ? first : uc_decode_codepoint(text, len, p);
         if (!uc_is_whitespace_cp(c.cp)) break;
         p += c.len;
     }
@@ -526,11 +529,12 @@ static uint32_t match_ws_newline(const uint8_t *text, uint32_t len, uint32_t i) 
  * pattern 2/4 on the next iteration, while a single-cp run cannot satisfy
  * the lookahead and falls through to pattern 7, which matches the same
  * single codepoint. Returns i if there is no whitespace at i. */
-static uint32_t match_ws_run(const uint8_t *text, uint32_t len, uint32_t i) {
+static uint32_t match_ws_run(const uint8_t *text, uint32_t len, uint32_t i,
+                             uc_cp_info first) {
     uint32_t end     = i;
     uint32_t last_cp = i; /* start offset of the run's last whitespace cp */
     while (end < len) {
-        uc_cp_info c = uc_decode_codepoint(text, len, end);
+        uc_cp_info c = end == i ? first : uc_decode_codepoint(text, len, end);
         if (!uc_is_whitespace_cp(c.cp)) break;
         last_cp = end;
         end += c.len;
@@ -550,28 +554,27 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
     uint32_t       i     = 0;
     int            count = 0;
     while (i < tlen) {
-        uint32_t end;
+        /* Decode the codepoint at i once; every matcher below reuses it. */
+        uc_cp_info first = uc_decode_codepoint(text, tlen, i);
+        uint32_t   end;
 
         /* Pattern 1: contraction. */
         end = match_contraction(text, tlen, i);
 
         /* Pattern 2: optional non-LNN char + letter/mark run. */
-        if (end == i) end = match_letters_run(text, tlen, i);
+        if (end == i) end = match_letters_run(text, tlen, i, first);
 
         /* Pattern 3: exactly ONE \p{N} codepoint (no +). */
-        if (end == i) {
-            uc_cp_info c = uc_decode_codepoint(text, tlen, i);
-            if (uc_is_number(c.cp)) end = i + c.len;
-        }
+        if (end == i && uc_is_number(first.cp)) end = i + first.len;
 
         /* Pattern 4: optional literal space + punct run + [\r\n]* tail. */
-        if (end == i) end = match_space_punct(text, tlen, i);
+        if (end == i) end = match_space_punct(text, tlen, i, first);
 
         /* Pattern 5: whitespace ending in a newline run. */
-        if (end == i) end = match_ws_newline(text, tlen, i);
+        if (end == i) end = match_ws_newline(text, tlen, i, first);
 
         /* Patterns 6+7: whitespace `\s+(?!\S)` with `\s+` fallback. */
-        if (end == i) end = match_ws_run(text, tlen, i);
+        if (end == i) end = match_ws_run(text, tlen, i, first);
 
         /* Fallback: single byte, so the scan always advances. */
         if (end == i) end = i + 1;
