@@ -231,6 +231,38 @@ static void test_ws_only_nbsp(void) {
     expect_pretokens("\xC2\xA0", want, 1);
 }
 
+/* --- D5 fix: \s* prefix may contain newlines -----------------------------------
+ * `\s*[\r\n]+` backtracks: the greedy \s* consumes newlines and later
+ * whitespace, and the match ends one past the LAST \r/\n byte of the run.
+ * Expected splits verified against the HF reference regex. */
+
+static void test_cr_space_lf(void) {
+    const char *want[] = {"\r \n"};
+    expect_pretokens("\r \n", want, 1);
+}
+
+static void test_lf_tab_lf(void) {
+    const char *want[] = {"\n\t\n"};
+    expect_pretokens("\n\t\n", want, 1);
+}
+
+static void test_nl_ws_nl_then_word(void) {
+    const char *want[] = {"\n \n", " x"};
+    expect_pretokens("\n \n x", want, 2);
+}
+
+static void test_word_cr_sp_lf_word(void) {
+    const char *want[] = {"a", "\r \n", "b"};
+    expect_pretokens("a\r \nb", want, 3);
+}
+
+static void test_nl_then_spaces_word(void) {
+    /* Over-match guard: nothing after the '\n' is part of pattern 5; the
+     * two spaces resolve via the pattern-6 backtrack then pattern 2. */
+    const char *want[] = {"\n", " ", " x"};
+    expect_pretokens("\n  x", want, 3);
+}
+
 /* --- edge cases ---------------------------------------------------------------- */
 
 static void test_empty_input(void) {
@@ -287,6 +319,12 @@ int main(void) {
     test_bare_combining_mark();
     test_ws_only_single();
     test_ws_only_nbsp();
+
+    test_cr_space_lf();
+    test_lf_tab_lf();
+    test_nl_ws_nl_then_word();
+    test_word_cr_sp_lf_word();
+    test_nl_then_spaces_word();
 
     test_empty_input();
     test_lone_apostrophe_at_end();

@@ -506,41 +506,32 @@ static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i,
     return end;
 }
 
-/* Pattern 5: `\s*[\r\n]+`. Whitespace is codepoint-level (NBSP, ideographic
- * space, ...), the newline run is literal bytes. Returns end position, or i
- * if no \r\n follows the \s* prefix. */
-static uint32_t match_ws_newline(const uint8_t *text, uint32_t len, uint32_t i,
-                                 uc_cp_info first) {
-    uint32_t p = i;
-    while (p < len && text[p] != '\r' && text[p] != '\n') {
-        uc_cp_info c = p == i ? first : uc_decode_codepoint(text, len, p);
-        if (!uc_is_whitespace_cp(c.cp)) break;
-        p += c.len;
-    }
-    if (p >= len || (text[p] != '\r' && text[p] != '\n')) return i;
-    while (p < len && (text[p] == '\r' || text[p] == '\n')) p++;
-    return p;
-}
-
-/* Patterns 6+7: `\s+(?!\S)` then fallback `\s+`. Greedy codepoint-level
- * whitespace match, then resolves the lookahead: at end of input the full
- * run stands; before \S a multi-cp run backtracks one CODEPOINT (whitespace
- * can be multi-byte, e.g. NBSP) so the trailing space gets handed to
- * pattern 2/4 on the next iteration, while a single-cp run cannot satisfy
- * the lookahead and falls through to pattern 7, which matches the same
- * single codepoint. Returns i if there is no whitespace at i. */
+/* Patterns 5+6+7: `\s*[\r\n]+`, `\s+(?!\S)`, fallback `\s+`. One greedy
+ * codepoint-level whitespace scan resolves the whole group. Pattern 5's
+ * `\s*` may itself consume newlines and later whitespace, so its
+ * backtracked match ends one past the LAST \r/\n of the run; a run without
+ * newlines resolves the pattern-6 lookahead instead: at end of input the
+ * full run stands, before \S a multi-cp run backtracks one CODEPOINT
+ * (whitespace can be multi-byte, e.g. NBSP) so the trailing space gets
+ * handed to pattern 2/4 on the next iteration, while a single-cp run
+ * cannot satisfy the lookahead and falls through to pattern 7, which
+ * matches the same single codepoint. Returns i if there is no whitespace
+ * at i. */
 static uint32_t match_ws_run(const uint8_t *text, uint32_t len, uint32_t i,
                              uc_cp_info first) {
     uint32_t end     = i;
     uint32_t last_cp = i; /* start offset of the run's last whitespace cp */
+    uint32_t nl_end  = 0; /* one past the run's last \r/\n; 0 = none */
     while (end < len) {
         uc_cp_info c = end == i ? first : uc_decode_codepoint(text, len, end);
         if (!uc_is_whitespace_cp(c.cp)) break;
+        if (c.cp == '\r' || c.cp == '\n') nl_end = end + c.len;
         last_cp = end;
         end += c.len;
     }
     if (end == i) return i;
-    if (end == len) return end; /* end of input - lookahead trivially OK */
+    if (nl_end != 0) return nl_end; /* pattern 5: `\s*[\r\n]+` */
+    if (end == len) return end;     /* pattern 6: end of input satisfies (?!\S) */
     /* text[end] is \S: backtrack one cp so the lookahead sees whitespace;
      * a single-cp run is pattern 7's `\s+` match instead. */
     if (last_cp > i) return last_cp;
@@ -570,10 +561,7 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
         /* Pattern 4: optional literal space + punct run + [\r\n]* tail. */
         if (end == i) end = match_space_punct(text, tlen, i, first);
 
-        /* Pattern 5: whitespace ending in a newline run. */
-        if (end == i) end = match_ws_newline(text, tlen, i, first);
-
-        /* Patterns 6+7: whitespace `\s+(?!\S)` with `\s+` fallback. */
+        /* Patterns 5+6+7: `\s*[\r\n]+`, then `\s+(?!\S)` with `\s+` fallback. */
         if (end == i) end = match_ws_run(text, tlen, i, first);
 
         /* Fallback so the scan always advances. Unreachable today (patterns
