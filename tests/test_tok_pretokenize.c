@@ -69,6 +69,33 @@ static void test_arabic_indic_digits_split(void) {
     expect_pretokens("\xD9\xA5\xD9\xA5", want, 2);
 }
 
+/* --- D4: optional space + punct run + newline tail --------------------------- */
+
+static void test_space_punct(void) {
+    const char *want[] = {" ="};
+    expect_pretokens(" =", want, 1);
+}
+
+static void test_space_punct_run(void) {
+    const char *want[] = {" +="};
+    expect_pretokens(" +=", want, 1);
+}
+
+static void test_space_punct_then_word(void) {
+    const char *want[] = {" +=", " foo"};
+    expect_pretokens(" += foo", want, 2);
+}
+
+static void test_space_star_eq(void) {
+    const char *want[] = {" *="};
+    expect_pretokens(" *=", want, 1);
+}
+
+static void test_punct_newline_tail(void) {
+    const char *want[] = {"):\n"};
+    expect_pretokens("):\n", want, 1);
+}
+
 int main(void) {
     test_contraction_t();
     test_contraction_re();
@@ -80,6 +107,12 @@ int main(void) {
 
     test_digits_split();
     test_arabic_indic_digits_split();
+
+    test_space_punct();
+    test_space_punct_run();
+    test_space_punct_then_word();
+    test_space_star_eq();
+    test_punct_newline_tail();
 
     printf("All tok_pretokenize tests passed.\n");
     return 0;

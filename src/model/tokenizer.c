@@ -480,6 +480,27 @@ static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i)
     return i;
 }
 
+/* Pattern 4: ` ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*`. The optional space MUST be
+ * exactly the byte 0x20 (regex literal), not any other whitespace. Returns
+ * end position of the match, or i if no punct/symbol run at the right
+ * place. */
+static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i) {
+    uint32_t p = i;
+    if (text[p] == ' ') p++;
+    if (p >= len) return i;
+
+    uint32_t end = p;
+    while (end < len) {
+        uc_cp_info c = uc_decode_codepoint(text, len, end);
+        if (uc_is_whitespace_cp(c.cp) || uc_is_letter_or_mark(c.cp) || uc_is_number(c.cp))
+            break;
+        end += c.len;
+    }
+    if (end == p) return i;
+    while (end < len && (text[end] == '\r' || text[end] == '\n')) end++;
+    return end;
+}
+
 int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
     if (len > INT32_MAX) return -1;
     const uint8_t *text  = (const uint8_t *)input;
@@ -500,6 +521,9 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
             uc_cp_info c = uc_decode_codepoint(text, tlen, i);
             if (uc_is_number(c.cp)) end = i + c.len;
         }
+
+        /* Pattern 4: optional literal space + punct run + [\r\n]* tail. */
+        if (end == i) end = match_space_punct(text, tlen, i);
 
         /* Fallback: single byte, so the scan always advances. */
         if (end == i) end = i + 1;
