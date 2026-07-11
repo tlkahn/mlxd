@@ -32,15 +32,19 @@ typedef struct {
     uint32_t     count;
 } merge_map;
 
-void str_u32_map_init(str_u32_map *m, uint32_t initial_cap);
+/* _init returns false when the table allocation fails; the map is then empty
+ * (entries NULL) and safe to _free, but not to _put/_get into.
+ * _put returns false only when a needed grow failed and the table is
+ * completely full; after a failed grow with free slots it still inserts. */
+bool str_u32_map_init(str_u32_map *m, uint32_t initial_cap);
 void str_u32_map_free(str_u32_map *m);
-void str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t val);
+bool str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t val);
 bool str_u32_map_get(const str_u32_map *m, const char *key, uint32_t key_len,
                      uint32_t *out_val);
 
-void merge_map_init(merge_map *m, uint32_t initial_cap);
+bool merge_map_init(merge_map *m, uint32_t initial_cap);
 void merge_map_free(merge_map *m);
-void merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,
+bool merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,
                    uint32_t rlen, uint32_t rank);
 bool merge_map_get(const merge_map *m, const char *l, uint32_t llen,
                    const char *r, uint32_t rlen, uint32_t *out_rank);

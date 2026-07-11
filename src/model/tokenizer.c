@@ -109,6 +109,18 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     tok->unk_id = -1;
     uc_build_bytes_to_unicode(&tok->bytes_unicode);
 
+    /* Initialize both maps up front so every early error path below frees
+     * fully-initialized maps instead of relying on the calloc-zeroed struct. */
+    size_t      vocab_count = yyjson_obj_size(vocab_val);
+    yyjson_val *merges_val  = yyjson_obj_get(model, "merges");
+    size_t      merge_count = yyjson_is_arr(merges_val) ? yyjson_arr_size(merges_val) : 0;
+    bool vocab_ok  = str_u32_map_init(&tok->vocab, vocab_count ? (uint32_t)vocab_count * 2 : 16);
+    bool merges_ok = merge_map_init(&tok->merges, merge_count ? (uint32_t)merge_count * 2 : 16);
+    if (!vocab_ok || !merges_ok) {
+        tokenizer_free(tok);
+        return NULL;
+    }
+
     yyjson_val *model_type = yyjson_obj_get(model, "type");
     if (yyjson_is_str(model_type) && strcmp(yyjson_get_str(model_type), "WordPiece") == 0) {
         tok->type = TOKENIZER_WORDPIECE;
@@ -124,9 +136,6 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     }
 
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
-    size_t vocab_count = yyjson_obj_size(vocab_val);
-    str_u32_map_init(&tok->vocab, vocab_count ? (uint32_t)vocab_count * 2 : 16);
-
     uint32_t    max_id = 0;
     size_t      idx, max;
     yyjson_val *key, *val;
@@ -143,7 +152,11 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
             return NULL;
         }
         uint32_t id = (uint32_t)raw;
-        str_u32_map_put(&tok->vocab, yyjson_get_str(key), (uint32_t)yyjson_get_len(key), id);
+        if (!str_u32_map_put(&tok->vocab, yyjson_get_str(key), (uint32_t)yyjson_get_len(key),
+                             id)) {
+            tokenizer_free(tok);
+            return NULL;
+        }
         if (id > max_id) max_id = id;
     }
     tok->vocab_size = (int)tok->vocab.count;
@@ -164,16 +177,16 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         }
     }
 
-    yyjson_val *merges_val  = yyjson_obj_get(model, "merges");
-    size_t      merge_count = yyjson_is_arr(merges_val) ? yyjson_arr_size(merges_val) : 0;
-    merge_map_init(&tok->merges, merge_count ? (uint32_t)merge_count * 2 : 16);
     if (merge_count) {
         yyjson_val *entry;
         yyjson_arr_foreach(merges_val, idx, max, entry) {
             const char *l, *r;
             uint32_t    llen, rlen;
             if (!parse_merge_pair(entry, &l, &llen, &r, &rlen)) continue;
-            merge_map_put(&tok->merges, l, llen, r, rlen, (uint32_t)idx);
+            if (!merge_map_put(&tok->merges, l, llen, r, rlen, (uint32_t)idx)) {
+                tokenizer_free(tok);
+                return NULL;
+            }
         }
     }
 

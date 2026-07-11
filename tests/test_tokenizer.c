@@ -10,9 +10,9 @@
 
 static void test_str_map_put_get(void) {
     str_u32_map m;
-    str_u32_map_init(&m, 16);
+    assert(str_u32_map_init(&m, 16));
 
-    str_u32_map_put(&m, "hello", 5, 42);
+    assert(str_u32_map_put(&m, "hello", 5, 42));
 
     uint32_t val = 0;
     bool found = str_u32_map_get(&m, "hello", 5, &val);
@@ -24,9 +24,9 @@ static void test_str_map_put_get(void) {
 
 static void test_str_map_get_missing(void) {
     str_u32_map m;
-    str_u32_map_init(&m, 16);
+    assert(str_u32_map_init(&m, 16));
 
-    str_u32_map_put(&m, "hello", 5, 42);
+    assert(str_u32_map_put(&m, "hello", 5, 42));
 
     uint32_t val = 999;
     bool found = str_u32_map_get(&m, "world", 5, &val);
@@ -38,10 +38,10 @@ static void test_str_map_get_missing(void) {
 
 static void test_str_map_put_overwrites(void) {
     str_u32_map m;
-    str_u32_map_init(&m, 16);
+    assert(str_u32_map_init(&m, 16));
 
-    str_u32_map_put(&m, "key", 3, 10);
-    str_u32_map_put(&m, "key", 3, 20);
+    assert(str_u32_map_put(&m, "key", 3, 10));
+    assert(str_u32_map_put(&m, "key", 3, 20));
 
     uint32_t val = 0;
     bool found = str_u32_map_get(&m, "key", 3, &val);
@@ -53,12 +53,12 @@ static void test_str_map_put_overwrites(void) {
 
 static void test_str_map_growth(void) {
     str_u32_map m;
-    str_u32_map_init(&m, 4);
+    assert(str_u32_map_init(&m, 4));
 
     char keys[1000][16];
     for (int i = 0; i < 1000; i++) {
         int len = snprintf(keys[i], sizeof(keys[i]), "key_%d", i);
-        str_u32_map_put(&m, keys[i], (uint32_t)len, (uint32_t)i);
+        assert(str_u32_map_put(&m, keys[i], (uint32_t)len, (uint32_t)i));
     }
 
     for (int i = 0; i < 1000; i++) {
@@ -74,11 +74,11 @@ static void test_str_map_growth(void) {
 
 static void test_str_map_byte_range_keys(void) {
     str_u32_map m;
-    str_u32_map_init(&m, 16);
+    assert(str_u32_map_init(&m, 16));
 
     const char *buf = "hello";
-    str_u32_map_put(&m, buf, 5, 100);
-    str_u32_map_put(&m, buf, 4, 200);
+    assert(str_u32_map_put(&m, buf, 5, 100));
+    assert(str_u32_map_put(&m, buf, 4, 200));
 
     uint32_t val = 0;
 
@@ -132,9 +132,9 @@ static uint64_t find_merge_hash(const merge_map *m, const char *l, uint32_t llen
 
 static void test_merge_hash_separator_not_noop(void) {
     merge_map m;
-    merge_map_init(&m, 16);
+    assert(merge_map_init(&m, 16));
 
-    merge_map_put(&m, "ab", 2, "c", 1, 10);
+    assert(merge_map_put(&m, "ab", 2, "c", 1, 10));
     uint64_t actual = find_merge_hash(&m, "ab", 2, "c", 1);
 
     /* What a no-op separator (h ^= 0x00; h *= PRIME) would produce */
@@ -149,12 +149,12 @@ static void test_merge_hash_separator_not_noop(void) {
 
 static void test_merge_hash_split_positions_distinct(void) {
     merge_map m;
-    merge_map_init(&m, 16);
+    assert(merge_map_init(&m, 16));
 
     const char *s = "abcd";
-    merge_map_put(&m, s, 1, s + 1, 3, 0);
-    merge_map_put(&m, s, 2, s + 2, 2, 1);
-    merge_map_put(&m, s, 3, s + 3, 1, 2);
+    assert(merge_map_put(&m, s, 1, s + 1, 3, 0));
+    assert(merge_map_put(&m, s, 2, s + 2, 2, 1));
+    assert(merge_map_put(&m, s, 3, s + 3, 1, 2));
 
     uint64_t h1 = find_merge_hash(&m, s, 1, s + 1, 3);
     uint64_t h2 = find_merge_hash(&m, s, 2, s + 2, 2);
@@ -177,10 +177,10 @@ static void test_merge_hash_split_positions_distinct(void) {
 
 static void test_merge_map_put_get(void) {
     merge_map m;
-    merge_map_init(&m, 16);
+    assert(merge_map_init(&m, 16));
 
-    merge_map_put(&m, "ab", 2, "c", 1, 10);
-    merge_map_put(&m, "a", 1, "bc", 2, 20);
+    assert(merge_map_put(&m, "ab", 2, "c", 1, 10));
+    assert(merge_map_put(&m, "a", 1, "bc", 2, 20));
 
     uint32_t rank = 0;
 
@@ -197,9 +197,9 @@ static void test_merge_map_put_get(void) {
 
 static void test_merge_map_miss(void) {
     merge_map m;
-    merge_map_init(&m, 16);
+    assert(merge_map_init(&m, 16));
 
-    merge_map_put(&m, "ab", 2, "c", 1, 10);
+    assert(merge_map_put(&m, "ab", 2, "c", 1, 10));
 
     uint32_t rank = 999;
     assert(!merge_map_get(&m, "x", 1, "y", 1, &rank));
