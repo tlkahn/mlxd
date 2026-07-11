@@ -25,6 +25,7 @@ struct tokenizer {
     int                vocab_size;
     int32_t            bos_id;
     int32_t            eos_id;
+    int32_t            unk_id; /* vocab id of "<unk>", -1 if absent */
     uc_bytes_unicode_t bytes_unicode;
 };
 
@@ -105,6 +106,7 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     tok->doc    = doc;
     tok->bos_id = -1;
     tok->eos_id = -1;
+    tok->unk_id = -1;
     uc_build_bytes_to_unicode(&tok->bytes_unicode);
 
     yyjson_val *model_type = yyjson_obj_get(model, "type");
@@ -145,6 +147,9 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         if (id > max_id) max_id = id;
     }
     tok->vocab_size = (int)tok->vocab.count;
+
+    uint32_t unk;
+    if (str_u32_map_get(&tok->vocab, "<unk>", 5, &unk)) tok->unk_id = (int32_t)unk;
 
     tok->id_to_token_cap = tok->vocab.count ? max_id + 1 : 0;
     if (tok->id_to_token_cap) {
@@ -283,11 +288,15 @@ static int bpe_emit_symbol(const tokenizer_t *tok, const char *input, const bpe_
     }
     if (tok->type == TOKENIZER_BPE) {
         /* Byte-level BPE: every mapped byte is a base vocab token in any
-         * well-formed vocab, so a miss is pathological; skip it. */
+         * well-formed vocab, so a miss is pathological; emit <unk> when the
+         * vocab has one rather than silently dropping the byte. */
         for (uint32_t b = n->start; b < n->end; b++) {
             char     buf[4];
             uint32_t blen = utf8_encode_cp(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
-            if (str_u32_map_get(&tok->vocab, buf, blen, &id)) ids[count++] = (int32_t)id;
+            if (str_u32_map_get(&tok->vocab, buf, blen, &id))
+                ids[count++] = (int32_t)id;
+            else if (tok->unk_id >= 0)
+                ids[count++] = tok->unk_id;
         }
         return count;
     }
@@ -298,8 +307,8 @@ static int bpe_emit_symbol(const tokenizer_t *tok, const char *input, const bpe_
         int  blen = snprintf(buf, sizeof(buf), "<0x%02X>", (uint8_t)input[b]);
         if (str_u32_map_get(&tok->vocab, buf, (uint32_t)blen, &id))
             ids[count++] = (int32_t)id;
-        else if (str_u32_map_get(&tok->vocab, "<unk>", 5, &id))
-            ids[count++] = (int32_t)id;
+        else if (tok->unk_id >= 0)
+            ids[count++] = tok->unk_id;
     }
     return count;
 }

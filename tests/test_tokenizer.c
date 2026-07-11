@@ -523,6 +523,40 @@ static void test_bpe_bytelevel_fallback(void) {
     tokenizer_free(tok);
 }
 
+/* Byte-level BPE whose vocab is missing a mapped byte token (pathological,
+ * e.g. truncated vocab): the byte must fall back to <unk> when present rather
+ * than being silently dropped; with no <unk> either, it is skipped. */
+static void test_bpe_bytelevel_fallback_unk_on_vocab_miss(void) {
+    const char *json =
+        "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"vocab\":{\"<unk>\":7},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    assert(encode_scratch_reserve(&s, 1));
+
+    int32_t *out   = NULL;
+    int      count = bpe_merge(tok, &s, "a", 1, &out);
+    assert(count == 1);
+    assert(out[0] == 7);
+
+    tokenizer_free(tok);
+
+    /* Neither the byte token nor <unk>: the byte is skipped. */
+    const char *json_no_unk =
+        "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"vocab\":{\"z\":1},\"merges\":[]}}";
+    tok = tokenizer_load_json(json_no_unk, strlen(json_no_unk));
+    assert(tok != NULL);
+
+    assert(bpe_merge(tok, &s, "a", 1, &out) == 0);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 /* SentencePiece byte fallback: an unknown byte becomes its <0xNN> token. */
 static void test_bpe_sp_hexbyte(void) {
     const char *json = "{\"model\":{\"vocab\":{\"a\":12,\"<0x0A>\":10},\"merges\":[]}}";
@@ -589,6 +623,7 @@ int main(void) {
     test_bpe_version_restale();
     test_bpe_bytelevel_az();
     test_bpe_bytelevel_fallback();
+    test_bpe_bytelevel_fallback_unk_on_vocab_miss();
     test_bpe_sp_hexbyte();
     test_bpe_sp_unk();
     printf("All tokenizer tests passed.\n");
