@@ -448,18 +448,36 @@ static uint32_t match_contraction(const uint8_t *text, uint32_t len, uint32_t i)
     return i;
 }
 
-/* Pattern 2: `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+`. Returns end position of the
- * match, or i if no letters at the right place. */
-static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i) {
-    uc_cp_info first = uc_decode_codepoint(text, len, i);
-    if (!uc_is_letter_or_mark(first.cp)) return i;
-    uint32_t end = i + first.len;
+/* Consume a `[\p{L}\p{M}]+` run starting at i; returns its end (== i when
+ * text[i] is not a letter/mark). */
+static uint32_t scan_letter_mark_run(const uint8_t *text, uint32_t len, uint32_t i) {
+    uint32_t end = i;
     while (end < len) {
         uc_cp_info c = uc_decode_codepoint(text, len, end);
         if (!uc_is_letter_or_mark(c.cp)) break;
         end += c.len;
     }
     return end;
+}
+
+/* Pattern 2: `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+`. The optional codepoint may
+ * be whitespace or punct - anything but \r, \n, letter, number. Returns end
+ * position of the match, or i if no letters at the right place. */
+static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i) {
+    uc_cp_info first = uc_decode_codepoint(text, len, i);
+
+    /* Try with the optional non-LNN codepoint consumed. */
+    if (!uc_is_letter(first.cp) && !uc_is_number(first.cp) && first.cp != '\r' &&
+        first.cp != '\n') {
+        uint32_t after_opt = i + first.len;
+        uint32_t end       = scan_letter_mark_run(text, len, after_opt);
+        if (end > after_opt) return end;
+    }
+
+    /* Try with the optional codepoint empty: i itself must start the run. */
+    if (uc_is_letter_or_mark(first.cp)) return scan_letter_mark_run(text, len, i);
+
+    return i;
 }
 
 int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {

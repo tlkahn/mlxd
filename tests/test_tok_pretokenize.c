@@ -44,11 +44,26 @@ static void test_contraction_case_insensitive(void) {
     expect_pretokens("DON'T", want, 2);
 }
 
+/* --- D2: optional leading non-LNN char -------------------------------------- */
+
+static void test_space_letters(void) {
+    const char *want[] = {" total"};
+    expect_pretokens(" total", want, 1);
+}
+
+static void test_word_space_word(void) {
+    const char *want[] = {"def", " total"};
+    expect_pretokens("def total", want, 2);
+}
+
 int main(void) {
     test_contraction_t();
     test_contraction_re();
     test_contraction_ll();
     test_contraction_case_insensitive();
+
+    test_space_letters();
+    test_word_space_word();
 
     printf("All tok_pretokenize tests passed.\n");
     return 0;
