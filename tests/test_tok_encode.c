@@ -120,6 +120,13 @@ static void test_wordpiece_lowercase(void) {
     expect_wp_encode("{\"[UNK]\":0,\"hello\":10}", "HELLO", (const int32_t[]){10}, 1);
 }
 
+/* --- E8: greedy longest match shrinks repeatedly -------------------------------- */
+
+static void test_wordpiece_multi_shrink(void) {
+    expect_wp_encode("{\"[UNK]\":0,\"in\":1,\"##ter\":2,\"##nation\":3,\"##al\":4}",
+                     "international", (const int32_t[]){1, 2, 3, 4}, 4);
+}
+
 int main(void) {
     test_byte_level_encode();
     test_wordpiece_encode_wrap();
@@ -127,6 +134,7 @@ int main(void) {
     test_wordpiece_unknown_word();
     test_wordpiece_punct_split();
     test_wordpiece_lowercase();
+    test_wordpiece_multi_shrink();
     printf("test_tok_encode: all tests passed\n");
     return 0;
 }
