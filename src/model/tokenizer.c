@@ -263,6 +263,12 @@ bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
         s->heap     = heap;
         s->heap_cap = 3 * len;
     }
+    if (s->pretoks_cap < len) {
+        pretok_slice *pretoks = realloc(s->pretoks, (size_t)len * sizeof(*s->pretoks));
+        if (!pretoks) return false;
+        s->pretoks     = pretoks;
+        s->pretoks_cap = len;
+    }
     return true;
 }
 
@@ -270,6 +276,7 @@ void encode_scratch_free(encode_scratch *s) {
     free(s->nodes);
     free(s->heap);
     free(s->ids);
+    free(s->pretoks);
     memset(s, 0, sizeof(*s));
 }
 
@@ -405,6 +412,188 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
     for (int32_t cur = n_nodes > 0 ? 0 : -1; cur >= 0; cur = s->nodes[cur].next)
         count = bpe_emit_symbol(tok, input, &s->nodes[cur], s->ids, count);
     *out = s->ids;
+    return count;
+}
+
+/* --- GPT-2 pre-tokenization ------------------------------------------------- */
+
+/* Splits text following the Qwen / Llama-3 / GPT-2 pre-tokenizer regex as a
+ * hand-rolled state machine. Each iteration picks the FIRST matching pattern
+ * from the alternation, in declared order.
+ *
+ * Reference (from tokenizer.json pre_tokenizer.pretokenizers[0].pattern):
+ *
+ *     (?i:'s|'t|'re|'ve|'m|'ll|'d)
+ *   | [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+
+ *   | \p{N}
+ *   |  ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*
+ *   | \s*[\r\n]+
+ *   | \s+(?!\S)
+ *   | \s+
+ */
+
+/* Pattern 1: contraction `(?i:'s|'t|'re|'ve|'m|'ll|'d)`. Returns end
+ * position of the match, or i if no contraction starts at i. */
+static uint32_t match_contraction(const uint8_t *text, uint32_t len, uint32_t i) {
+    if (text[i] != '\'' || i + 1 >= len) return i;
+    /* ASCII case-fold; tolower() is locale-dependent per C11. */
+    uint8_t next = (uint8_t)(text[i + 1] | 0x20);
+    if (next == 's' || next == 't' || next == 'm' || next == 'd') return i + 2;
+    if (i + 2 < len) {
+        uint8_t next2 = (uint8_t)(text[i + 2] | 0x20);
+        if ((next == 'r' && next2 == 'e') || (next == 'v' && next2 == 'e') ||
+            (next == 'l' && next2 == 'l'))
+            return i + 3;
+    }
+    return i;
+}
+
+/* Consume a `[\p{L}\p{M}]+` run starting at i; returns its end (== i when
+ * text[i] is not a letter/mark). */
+static uint32_t scan_letter_mark_run(const uint8_t *text, uint32_t len, uint32_t i) {
+    uint32_t end = i;
+    while (end < len) {
+        uc_cp_info c = uc_decode_codepoint(text, len, end);
+        if (!uc_is_letter_or_mark(c.cp)) break;
+        end += c.len;
+    }
+    return end;
+}
+
+/* Pattern 2: `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+`. The optional codepoint may
+ * be whitespace or punct - anything but \r, \n, letter, number. `first` is
+ * the already-decoded codepoint at i; the caller guarantees it is not
+ * \p{N} (a number cp dispatches to pattern 3 before this runs). Returns
+ * end position of the match, or i if no letters at the right place. */
+static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i,
+                                  uc_cp_info first) {
+    bool lm = uc_is_letter_or_mark(first.cp);
+
+    /* A letter/mark at i starts the run itself; first is already
+     * classified, so the scan resumes after it. This branch is
+     * load-bearing, not an optimization: for a BARE mark (no letter/mark
+     * following), the optional-char path below fails - nothing is left to
+     * satisfy [\p{L}\p{M}]+ - and the mark would fall through to the final
+     * fallback in gpt2_pretokenize, violating its unreachable contract. */
+    if (lm) return scan_letter_mark_run(text, len, i + first.len);
+
+    /* Otherwise try with the optional non-LNN codepoint consumed (first is
+     * never \p{N} here, per the caller's dispatch). */
+    if (first.cp != '\r' && first.cp != '\n') {
+        uint32_t after_opt = i + first.len;
+        uint32_t end       = scan_letter_mark_run(text, len, after_opt);
+        if (end > after_opt) return end;
+    }
+
+    return i;
+}
+
+/* Pattern 4: ` ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*`. The optional space MUST be
+ * exactly the byte 0x20 (regex literal), not any other whitespace. Returns
+ * end position of the match, or i if no punct/symbol run at the right
+ * place. */
+static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i,
+                                  uc_cp_info first) {
+    uint32_t p = i;
+    if (text[p] == ' ') p++;
+
+    uint32_t end = p;
+    while (end < len) {
+        /* The `end == i` reuse of first only serves the no-space path: when
+         * the optional space was consumed, first holds the SPACE's cp info,
+         * but end starts at i+1 and only grows, so end == i is unreachable
+         * and the stale first is never read. */
+        uc_cp_info c = end == i ? first : uc_decode_codepoint(text, len, end);
+        if (uc_is_whitespace_cp(c.cp) || uc_is_letter_or_mark(c.cp) || uc_is_number(c.cp))
+            break;
+        end += c.len;
+    }
+    if (end == p) return i;
+    while (end < len && (text[end] == '\r' || text[end] == '\n')) end++;
+    return end;
+}
+
+/* Patterns 5+6+7: `\s*[\r\n]+`, `\s+(?!\S)`, fallback `\s+`. One greedy
+ * codepoint-level whitespace scan resolves the whole group. Pattern 5's
+ * `\s*` may itself consume newlines and later whitespace, so its
+ * backtracked match ends one past the LAST \r/\n of the run. That single
+ * fact IS full regex backtracking: greedy `\s*` gives back characters only
+ * until `[\r\n]+` can match, and since everything before the run's last
+ * \r/\n is itself \s, backtracking always lands `[\r\n]+` on that last
+ * newline - even when the `\s*` prefix contains earlier newlines (e.g.
+ * `\n\t\n\t` matches through the second \n). A run without newlines
+ * resolves the pattern-6 lookahead instead: at end of input the
+ * full run stands, before \S a multi-cp run backtracks one CODEPOINT
+ * (whitespace can be multi-byte, e.g. NBSP) so the trailing space gets
+ * handed to pattern 2/4 on the next iteration, while a single-cp run
+ * cannot satisfy the lookahead and falls through to pattern 7, which
+ * matches the same single codepoint. Returns i if there is no whitespace
+ * at i. */
+static uint32_t match_ws_run(const uint8_t *text, uint32_t len, uint32_t i,
+                             uc_cp_info first) {
+    uint32_t end     = i;
+    uint32_t last_cp = i; /* start offset of the run's last whitespace cp */
+    uint32_t nl_end  = 0; /* one past the run's last \r/\n; 0 = none */
+    while (end < len) {
+        uc_cp_info c = end == i ? first : uc_decode_codepoint(text, len, end);
+        if (!uc_is_whitespace_cp(c.cp)) break;
+        if (c.cp == '\r' || c.cp == '\n') nl_end = end + c.len;
+        last_cp = end;
+        end += c.len;
+    }
+    if (end == i) return i;
+    if (nl_end != 0) return nl_end; /* pattern 5: `\s*[\r\n]+` */
+    if (end == len) return end;     /* pattern 6: end of input satisfies (?!\S) */
+    /* text[end] is \S: backtrack one cp so the lookahead sees whitespace;
+     * a single-cp run is pattern 7's `\s+` match instead. */
+    if (last_cp > i) return last_cp;
+    return end;
+}
+
+int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
+    if (len > INT32_MAX) return -1;
+    const uint8_t *text  = (const uint8_t *)input;
+    uint32_t       tlen  = (uint32_t)len;
+    uint32_t       i     = 0;
+    int            count = 0;
+    while (i < tlen) {
+        /* Decode the codepoint at i once; every matcher below reuses it. */
+        uc_cp_info first = uc_decode_codepoint(text, tlen, i);
+        uint32_t   end;
+
+        /* Pattern 1: contraction. */
+        end = match_contraction(text, tlen, i);
+
+        /* Patterns 2+3. \p{N} is disjoint from \p{L}\p{M} and excluded from
+         * pattern 2's optional class, so a number cp can never start pattern
+         * 2; testing pattern 3 (exactly ONE \p{N} codepoint, no +) first is
+         * order-equivalent and avoids a second uc_is_number lookup inside
+         * match_letters_run. */
+        if (end == i) {
+            if (uc_is_number(first.cp)) end = i + first.len;
+            else end = match_letters_run(text, tlen, i, first);
+        }
+
+        /* Pattern 4: optional literal space + punct run + [\r\n]* tail. */
+        if (end == i) end = match_space_punct(text, tlen, i, first);
+
+        /* Patterns 5+6+7: `\s*[\r\n]+`, then `\s+(?!\S)` with `\s+` fallback. */
+        if (end == i) end = match_ws_run(text, tlen, i, first);
+
+        /* Fallback so the scan always advances. Unreachable today (patterns
+         * 2-7 cover every codepoint class, and invalid UTF-8 decodes as
+         * U+FFFD with len 1), but if it ever fires it must not split a
+         * multi-byte codepoint. */
+        if (end == i) end = i + first.len;
+
+        /* Reserve contract: cap >= len, so count can never reach cap. The
+         * guard survives NDEBUG builds where an assert would compile away. */
+        if ((uint32_t)count >= s->pretoks_cap) return -1;
+        s->pretoks[count].off = i;
+        s->pretoks[count].len = end - i;
+        count++;
+        i = end;
+    }
     return count;
 }
 
