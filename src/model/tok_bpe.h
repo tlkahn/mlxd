@@ -48,11 +48,18 @@ typedef struct {
     uint32_t      ids_cap;
     pretok_slice *pretoks; /* filled by gpt2_pretokenize */
     uint32_t      pretoks_cap;
+    char         *text; /* normalization buffer (byte-to-unicode, U+2581, lowercase) */
+    uint32_t      text_cap;
+    int32_t      *out; /* id accumulator across words; bpe_merge resets s->ids */
+    uint32_t      out_cap;
+    char         *cand; /* WordPiece "##" + piece lookup key */
+    uint32_t      cand_cap;
 } encode_scratch;
 
 void encode_scratch_init(encode_scratch *s);
 /* Grow buffers for an input of input_len bytes:
- * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len, pretoks_cap >= len.
+ * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len, pretoks_cap >= len,
+ * text_cap >= len, out_cap >= len, cand_cap >= len + 2.
  * Returns false if input_len exceeds UINT32_MAX / 3 - heap_cap = 3*len is
  * uint32_t arithmetic - or if an allocation fails. On failure the scratch
  * may be PARTIALLY grown (capacities never shrink) and remains usable at
@@ -75,5 +82,13 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
  * exceeds INT32_MAX (before reading any input) or the scratch is
  * under-reserved (mid-scan, before the out-of-bounds write). */
 int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len);
+
+/* Byte-level BPE encode (GPT-2/Qwen-style): gpt2_pretokenize into words, map
+ * each word's bytes through the byte-to-unicode table, bpe_merge per word.
+ * Reserves scratch internally. *out points into scratch (valid until the next
+ * encode or free). Returns the id count, or -1 on overflow/allocation
+ * failure. */
+int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                      int32_t **out);
 
 #endif

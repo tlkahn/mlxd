@@ -269,6 +269,24 @@ bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
         s->pretoks     = pretoks;
         s->pretoks_cap = len;
     }
+    if (s->text_cap < len) {
+        char *text = realloc(s->text, len);
+        if (!text) return false;
+        s->text     = text;
+        s->text_cap = len;
+    }
+    if (s->out_cap < len) {
+        int32_t *out = realloc(s->out, (size_t)len * sizeof(*s->out));
+        if (!out) return false;
+        s->out     = out;
+        s->out_cap = len;
+    }
+    if (s->cand_cap < len + 2) {
+        char *cand = realloc(s->cand, (size_t)len + 2);
+        if (!cand) return false;
+        s->cand     = cand;
+        s->cand_cap = len + 2;
+    }
     return true;
 }
 
@@ -277,6 +295,9 @@ void encode_scratch_free(encode_scratch *s) {
     free(s->heap);
     free(s->ids);
     free(s->pretoks);
+    free(s->text);
+    free(s->out);
+    free(s->cand);
     memset(s, 0, sizeof(*s));
 }
 
@@ -595,6 +616,42 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
         i = end;
     }
     return count;
+}
+
+/* --- Per-mode encoders ------------------------------------------------------- */
+
+int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                      int32_t **out) {
+    if (len > (size_t)INT32_MAX) return -1;
+    /* 2*len: each input byte expands to a 1-2 byte codepoint in s->text, and
+     * bpe_merge on that expansion needs nodes/ids sized to its byte length. */
+    if (!encode_scratch_reserve(s, 2 * len)) return -1;
+
+    int n_words = gpt2_pretokenize(s, text, len);
+    if (n_words < 0) return -1;
+
+    uc_bytes_unicode_t bu;
+    uc_build_bytes_to_unicode(&bu);
+
+    int total = 0;
+    for (int w = 0; w < n_words; w++) {
+        pretok_slice word = s->pretoks[w];
+        uint32_t     tlen = 0;
+        for (uint32_t b = 0; b < word.len; b++) {
+            /* Byte-table codepoints top out at 323: always 1-2 bytes. */
+            tlen += uc_encode_codepoint(bu.byte_to_cp[(uint8_t)text[word.off + b]],
+                                        s->text + tlen);
+        }
+        int32_t *ids;
+        int      n = bpe_merge(tok, s, s->text, tlen, &ids);
+        if (n < 0) return -1;
+        /* Accumulate: bpe_merge reuses s->ids from offset 0 on every call.
+         * Total ids across words <= total expanded bytes <= 2*len = out_cap. */
+        memcpy(s->out + total, ids, (size_t)n * sizeof(*ids));
+        total += n;
+    }
+    *out = s->out;
+    return total;
 }
 
 void tokenizer_free(tokenizer_t *tok) {
