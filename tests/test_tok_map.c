@@ -1,0 +1,131 @@
+/* Unit tests for tok_map's allocation-failure paths. Compiles a private,
+ * fault-injectable copy of tok_map.c: public symbols are macro-renamed so they
+ * don't collide with tok_map.o (linked into every test binary), and calloc is
+ * routed through fi_calloc so grow/init failures are deterministic. */
+
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void *fi_calloc(size_t nmemb, size_t size);
+
+#define calloc            fi_calloc
+#define str_u32_map_init  fi_str_u32_map_init
+#define str_u32_map_free  fi_str_u32_map_free
+#define str_u32_map_put   fi_str_u32_map_put
+#define str_u32_map_get   fi_str_u32_map_get
+#define merge_map_init    fi_merge_map_init
+#define merge_map_free    fi_merge_map_free
+#define merge_map_put     fi_merge_map_put
+#define merge_map_get     fi_merge_map_get
+#include "model/tok_map.c"
+
+/* Fault controls: fail_all fails every allocation; nmemb_limit (when nonzero)
+ * fails any allocation of more than that many entries, so huge-capacity tests
+ * never actually allocate. */
+static bool   fi_fail_all;
+static size_t fi_nmemb_limit;
+
+static void *fi_calloc(size_t nmemb, size_t size) {
+    if (fi_fail_all) return NULL;
+    if (fi_nmemb_limit && nmemb > fi_nmemb_limit) return NULL;
+    void *p = malloc(nmemb * size);
+    if (p) memset(p, 0, nmemb * size);
+    return p;
+}
+
+/* --- basic behavior (sanity for the fault-injected copy) ------------------- */
+
+static void test_str_map_basic(void) {
+    str_u32_map m;
+    assert(str_u32_map_init(&m, 4));
+    assert(m.cap == 4);
+    assert(str_u32_map_put(&m, "a", 1, 10));
+    uint32_t v = 0;
+    assert(str_u32_map_get(&m, "a", 1, &v) && v == 10);
+    assert(str_u32_map_put(&m, "a", 1, 11)); /* key update, count stays 1 */
+    assert(str_u32_map_get(&m, "a", 1, &v) && v == 11);
+    assert(m.count == 1);
+    assert(!str_u32_map_get(&m, "b", 1, &v));
+    str_u32_map_free(&m);
+}
+
+static void test_merge_map_basic(void) {
+    merge_map m;
+    assert(merge_map_init(&m, 4));
+    assert(m.cap == 4);
+    assert(merge_map_put(&m, "a", 1, "b", 1, 7));
+    uint32_t r = 0;
+    assert(merge_map_get(&m, "a", 1, "b", 1, &r) && r == 7);
+    assert(!merge_map_get(&m, "b", 1, "a", 1, &r));
+    merge_map_free(&m);
+}
+
+/* --- failed grow near a full table ------------------------------------------ */
+
+/* A put that trips the grow threshold while allocation is failing must be
+ * refused once the table is one-short-of-full: inserting into the last empty
+ * slot would leave _get with no NULL sentinel, so a miss probes forever. */
+static void test_str_map_put_refused_when_grow_fails_near_full(void) {
+    str_u32_map m;
+    assert(str_u32_map_init(&m, 4));
+    assert(m.cap == 4);
+    assert(str_u32_map_put(&m, "a", 1, 1));
+    assert(str_u32_map_put(&m, "b", 1, 2));
+    assert(str_u32_map_put(&m, "c", 1, 3));
+    assert(m.count == 3 && m.cap == 4);
+
+    fi_fail_all = true;
+    assert(!str_u32_map_put(&m, "d", 1, 4));
+    fi_fail_all = false;
+
+    /* Existing keys survive the refused put; a miss terminates. */
+    uint32_t v = 0;
+    assert(str_u32_map_get(&m, "a", 1, &v) && v == 1);
+    assert(str_u32_map_get(&m, "b", 1, &v) && v == 2);
+    assert(str_u32_map_get(&m, "c", 1, &v) && v == 3);
+    assert(!str_u32_map_get(&m, "d", 1, &v));
+
+    /* With allocation working again the same put grows and succeeds. */
+    assert(str_u32_map_put(&m, "d", 1, 4));
+    assert(m.cap == 8);
+    assert(str_u32_map_get(&m, "d", 1, &v) && v == 4);
+    str_u32_map_free(&m);
+}
+
+static void test_merge_map_put_refused_when_grow_fails_near_full(void) {
+    merge_map m;
+    assert(merge_map_init(&m, 4));
+    assert(m.cap == 4);
+    assert(merge_map_put(&m, "a", 1, "b", 1, 0));
+    assert(merge_map_put(&m, "b", 1, "c", 1, 1));
+    assert(merge_map_put(&m, "c", 1, "d", 1, 2));
+    assert(m.count == 3 && m.cap == 4);
+
+    fi_fail_all = true;
+    assert(!merge_map_put(&m, "d", 1, "e", 1, 3));
+    fi_fail_all = false;
+
+    uint32_t r = 0;
+    assert(merge_map_get(&m, "a", 1, "b", 1, &r) && r == 0);
+    assert(merge_map_get(&m, "b", 1, "c", 1, &r) && r == 1);
+    assert(merge_map_get(&m, "c", 1, "d", 1, &r) && r == 2);
+    assert(!merge_map_get(&m, "d", 1, "e", 1, &r));
+
+    assert(merge_map_put(&m, "d", 1, "e", 1, 3));
+    assert(m.cap == 8);
+    assert(merge_map_get(&m, "d", 1, "e", 1, &r) && r == 3);
+    merge_map_free(&m);
+}
+
+int main(void) {
+    test_str_map_basic();
+    test_merge_map_basic();
+    test_str_map_put_refused_when_grow_fails_near_full();
+    test_merge_map_put_refused_when_grow_fails_near_full();
+    printf("All tok_map tests passed.\n");
+    return 0;
+}

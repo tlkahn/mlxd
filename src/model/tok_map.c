@@ -68,9 +68,9 @@ static bool str_u32_map_grow(str_u32_map *m) {
 }
 
 bool str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t val) {
-    /* A failed grow is fatal only when the table has no free slot left:
-     * the probe loop below would never terminate. */
-    if (m->count * 4 >= m->cap * 3 && !str_u32_map_grow(m) && m->count == m->cap)
+    /* A failed grow is fatal once the table is one-short-of-full: the table
+     * must always keep one empty slot, or _get on a miss never terminates. */
+    if (m->count * 4 >= m->cap * 3 && !str_u32_map_grow(m) && m->count + 1 >= m->cap)
         return false;
     uint64_t h = fnv1a(key, key_len);
     uint32_t mask = m->cap - 1;
@@ -162,9 +162,9 @@ static bool merge_map_grow(merge_map *m) {
 
 bool merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,
                    uint32_t rlen, uint32_t rank) {
-    /* A failed grow is fatal only when the table has no free slot left:
-     * the probe loop below would never terminate. */
-    if (m->count * 4 >= m->cap * 3 && !merge_map_grow(m) && m->count == m->cap)
+    /* A failed grow is fatal once the table is one-short-of-full: the table
+     * must always keep one empty slot, or _get on a miss never terminates. */
+    if (m->count * 4 >= m->cap * 3 && !merge_map_grow(m) && m->count + 1 >= m->cap)
         return false;
     uint64_t h = merge_hash(l, llen, r, rlen);
     uint32_t mask = m->cap - 1;
