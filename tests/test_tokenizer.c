@@ -489,18 +489,6 @@ static void test_bpe_bytelevel_az(void) {
     tokenizer_free(tok);
 }
 
-/* Encode a codepoint <= 0x7FF as UTF-8 (enough for the byte table's max 323). */
-static int test_utf8_encode(uint32_t cp, char *buf) {
-    if (cp < 0x80) {
-        buf[0] = (char)cp;
-        return 1;
-    }
-    assert(cp < 0x800);
-    buf[0] = (char)(0xC0 | (cp >> 6));
-    buf[1] = (char)(0x80 | (cp & 0x3F));
-    return 2;
-}
-
 /* Byte-level fallback: input "\xC3\xA9" is ONE UTF-8 char ("é"), so it forms
  * a single symbol that misses the vocab. The fallback must emit one token per
  * RAW byte, keyed by the UTF-8 form of that byte's GPT-2 unicode mapping -
@@ -511,8 +499,8 @@ static void test_bpe_bytelevel_fallback(void) {
 
     char key_c3[5] = {0};
     char key_a9[5] = {0};
-    test_utf8_encode(table.byte_to_cp[0xC3], key_c3);
-    test_utf8_encode(table.byte_to_cp[0xA9], key_a9);
+    uc_encode_codepoint(table.byte_to_cp[0xC3], key_c3);
+    uc_encode_codepoint(table.byte_to_cp[0xA9], key_a9);
 
     char json[256];
     int  n = snprintf(json, sizeof(json),

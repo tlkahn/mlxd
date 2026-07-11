@@ -11,6 +11,10 @@ typedef struct {
 
 uc_cp_info uc_decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos);
 
+/* Encode cp as UTF-8 into buf, returning the byte length (1-4); returns 0
+   for surrogates and cp > U+10FFFF, leaving buf untouched. */
+uint32_t uc_encode_codepoint(uint32_t cp, char buf[4]);
+
 /* Exact Unicode \p{L}, \p{M}, \p{N} classifiers, backed by range tables
    generated from the UCD (tok_unicode_tables.h, `make unicode-tables`). */
 bool uc_is_letter(uint32_t cp);

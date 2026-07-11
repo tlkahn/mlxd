@@ -195,19 +195,6 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 
 /* --- BPE merge (heap + linked list) ---------------------------------------- */
 
-/* Encode a codepoint <= 0x7FF as UTF-8; the GPT-2 byte table's max mapped
- * codepoint is 323, so two bytes always suffice. */
-static uint32_t utf8_encode_cp(uint32_t cp, char buf[4]) {
-    if (cp < 0x80) {
-        buf[0] = (char)cp;
-        return 1;
-    }
-    assert(cp < 0x800);
-    buf[0] = (char)(0xC0 | (cp >> 6));
-    buf[1] = (char)(0x80 | (cp & 0x3F));
-    return 2;
-}
-
 void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
 
 bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
@@ -307,8 +294,11 @@ static int bpe_emit_symbol(const tokenizer_t *tok, const char *input, const bpe_
          * well-formed vocab, so a miss is pathological; emit <unk> when the
          * vocab has one rather than silently dropping the byte. */
         for (uint32_t b = n->start; b < n->end; b++) {
-            char     buf[4];
-            uint32_t blen = utf8_encode_cp(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
+            char buf[4];
+            /* The byte table's max mapped codepoint is 323, so this always
+             * encodes to 1-2 bytes and never fails. */
+            uint32_t blen =
+                uc_encode_codepoint(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
             if (str_u32_map_get(&tok->vocab, buf, blen, &id))
                 ids[count++] = (int32_t)id;
             else if (tok->unk_id >= 0)

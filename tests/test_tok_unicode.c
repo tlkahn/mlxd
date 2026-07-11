@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 
 /* --- uc_decode_codepoint ---------------------------------------------------- */
@@ -325,6 +326,35 @@ static void test_uc_is_whitespace_cp_exact(void) {
     assert(next == n);
 }
 
+/* --- uc_encode_codepoint ----------------------------------------------------- */
+
+static void test_encode_codepoint(void) {
+    char buf[4];
+    assert(uc_encode_codepoint(0x41, buf) == 1 && buf[0] == 'A');
+    assert(uc_encode_codepoint(0xE9, buf) == 2 && memcmp(buf, "\xC3\xA9", 2) == 0);
+    assert(uc_encode_codepoint(0x20AC, buf) == 3 && memcmp(buf, "\xE2\x82\xAC", 3) == 0);
+    assert(uc_encode_codepoint(0x1F600, buf) == 4 && memcmp(buf, "\xF0\x9F\x98\x80", 4) == 0);
+
+    /* Round-trip every length-class boundary through uc_decode_codepoint. */
+    static const uint32_t cps[] = {0x00,   0x7F,   0x80,    0x7FF,    0x800,
+                                   0xD7FF, 0xE000, 0xFFFF,  0x10000,  0x10FFFF};
+    for (size_t i = 0; i < sizeof(cps) / sizeof(cps[0]); i++) {
+        uint32_t n = uc_encode_codepoint(cps[i], buf);
+        assert(n >= 1 && n <= 4);
+        uc_cp_info r = uc_decode_codepoint((const uint8_t *)buf, n, 0);
+        assert(r.cp == cps[i]);
+        assert(r.len == n);
+    }
+}
+
+static void test_encode_codepoint_rejects(void) {
+    char buf[4];
+    assert(uc_encode_codepoint(0xD800, buf) == 0);   /* surrogate low bound */
+    assert(uc_encode_codepoint(0xDFFF, buf) == 0);   /* surrogate high bound */
+    assert(uc_encode_codepoint(0x110000, buf) == 0); /* past Unicode max */
+    assert(uc_encode_codepoint(UINT32_MAX, buf) == 0);
+}
+
 /* --- uc_build_bytes_to_unicode ---------------------------------------------- */
 
 static void test_bytes_to_unicode_identity(void) {
@@ -388,6 +418,8 @@ int main(void) {
     test_uc_is_whitespace();
     test_uc_is_whitespace_cp();
     test_uc_is_whitespace_cp_exact();
+    test_encode_codepoint();
+    test_encode_codepoint_rejects();
     test_bytes_to_unicode_identity();
     test_bytes_to_unicode_offset();
     test_bytes_to_unicode_roundtrip();

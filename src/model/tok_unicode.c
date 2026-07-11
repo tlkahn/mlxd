@@ -67,6 +67,34 @@ uc_cp_info uc_decode_codepoint(const uint8_t *text, uint32_t len, uint32_t pos) 
     return (uc_cp_info){cp, byte_len};
 }
 
+uint32_t uc_encode_codepoint(uint32_t cp, char buf[4]) {
+    if (cp < 0x80) {
+        buf[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        buf[0] = (char)(0xC0 | (cp >> 6));
+        buf[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        if (cp >= 0xD800 && cp <= 0xDFFF)
+            return 0;
+        buf[0] = (char)(0xE0 | (cp >> 12));
+        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    if (cp <= 0x10FFFF) {
+        buf[0] = (char)(0xF0 | (cp >> 18));
+        buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+    return 0;
+}
+
 /* Exact \p{L} via generated UCD range table (see tok_unicode_tables.h). */
 bool uc_is_letter(uint32_t cp) {
     if (cp < 0x80)
