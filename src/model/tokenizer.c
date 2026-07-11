@@ -107,7 +107,6 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     tok->bos_id = -1;
     tok->eos_id = -1;
     tok->unk_id = -1;
-    uc_build_bytes_to_unicode(&tok->bytes_unicode);
 
     /* Initialize both maps up front so every early error path below frees
      * fully-initialized maps instead of relying on the calloc-zeroed struct. */
@@ -134,6 +133,10 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     } else {
         tok->type = TOKENIZER_SENTENCEPIECE_BPE;
     }
+
+    /* Only the byte-level BPE fallback reads the table; other types keep the
+     * calloc-zeroed struct. */
+    if (tok->type == TOKENIZER_BPE) uc_build_bytes_to_unicode(&tok->bytes_unicode);
 
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
     uint32_t    max_id = 0;
