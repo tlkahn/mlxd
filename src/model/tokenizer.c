@@ -886,6 +886,67 @@ char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
     return sb_finish(&out);
 }
 
+/* Parse a <0xNN> byte-fallback token: exactly len 6, "<0x", two hex digits,
+ * ">". Returns the byte value, or -1 when the token is not that shape. */
+static int sp_byte_fallback(const char *token, size_t len) {
+    if (len != 6 || memcmp(token, "<0x", 3) != 0 || token[5] != '>') return -1;
+    int v = 0;
+    for (int i = 3; i < 5; i++) {
+        char c = token[i];
+        int  d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+char *decode_sentencepiece(const tokenizer_t *tok, const int32_t *ids, int count,
+                           bool strip_leading_space) {
+    strbuf raw = {0};
+    for (int i = 0; i < count; i++) {
+        const char *token = tokenizer_decode_token(tok, ids[i]);
+        if (!token) continue;
+        size_t tlen = strlen(token);
+        int    b    = sp_byte_fallback(token, tlen);
+        bool   ok;
+        if (b >= 0) {
+            char c = (char)(uint8_t)b;
+            ok     = sb_append(&raw, &c, 1);
+        } else {
+            ok = sb_append(&raw, token, tlen);
+        }
+        if (!ok) {
+            free(raw.buf);
+            return NULL;
+        }
+    }
+
+    if (raw.buf) {
+        /* Rewrite every 3-byte U+2581 as ' ' in place; r + 2 < len still
+         * admits a U+2581 occupying the final 3 bytes. */
+        size_t w = 0, r = 0;
+        while (r < raw.len) {
+            if (r + 2 < raw.len && (uint8_t)raw.buf[r] == 0xE2 &&
+                (uint8_t)raw.buf[r + 1] == 0x96 && (uint8_t)raw.buf[r + 2] == 0x81) {
+                raw.buf[w++] = ' ';
+                r += 3;
+            } else {
+                raw.buf[w++] = raw.buf[r++];
+            }
+        }
+        raw.len = w;
+        if (strip_leading_space && raw.len > 0 && raw.buf[0] == ' ') {
+            memmove(raw.buf, raw.buf + 1, raw.len - 1);
+            raw.len--;
+        }
+        raw.buf[raw.len] = '\0';
+    }
+    return sb_finish(&raw);
+}
+
 void tokenizer_free(tokenizer_t *tok) {
     if (!tok) return;
     str_u32_map_free(&tok->vocab);
@@ -916,9 +977,12 @@ char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count) {
         return decode_byte_level(tok, ids, count);
     case TOKENIZER_WORDPIECE:
         return decode_wordpiece(tok, ids, count);
-    default:
-        return NULL;
+    case TOKENIZER_SENTENCEPIECE_BPE:
+        /* Leading-space stripping is a caller policy (chat template glue);
+         * the public entry point always preserves it. */
+        return decode_sentencepiece(tok, ids, count, false);
     }
+    return NULL;
 }
 
 int tokenizer_vocab_size(const tokenizer_t *tok) { return tok ? tok->vocab_size : 0; }

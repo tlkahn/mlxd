@@ -119,4 +119,11 @@ char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count);
  * allocation failure. */
 char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count);
 
+/* SentencePiece decode: <0xNN> tokens emit the raw byte, others verbatim;
+ * then every U+2581 becomes ' '. strip_leading_space drops exactly one
+ * leading space. Unknown ids are skipped. Returns a malloc'd NUL-terminated
+ * string ("" for count == 0), or NULL on allocation failure. */
+char *decode_sentencepiece(const tokenizer_t *tok, const int32_t *ids, int count,
+                           bool strip_leading_space);
+
 #endif

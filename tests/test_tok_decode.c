@@ -67,9 +67,47 @@ static void test_wordpiece_decode(void) {
     tokenizer_free(tok);
 }
 
+/* --- E11: SentencePiece decode -------------------------------------------------- */
+
+/* SP fixture shared by E11/E12: byte-fallback tokens, U+2581-prefixed and
+ * bare word tokens, plus "<0x1>" - shaped like a byte token but the wrong
+ * length, so it must render verbatim. */
+static tokenizer_t *load_sp_tok(void) {
+    const char *json =
+        "{\"model\":{\"vocab\":{\"<unk>\":0,\"<s>\":1,\"</s>\":2,"
+        "\"\xe2\x96\x81\":3,\"\xe2\x96\x81hello\":4,\"hello\":5,"
+        "\"<0x0A>\":10,\"<0x41>\":11,\"a\":12,\"<0x1>\":13},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    return tok;
+}
+
+static void test_sentencepiece_decode(void) {
+    tokenizer_t *tok = load_sp_tok();
+
+    /* <0xNN> byte-fallback tokens emit the raw byte. */
+    expect_decode(tok, (const int32_t[]){10}, 1, "\n");
+    expect_decode(tok, (const int32_t[]){11}, 1, "A");
+
+    /* U+2581 becomes ' '; the public entry never strips it. */
+    expect_decode(tok, (const int32_t[]){4}, 1, " hello");
+
+    /* strip_leading_space drops exactly one leading space. */
+    char *got = decode_sentencepiece(tok, (const int32_t[]){4}, 1, true);
+    assert(got != NULL);
+    assert(strcmp(got, "hello") == 0);
+    free(got);
+
+    /* Wrong-length <0xN> lookalike renders verbatim. */
+    expect_decode(tok, (const int32_t[]){13}, 1, "<0x1>");
+
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_byte_level_decode();
     test_wordpiece_decode();
+    test_sentencepiece_decode();
     printf("test_tok_decode: all tests passed\n");
     return 0;
 }
