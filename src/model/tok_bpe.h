@@ -45,7 +45,10 @@ void encode_scratch_init(encode_scratch *s);
 /* Grow buffers for an input of input_len bytes:
  * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len.
  * Returns false if input_len exceeds UINT32_MAX / 3 - heap_cap = 3*len is
- * uint32_t arithmetic - or if an allocation fails. */
+ * uint32_t arithmetic - or if an allocation fails. On failure the scratch
+ * may be PARTIALLY grown (capacities never shrink) and remains usable at
+ * its previously reserved size; callers must not call bpe_merge for this
+ * input after a failed reserve. */
 bool encode_scratch_reserve(encode_scratch *s, size_t input_len);
 void encode_scratch_free(encode_scratch *s);
 
