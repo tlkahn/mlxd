@@ -7,6 +7,7 @@
 #include <yyjson/yyjson.h>
 
 #include <assert.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,6 +264,12 @@ bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
         s->heap     = heap;
         s->heap_cap = 3 * len;
     }
+    if (s->pretoks_cap < len) {
+        pretok_slice *pretoks = realloc(s->pretoks, (size_t)len * sizeof(*s->pretoks));
+        if (!pretoks) return false;
+        s->pretoks     = pretoks;
+        s->pretoks_cap = len;
+    }
     return true;
 }
 
@@ -270,6 +277,7 @@ void encode_scratch_free(encode_scratch *s) {
     free(s->nodes);
     free(s->heap);
     free(s->ids);
+    free(s->pretoks);
     memset(s, 0, sizeof(*s));
 }
 
@@ -405,6 +413,78 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
     for (int32_t cur = n_nodes > 0 ? 0 : -1; cur >= 0; cur = s->nodes[cur].next)
         count = bpe_emit_symbol(tok, input, &s->nodes[cur], s->ids, count);
     *out = s->ids;
+    return count;
+}
+
+/* --- GPT-2 pre-tokenization ------------------------------------------------- */
+
+/* Splits text following the Qwen / Llama-3 / GPT-2 pre-tokenizer regex as a
+ * hand-rolled state machine. Each iteration picks the FIRST matching pattern
+ * from the alternation, in declared order.
+ *
+ * Reference (from tokenizer.json pre_tokenizer.pretokenizers[0].pattern):
+ *
+ *     (?i:'s|'t|'re|'ve|'m|'ll|'d)
+ *   | [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+
+ *   | \p{N}
+ *   |  ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*
+ *   | \s*[\r\n]+
+ *   | \s+(?!\S)
+ *   | \s+
+ */
+
+/* Pattern 1: contraction `(?i:'s|'t|'re|'ve|'m|'ll|'d)`. Returns end
+ * position of the match, or i if no contraction starts at i. */
+static uint32_t match_contraction(const uint8_t *text, uint32_t len, uint32_t i) {
+    if (text[i] != '\'' || i + 1 >= len) return i;
+    uint8_t next = (uint8_t)tolower(text[i + 1]);
+    if (next == 's' || next == 't' || next == 'm' || next == 'd') return i + 2;
+    if (i + 2 < len) {
+        uint8_t next2 = (uint8_t)tolower(text[i + 2]);
+        if ((next == 'r' && next2 == 'e') || (next == 'v' && next2 == 'e') ||
+            (next == 'l' && next2 == 'l'))
+            return i + 3;
+    }
+    return i;
+}
+
+/* Pattern 2: `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+`. Returns end position of the
+ * match, or i if no letters at the right place. */
+static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i) {
+    uc_cp_info first = uc_decode_codepoint(text, len, i);
+    if (!uc_is_letter_or_mark(first.cp)) return i;
+    uint32_t end = i + first.len;
+    while (end < len) {
+        uc_cp_info c = uc_decode_codepoint(text, len, end);
+        if (!uc_is_letter_or_mark(c.cp)) break;
+        end += c.len;
+    }
+    return end;
+}
+
+int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
+    if (len > INT32_MAX) return -1;
+    const uint8_t *text  = (const uint8_t *)input;
+    uint32_t       tlen  = (uint32_t)len;
+    uint32_t       i     = 0;
+    int            count = 0;
+    while (i < tlen) {
+        uint32_t end;
+
+        /* Pattern 1: contraction. */
+        end = match_contraction(text, tlen, i);
+
+        /* Pattern 2: optional non-LNN char + letter/mark run. */
+        if (end == i) end = match_letters_run(text, tlen, i);
+
+        /* Fallback: single byte, so the scan always advances. */
+        if (end == i) end = i + 1;
+
+        s->pretoks[count].off = i;
+        s->pretoks[count].len = end - i;
+        count++;
+        i = end;
+    }
     return count;
 }
 
