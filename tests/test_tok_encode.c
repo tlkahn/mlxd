@@ -107,11 +107,19 @@ static void test_wordpiece_unknown_word(void) {
     expect_wp_encode("{\"hello\":10}", "hello xyz", (const int32_t[]){10, 0}, 2);
 }
 
+/* --- E6: each punct byte is its own word ---------------------------------------- */
+
+static void test_wordpiece_punct_split(void) {
+    expect_wp_encode("{\"[UNK]\":0,\"hello\":10,\",\":11,\"world\":12}", "hello, world",
+                     (const int32_t[]){10, 11, 12}, 3);
+}
+
 int main(void) {
     test_byte_level_encode();
     test_wordpiece_encode_wrap();
     test_wordpiece_continuation();
     test_wordpiece_unknown_word();
+    test_wordpiece_punct_split();
     printf("test_tok_encode: all tests passed\n");
     return 0;
 }
