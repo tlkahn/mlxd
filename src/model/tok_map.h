@@ -44,6 +44,12 @@ bool str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t
 bool str_u32_map_get(const str_u32_map *m, const char *key, uint32_t key_len,
                      uint32_t *out_val);
 
+/* Iterate the occupied slots: declares `e` (str_u32_entry *) in scope for the
+ * body. Do not _put/_free while iterating - a grow reallocates entries. */
+#define str_u32_map_foreach(m, e)                                              \
+    for (str_u32_entry *e = (m)->entries; e < (m)->entries + (m)->cap; e++)    \
+        if (e->ptr)
+
 bool merge_map_init(merge_map *m, uint32_t initial_cap);
 void merge_map_free(merge_map *m);
 bool merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,

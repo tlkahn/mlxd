@@ -164,6 +164,40 @@ static void test_merge_map_update_survives_failed_grow_near_full(void) {
     merge_map_free(&m);
 }
 
+/* --- foreach ----------------------------------------------------------------- */
+
+/* str_u32_map_foreach must visit exactly the live entries, each once, with
+ * the stored key/val - including after the table has grown and rehashed. */
+static void test_str_map_foreach_visits_live_entries_once(void) {
+    str_u32_map m;
+    assert(str_u32_map_init(&m, 4));
+    assert(m.cap == 4);
+
+    char keys[6][8];
+    for (int i = 0; i < 6; i++) {
+        int len = snprintf(keys[i], sizeof(keys[i]), "k%d", i);
+        assert(str_u32_map_put(&m, keys[i], (uint32_t)len, (uint32_t)(100 + i)));
+    }
+    assert(m.cap > 4); /* the inserts crossed at least one grow boundary */
+    assert(m.count == 6);
+
+    int seen[6] = {0};
+    uint32_t visited = 0;
+    str_u32_map_foreach(&m, e) {
+        visited++;
+        assert(e->len == 2 && e->ptr[0] == 'k');
+        int i = e->ptr[1] - '0';
+        assert(i >= 0 && i < 6);
+        assert(memcmp(e->ptr, keys[i], 2) == 0);
+        assert(e->val == (uint32_t)(100 + i));
+        seen[i]++;
+    }
+    assert(visited == 6);
+    for (int i = 0; i < 6; i++) assert(seen[i] == 1);
+
+    str_u32_map_free(&m);
+}
+
 /* --- huge initial capacity --------------------------------------------------- */
 
 /* next_pow2 wraps to 0 for v > 2^31; init must never hand back a "successful"
@@ -201,6 +235,7 @@ int main(void) {
     test_merge_map_put_refused_when_grow_fails_near_full();
     test_str_map_update_survives_failed_grow_near_full();
     test_merge_map_update_survives_failed_grow_near_full();
+    test_str_map_foreach_visits_live_entries_once();
     test_str_map_init_huge_cap();
     test_merge_map_init_huge_cap();
     printf("All tok_map tests passed.\n");
