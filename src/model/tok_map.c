@@ -76,16 +76,18 @@ static bool str_u32_map_grow(str_u32_map *m) {
 }
 
 bool str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t val) {
-    /* A failed grow is fatal once the table is one-short-of-full: the table
-     * must always keep one empty slot, or _get on a miss never terminates. */
-    if (m->count * 4 >= m->cap * 3 && !str_u32_map_grow(m) && m->count + 1 >= m->cap)
-        return false;
+    if (m->count * 4 >= m->cap * 3)
+        (void)str_u32_map_grow(m); /* failure tolerated: an update needs no slot */
     uint64_t h = fnv1a(key, key_len);
     uint32_t mask = m->cap - 1;
     uint32_t idx = (uint32_t)(h & mask);
     for (;;) {
         str_u32_entry *e = &m->entries[idx];
         if (!e->ptr) {
+            /* An insert into the last empty slot would leave _get with no
+             * NULL sentinel, so a miss probes forever: refuse it. */
+            if (m->count + 1 >= m->cap)
+                return false;
             e->ptr = key;
             e->len = key_len;
             e->hash = h;
@@ -174,16 +176,18 @@ static bool merge_map_grow(merge_map *m) {
 
 bool merge_map_put(merge_map *m, const char *l, uint32_t llen, const char *r,
                    uint32_t rlen, uint32_t rank) {
-    /* A failed grow is fatal once the table is one-short-of-full: the table
-     * must always keep one empty slot, or _get on a miss never terminates. */
-    if (m->count * 4 >= m->cap * 3 && !merge_map_grow(m) && m->count + 1 >= m->cap)
-        return false;
+    if (m->count * 4 >= m->cap * 3)
+        (void)merge_map_grow(m); /* failure tolerated: an update needs no slot */
     uint64_t h = merge_hash(l, llen, r, rlen);
     uint32_t mask = m->cap - 1;
     uint32_t idx = (uint32_t)(h & mask);
     for (;;) {
         merge_entry *e = &m->entries[idx];
         if (!e->l) {
+            /* An insert into the last empty slot would leave _get with no
+             * NULL sentinel, so a miss probes forever: refuse it. */
+            if (m->count + 1 >= m->cap)
+                return false;
             e->l = l;
             e->r = r;
             e->llen = llen;

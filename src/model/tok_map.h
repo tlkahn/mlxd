@@ -34,10 +34,10 @@ typedef struct {
 
 /* _init returns false when the table allocation fails; the map is then empty
  * (entries NULL) and safe to _free, but not to _put/_get into.
- * _put returns false only when a needed grow failed and the table is
- * one-short-of-full (the last empty slot is the sentinel that terminates
- * _get probes, so it is never filled); after a failed grow with more room
- * it still inserts. */
+ * _put returns false only for an INSERT that would fill the last empty slot
+ * after a failed grow (that slot is the sentinel that terminates _get probes,
+ * so it is never filled); updates of existing keys need no slot and always
+ * succeed, and after a failed grow with more room an insert still lands. */
 bool str_u32_map_init(str_u32_map *m, uint32_t initial_cap);
 void str_u32_map_free(str_u32_map *m);
 bool str_u32_map_put(str_u32_map *m, const char *key, uint32_t key_len, uint32_t val);

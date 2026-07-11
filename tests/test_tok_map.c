@@ -121,6 +121,49 @@ static void test_merge_map_put_refused_when_grow_fails_near_full(void) {
     merge_map_free(&m);
 }
 
+/* A value update of an existing key consumes no slot, so it must succeed even
+ * when the grow attempt at the load threshold fails one-short-of-full; only a
+ * fresh-key insert (which would fill the NULL sentinel) is refused. */
+static void test_str_map_update_survives_failed_grow_near_full(void) {
+    str_u32_map m;
+    assert(str_u32_map_init(&m, 4));
+    assert(m.cap == 4);
+    assert(str_u32_map_put(&m, "a", 1, 1));
+    assert(str_u32_map_put(&m, "b", 1, 2));
+    assert(str_u32_map_put(&m, "c", 1, 3));
+    assert(m.count == 3 && m.cap == 4);
+
+    fi_fail_all = true;
+    assert(str_u32_map_put(&m, "b", 1, 22)); /* update: no slot needed */
+    uint32_t v = 0;
+    assert(str_u32_map_get(&m, "b", 1, &v) && v == 22);
+    assert(m.count == 3 && m.cap == 4);
+    assert(!str_u32_map_put(&m, "d", 1, 4)); /* insert: still refused */
+    assert(!str_u32_map_get(&m, "d", 1, &v)); /* miss still terminates */
+    fi_fail_all = false;
+    str_u32_map_free(&m);
+}
+
+static void test_merge_map_update_survives_failed_grow_near_full(void) {
+    merge_map m;
+    assert(merge_map_init(&m, 4));
+    assert(m.cap == 4);
+    assert(merge_map_put(&m, "a", 1, "b", 1, 0));
+    assert(merge_map_put(&m, "b", 1, "c", 1, 1));
+    assert(merge_map_put(&m, "c", 1, "d", 1, 2));
+    assert(m.count == 3 && m.cap == 4);
+
+    fi_fail_all = true;
+    assert(merge_map_put(&m, "b", 1, "c", 1, 11)); /* rank update: no slot needed */
+    uint32_t r = 0;
+    assert(merge_map_get(&m, "b", 1, "c", 1, &r) && r == 11);
+    assert(m.count == 3 && m.cap == 4);
+    assert(!merge_map_put(&m, "d", 1, "e", 1, 3)); /* insert: still refused */
+    assert(!merge_map_get(&m, "d", 1, "e", 1, &r)); /* miss still terminates */
+    fi_fail_all = false;
+    merge_map_free(&m);
+}
+
 /* --- huge initial capacity --------------------------------------------------- */
 
 /* next_pow2 wraps to 0 for v > 2^31; init must never hand back a "successful"
@@ -156,6 +199,8 @@ int main(void) {
     test_merge_map_basic();
     test_str_map_put_refused_when_grow_fails_near_full();
     test_merge_map_put_refused_when_grow_fails_near_full();
+    test_str_map_update_survives_failed_grow_near_full();
+    test_merge_map_update_survives_failed_grow_near_full();
     test_str_map_init_huge_cap();
     test_merge_map_init_huge_cap();
     printf("All tok_map tests passed.\n");
