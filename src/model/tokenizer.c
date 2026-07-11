@@ -120,12 +120,18 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         return NULL;
     }
 
+    /* Absent model.type is fine (BPE/SP detection below); a present value
+     * must be a recognized string - non-string or unrecognized types (e.g.
+     * Unigram) would encode through the BPE paths with silently wrong ids. */
     yyjson_val *model_type = yyjson_obj_get(model, "type");
-    if (yyjson_is_str(model_type) && strcmp(yyjson_get_str(model_type), "WordPiece") == 0) {
+    const char *type_str   = model_type ? yyjson_get_str(model_type) : NULL;
+    if (model_type && !type_str) {
+        tokenizer_free(tok);
+        return NULL;
+    }
+    if (type_str && strcmp(type_str, "WordPiece") == 0) {
         tok->type = TOKENIZER_WORDPIECE;
-    } else if (yyjson_is_str(model_type) && strcmp(yyjson_get_str(model_type), "BPE") != 0) {
-        /* Unrecognized model.type (e.g. Unigram): encoding through the BPE
-         * paths would produce silently wrong ids, so refuse the load. */
+    } else if (type_str && strcmp(type_str, "BPE") != 0) {
         tokenizer_free(tok);
         return NULL;
     } else if (has_byte_level(yyjson_obj_get(root, "pre_tokenizer"))) {

@@ -302,6 +302,19 @@ static void test_load_rejects_unigram_model_type(void) {
     tokenizer_free(tok);
 }
 
+/* A present-but-non-string model.type is malformed input: it must fail the
+ * load rather than fall through the string checks into BPE/SP detection. */
+static void test_load_rejects_non_string_model_type(void) {
+    const char *num = "{\"model\":{\"type\":42,\"vocab\":{\"a\":0},\"merges\":[]}}";
+    assert(tokenizer_load_json(num, strlen(num)) == NULL);
+
+    const char *boolean = "{\"model\":{\"type\":true,\"vocab\":{\"a\":0},\"merges\":[]}}";
+    assert(tokenizer_load_json(boolean, strlen(boolean)) == NULL);
+
+    const char *arr = "{\"model\":{\"type\":[],\"vocab\":{\"a\":0},\"merges\":[]}}";
+    assert(tokenizer_load_json(arr, strlen(arr)) == NULL);
+}
+
 /* --- bpe_merge tests -------------------------------------------------------- */
 
 /* bpe_node indices are int32_t, so inputs beyond INT32_MAX bytes are
@@ -637,6 +650,7 @@ int main(void) {
     test_load_rejects_huge_id();
     test_load_rejects_non_integer_id();
     test_load_rejects_unigram_model_type();
+    test_load_rejects_non_string_model_type();
     test_reserve_rejects_oversized_input();
     test_scratch_reserve_rejects_len_overflowing_heap_cap();
     test_bpe_merge_rejects_oversized_len();
