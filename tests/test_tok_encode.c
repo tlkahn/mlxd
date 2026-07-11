@@ -127,6 +127,41 @@ static void test_wordpiece_multi_shrink(void) {
                      "international", (const int32_t[]){1, 2, 3, 4}, 4);
 }
 
+/* --- E10: SentencePiece encode --------------------------------------------------- */
+
+/* No model.type and no ByteLevel pre_tokenizer: detected as SentencePiece.
+ * Spaces normalize to U+2581 (\xe2\x96\x81) and the whole string is merged
+ * with NO pre-tokenization, so " hi" folds into one token but "hi" cannot
+ * reach any "\xe2\x96\x81"-prefixed merge. */
+static void test_sentencepiece_encode(void) {
+    const char *json =
+        "{\"model\":{\"vocab\":{\"h\":1,\"i\":2,\"\xe2\x96\x81\":3,"
+        "\"\xe2\x96\x81h\":10,\"\xe2\x96\x81hi\":4},"
+        "\"merges\":[[\"\xe2\x96\x81\",\"h\"],[\"\xe2\x96\x81h\",\"i\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+
+    int32_t *ids;
+    int      n = encode_sentencepiece(tok, &s, " hi", 3, &ids);
+    assert(n == 1);
+    assert(ids[0] == 4);
+
+    n = encode_sentencepiece(tok, &s, "hi", 2, &ids);
+    assert(n == 2);
+    assert(ids[0] == 1);
+    assert(ids[1] == 2);
+
+    /* Empty input encodes to zero ids. */
+    n = encode_sentencepiece(tok, &s, "", 0, &ids);
+    assert(n == 0);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_byte_level_encode();
     test_wordpiece_encode_wrap();
@@ -135,6 +170,7 @@ int main(void) {
     test_wordpiece_punct_split();
     test_wordpiece_lowercase();
     test_wordpiece_multi_shrink();
+    test_sentencepiece_encode();
     printf("test_tok_encode: all tests passed\n");
     return 0;
 }

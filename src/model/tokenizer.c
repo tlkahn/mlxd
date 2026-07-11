@@ -682,6 +682,25 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
     return total;
 }
 
+int encode_sentencepiece(const tokenizer_t *tok, encode_scratch *s, const char *text,
+                         size_t len, int32_t **out) {
+    if (len > (size_t)INT32_MAX) return -1;
+    /* 3*len: each ' ' becomes the 3-byte U+2581 in s->text, and bpe_merge on
+     * that expansion needs nodes/ids sized to its byte length. */
+    if (!encode_scratch_reserve(s, 3 * len)) return -1;
+
+    uint32_t tlen = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == ' ') {
+            memcpy(s->text + tlen, "\xe2\x96\x81", 3);
+            tlen += 3;
+        } else {
+            s->text[tlen++] = text[i];
+        }
+    }
+    return bpe_merge(tok, s, s->text, tlen, out);
+}
+
 /* BERT punctuation: the four ASCII symbol runs around the alphanumerics. */
 static bool wp_is_punct(uint8_t c) {
     return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) ||
