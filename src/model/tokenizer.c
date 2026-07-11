@@ -465,18 +465,20 @@ static uint32_t scan_letter_mark_run(const uint8_t *text, uint32_t len, uint32_t
  * position of the match, or i if no letters at the right place. */
 static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i) {
     uc_cp_info first = uc_decode_codepoint(text, len, i);
+    bool       lm    = uc_is_letter_or_mark(first.cp);
 
-    /* Try with the optional non-LNN codepoint consumed. */
-    if (!uc_is_letter(first.cp) && !uc_is_number(first.cp) && first.cp != '\r' &&
-        first.cp != '\n') {
+    /* A letter/mark at i starts the run itself (a mark reaches the same
+     * match end whether taken as the optional char or as run start, since
+     * \p{M} is in the run class); first is already classified, so the scan
+     * resumes after it. */
+    if (lm) return scan_letter_mark_run(text, len, i + first.len);
+
+    /* Otherwise try with the optional non-LNN codepoint consumed. */
+    if (!uc_is_number(first.cp) && first.cp != '\r' && first.cp != '\n') {
         uint32_t after_opt = i + first.len;
         uint32_t end       = scan_letter_mark_run(text, len, after_opt);
         if (end > after_opt) return end;
     }
-
-    /* Try with the optional codepoint empty: i itself must start the run;
-     * first is already classified, so the scan resumes after it. */
-    if (uc_is_letter_or_mark(first.cp)) return scan_letter_mark_run(text, len, i + first.len);
 
     return i;
 }
