@@ -70,9 +70,39 @@ static void test_wordpiece_encode_wrap(void) {
     tokenizer_free(tok);
 }
 
+/* Load a WordPiece tokenizer whose vocab JSON body is `vocab_body`, encode
+ * `input`, and assert the ids match exactly. No [CLS]/[SEP] in these vocabs,
+ * so bos/eos stay -1 and nothing is wrapped. */
+static void expect_wp_encode(const char *vocab_body, const char *input, const int32_t *want,
+                             int n_want) {
+    char json[512];
+    int  jn = snprintf(json, sizeof(json),
+                       "{\"model\":{\"type\":\"WordPiece\",\"vocab\":%s}}", vocab_body);
+    assert(jn > 0 && (size_t)jn < sizeof(json));
+    tokenizer_t *tok = tokenizer_load_json(json, (size_t)jn);
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    int32_t *ids;
+    int      n = encode_wordpiece(tok, &s, input, strlen(input), &ids);
+    assert(n == n_want);
+    for (int i = 0; i < n_want; i++) assert(ids[i] == want[i]);
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
+/* --- E4: ## continuation pieces ----------------------------------------------- */
+
+static void test_wordpiece_continuation(void) {
+    expect_wp_encode("{\"[UNK]\":0,\"un\":10,\"##like\":11,\"##ly\":12}", "unlikely",
+                     (const int32_t[]){10, 11, 12}, 3);
+}
+
 int main(void) {
     test_byte_level_encode();
     test_wordpiece_encode_wrap();
+    test_wordpiece_continuation();
     printf("test_tok_encode: all tests passed\n");
     return 0;
 }
