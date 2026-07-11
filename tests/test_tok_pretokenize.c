@@ -189,6 +189,48 @@ static void test_nbsp_backtrack(void) {
     expect_pretokens("a\xC2\xA0\xC2\xA0\142", want, 3);
 }
 
+/* --- review-fix characterization pins -------------------------------------------
+ * Lock behavior that the PR-28 review refactors could disturb: uppercase
+ * 2-letter contraction suffixes (case-fold change), leading/bare combining
+ * marks (letter-run restructure), NBSP-then-\S fallthrough (single-decode
+ * change), and whitespace-only inputs (pattern 6+7 merge). */
+
+static void test_contraction_upper_2char(void) {
+    const char *want[] = {"THEY", "'RE"};
+    expect_pretokens("THEY'RE", want, 2);
+}
+
+static void test_nbsp_then_punct(void) {
+    /* NBSP followed by \S falls through patterns 2-6 and lands in pattern 7
+     * as a single-codepoint whitespace pre-token; the '.' follows via 4. */
+    const char *want[] = {"\xC2\xA0", "."};
+    expect_pretokens("\xC2\xA0.", want, 2);
+}
+
+static void test_leading_combining_mark(void) {
+    /* U+0301 is \p{M}: pattern 2's optional non-LNN char absorbs it, then
+     * the letter run continues through 'x'. */
+    const char *want[] = {"\xCC\x81x"};
+    expect_pretokens("\xCC\x81x", want, 1);
+}
+
+static void test_bare_combining_mark(void) {
+    /* U+0301 alone matches pattern 2 with the optional char empty: a mark
+     * is a valid [\p{L}\p{M}]+ run start. */
+    const char *want[] = {"\xCC\x81"};
+    expect_pretokens("\xCC\x81", want, 1);
+}
+
+static void test_ws_only_single(void) {
+    const char *want[] = {" "};
+    expect_pretokens(" ", want, 1);
+}
+
+static void test_ws_only_nbsp(void) {
+    const char *want[] = {"\xC2\xA0"};
+    expect_pretokens("\xC2\xA0", want, 1);
+}
+
 /* --- edge cases ---------------------------------------------------------------- */
 
 static void test_empty_input(void) {
@@ -238,6 +280,13 @@ int main(void) {
     test_thai_then_punct();
 
     test_nbsp_backtrack();
+
+    test_contraction_upper_2char();
+    test_nbsp_then_punct();
+    test_leading_combining_mark();
+    test_bare_combining_mark();
+    test_ws_only_single();
+    test_ws_only_nbsp();
 
     test_empty_input();
     test_lone_apostrophe_at_end();
