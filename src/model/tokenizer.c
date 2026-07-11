@@ -501,6 +501,21 @@ static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i)
     return end;
 }
 
+/* Pattern 5: `\s*[\r\n]+`. Whitespace is codepoint-level (NBSP, ideographic
+ * space, ...), the newline run is literal bytes. Returns end position, or i
+ * if no \r\n follows the \s* prefix. */
+static uint32_t match_ws_newline(const uint8_t *text, uint32_t len, uint32_t i) {
+    uint32_t p = i;
+    while (p < len && text[p] != '\r' && text[p] != '\n') {
+        uc_cp_info c = uc_decode_codepoint(text, len, p);
+        if (!uc_is_whitespace_cp(c.cp)) break;
+        p += c.len;
+    }
+    if (p >= len || (text[p] != '\r' && text[p] != '\n')) return i;
+    while (p < len && (text[p] == '\r' || text[p] == '\n')) p++;
+    return p;
+}
+
 int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
     if (len > INT32_MAX) return -1;
     const uint8_t *text  = (const uint8_t *)input;
@@ -524,6 +539,9 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
 
         /* Pattern 4: optional literal space + punct run + [\r\n]* tail. */
         if (end == i) end = match_space_punct(text, tlen, i);
+
+        /* Pattern 5: whitespace ending in a newline run. */
+        if (end == i) end = match_ws_newline(text, tlen, i);
 
         /* Fallback: single byte, so the scan always advances. */
         if (end == i) end = i + 1;

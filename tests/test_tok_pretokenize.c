@@ -96,6 +96,23 @@ static void test_punct_newline_tail(void) {
     expect_pretokens("):\n", want, 1);
 }
 
+/* --- D5: whitespace + newline runs ------------------------------------------ */
+
+static void test_word_newline(void) {
+    const char *want[] = {"x", "\n"};
+    expect_pretokens("x\n", want, 2);
+}
+
+static void test_word_spaces_newline(void) {
+    const char *want[] = {"x", "   \n"};
+    expect_pretokens("x   \n", want, 2);
+}
+
+static void test_word_newline_run(void) {
+    const char *want[] = {"x", "\n\n"};
+    expect_pretokens("x\n\n", want, 2);
+}
+
 int main(void) {
     test_contraction_t();
     test_contraction_re();
@@ -113,6 +130,10 @@ int main(void) {
     test_space_punct_then_word();
     test_space_star_eq();
     test_punct_newline_tail();
+
+    test_word_newline();
+    test_word_spaces_newline();
+    test_word_newline_run();
 
     printf("All tok_pretokenize tests passed.\n");
     return 0;
