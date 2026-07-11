@@ -654,6 +654,81 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
     return total;
 }
 
+/* --- Per-mode decoders ------------------------------------------------------- */
+
+/* Realloc-doubling byte accumulator for the decoders. buf is NUL-terminated
+ * after every successful append; a NULL buf means nothing appended yet. */
+typedef struct {
+    char  *buf;
+    size_t len;
+    size_t cap;
+} strbuf;
+
+static bool sb_append(strbuf *sb, const char *bytes, size_t n) {
+    if (sb->len + n + 1 > sb->cap) {
+        size_t cap = sb->cap ? sb->cap : 16;
+        while (cap < sb->len + n + 1) cap *= 2;
+        char *buf = realloc(sb->buf, cap);
+        if (!buf) return false;
+        sb->buf = buf;
+        sb->cap = cap;
+    }
+    memcpy(sb->buf + sb->len, bytes, n);
+    sb->len += n;
+    sb->buf[sb->len] = '\0';
+    return true;
+}
+
+/* Hand ownership of the accumulated string to the caller; an untouched
+ * strbuf becomes a malloc'd empty string so decoders never return NULL for
+ * an empty result. */
+static char *sb_finish(strbuf *sb) {
+    if (sb->buf) return sb->buf;
+    char *s = malloc(1);
+    if (s) s[0] = '\0';
+    return s;
+}
+
+char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
+    strbuf concat = {0};
+    for (int i = 0; i < count; i++) {
+        const char *token = tokenizer_decode_token(tok, ids[i]);
+        if (!token) continue;
+        if (!sb_append(&concat, token, strlen(token))) {
+            free(concat.buf);
+            return NULL;
+        }
+    }
+
+    uc_bytes_unicode_t bu;
+    uc_build_bytes_to_unicode(&bu);
+
+    strbuf         out  = {0};
+    const uint8_t *text = (const uint8_t *)concat.buf;
+    uint32_t       tlen = (uint32_t)concat.len;
+    uint32_t       i    = 0;
+    while (i < tlen) {
+        /* Invalid UTF-8 decodes as U+FFFD with len 1: above the byte table's
+         * range, so the raw-bytes branch passes the byte through unchanged. */
+        uc_cp_info c  = uc_decode_codepoint(text, tlen, i);
+        bool       ok;
+        if (c.cp < UC_BYTES_UNICODE_REV_SIZE && bu.cp_to_byte[c.cp] != UINT16_MAX) {
+            char b = (char)(uint8_t)bu.cp_to_byte[c.cp];
+            ok     = sb_append(&out, &b, 1);
+        } else {
+            ok = sb_append(&out, (const char *)text + i, c.len);
+        }
+        if (!ok) {
+            free(concat.buf);
+            free(out.buf);
+            return NULL;
+        }
+        i += c.len;
+    }
+    free(concat.buf);
+    return sb_finish(&out);
+}
+
 void tokenizer_free(tokenizer_t *tok) {
     if (!tok) return;
     str_u32_map_free(&tok->vocab);
@@ -677,10 +752,13 @@ const char *tokenizer_decode_token(const tokenizer_t *tok, int32_t id) {
 }
 
 char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count) {
-    (void)tok;
-    (void)ids;
-    (void)count;
-    return NULL;
+    if (!tok || count < 0 || (count > 0 && !ids)) return NULL;
+    switch (tok->type) {
+    case TOKENIZER_BPE:
+        return decode_byte_level(tok, ids, count);
+    default:
+        return NULL;
+    }
 }
 
 int tokenizer_vocab_size(const tokenizer_t *tok) { return tok ? tok->vocab_size : 0; }
