@@ -499,6 +499,10 @@ static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i,
 
     uint32_t end = p;
     while (end < len) {
+        /* The `end == i` reuse of first only serves the no-space path: when
+         * the optional space was consumed, first holds the SPACE's cp info,
+         * but end starts at i+1 and only grows, so end == i is unreachable
+         * and the stale first is never read. */
         uc_cp_info c = end == i ? first : uc_decode_codepoint(text, len, end);
         if (uc_is_whitespace_cp(c.cp) || uc_is_letter_or_mark(c.cp) || uc_is_number(c.cp))
             break;
@@ -512,8 +516,13 @@ static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i,
 /* Patterns 5+6+7: `\s*[\r\n]+`, `\s+(?!\S)`, fallback `\s+`. One greedy
  * codepoint-level whitespace scan resolves the whole group. Pattern 5's
  * `\s*` may itself consume newlines and later whitespace, so its
- * backtracked match ends one past the LAST \r/\n of the run; a run without
- * newlines resolves the pattern-6 lookahead instead: at end of input the
+ * backtracked match ends one past the LAST \r/\n of the run. That single
+ * fact IS full regex backtracking: greedy `\s*` gives back characters only
+ * until `[\r\n]+` can match, and since everything before the run's last
+ * \r/\n is itself \s, backtracking always lands `[\r\n]+` on that last
+ * newline - even when the `\s*` prefix contains earlier newlines (e.g.
+ * `\n\t\n\t` matches through the second \n). A run without newlines
+ * resolves the pattern-6 lookahead instead: at end of input the
  * full run stands, before \S a multi-cp run backtracks one CODEPOINT
  * (whitespace can be multi-byte, e.g. NBSP) so the trailing space gets
  * handed to pattern 2/4 on the next iteration, while a single-cp run
