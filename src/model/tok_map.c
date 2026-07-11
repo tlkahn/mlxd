@@ -32,7 +32,13 @@ static uint32_t next_pow2(uint32_t v) {
 
 /* --- str_u32_map ---------------------------------------------------------- */
 
+/* next_pow2 wraps to 0 above 2^31; cap the hint so it never sees that range.
+ * The table still grows on demand, so clamping is functionally transparent. */
+#define MAP_MAX_INITIAL_CAP (1u << 30)
+
 bool str_u32_map_init(str_u32_map *m, uint32_t initial_cap) {
+    if (initial_cap > MAP_MAX_INITIAL_CAP)
+        initial_cap = MAP_MAX_INITIAL_CAP;
     m->cap = next_pow2(initial_cap < 4 ? 4 : initial_cap);
     m->count = 0;
     m->entries = calloc(m->cap, sizeof(str_u32_entry));
@@ -47,6 +53,8 @@ void str_u32_map_free(str_u32_map *m) {
 
 /* On allocation failure keeps the old table and returns false. */
 static bool str_u32_map_grow(str_u32_map *m) {
+    if (m->cap > UINT32_MAX / 2)
+        return false;
     uint32_t new_cap = m->cap * 2;
     str_u32_entry *new_entries = calloc(new_cap, sizeof(str_u32_entry));
     if (!new_entries)
@@ -126,6 +134,8 @@ static bool merge_eq(const merge_entry *e, const char *l, uint32_t llen,
 }
 
 bool merge_map_init(merge_map *m, uint32_t initial_cap) {
+    if (initial_cap > MAP_MAX_INITIAL_CAP)
+        initial_cap = MAP_MAX_INITIAL_CAP;
     m->cap = next_pow2(initial_cap < 4 ? 4 : initial_cap);
     m->count = 0;
     m->entries = calloc(m->cap, sizeof(merge_entry));
@@ -140,6 +150,8 @@ void merge_map_free(merge_map *m) {
 
 /* On allocation failure keeps the old table and returns false. */
 static bool merge_map_grow(merge_map *m) {
+    if (m->cap > UINT32_MAX / 2)
+        return false;
     uint32_t new_cap = m->cap * 2;
     merge_entry *new_entries = calloc(new_cap, sizeof(merge_entry));
     if (!new_entries)

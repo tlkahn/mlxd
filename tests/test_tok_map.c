@@ -121,11 +121,43 @@ static void test_merge_map_put_refused_when_grow_fails_near_full(void) {
     merge_map_free(&m);
 }
 
+/* --- huge initial capacity --------------------------------------------------- */
+
+/* next_pow2 wraps to 0 for v > 2^31; init must never hand back a "successful"
+ * map with cap 0 (mask would be UINT32_MAX -> OOB probes). Either a clean
+ * failure or a real nonzero capacity is acceptable. fi_nmemb_limit keeps the
+ * test from ever allocating a real multi-GB table. */
+static void test_str_map_init_huge_cap(void) {
+    fi_nmemb_limit = 1u << 20;
+    str_u32_map m;
+    bool ok = str_u32_map_init(&m, UINT32_MAX);
+    assert(!ok || m.cap != 0);
+    str_u32_map_free(&m);
+    ok = str_u32_map_init(&m, (1u << 31) + 1);
+    assert(!ok || m.cap != 0);
+    str_u32_map_free(&m);
+    fi_nmemb_limit = 0;
+}
+
+static void test_merge_map_init_huge_cap(void) {
+    fi_nmemb_limit = 1u << 20;
+    merge_map m;
+    bool ok = merge_map_init(&m, UINT32_MAX);
+    assert(!ok || m.cap != 0);
+    merge_map_free(&m);
+    ok = merge_map_init(&m, (1u << 31) + 1);
+    assert(!ok || m.cap != 0);
+    merge_map_free(&m);
+    fi_nmemb_limit = 0;
+}
+
 int main(void) {
     test_str_map_basic();
     test_merge_map_basic();
     test_str_map_put_refused_when_grow_fails_near_full();
     test_merge_map_put_refused_when_grow_fails_near_full();
+    test_str_map_init_huge_cap();
+    test_merge_map_init_huge_cap();
     printf("All tok_map tests passed.\n");
     return 0;
 }
