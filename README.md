@@ -97,6 +97,21 @@ Key design decisions:
 - **JSON via yyjson only** - no manual string construction or escape helpers.
 - **No vtable dispatch** - concrete engine struct; HTTP layer takes an engine pointer directly.
 
+## Performance
+
+Benchmark on Apple M4 Max (128 GB), Qwen3-0.6B-MLX (4-bit), 256 prompt tokens / 128 generated tokens:
+
+| Server | Prompt (tok/s) | Generation (tok/s) | Time to first token (ms) | Peak RSS (MB) |
+|--------|---------------:|--------------------|--------------------------|---------------|
+| mlxd | TBD | TBD | TBD | TBD |
+| [ollama](https://github.com/ollama/ollama) | TBD | TBD | TBD | TBD |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | TBD | TBD | TBD | TBD |
+| [mlx-serve](https://github.com/ddalcucu/mlx-serve) | TBD | TBD | TBD | TBD |
+
+Methodology: each server warmed with one request, then measured over 10 runs. See `tools/bench.sh` for reproduction.
+
+> Numbers will be filled once the engine module is complete.
+
 ## Project status
 
 This project is an active rewrite from Zig to C11 ([tracking epic](https://github.com/tlkahn/mlxd/issues/9)). Current progress:
