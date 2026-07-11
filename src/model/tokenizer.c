@@ -516,12 +516,14 @@ static uint32_t match_ws_newline(const uint8_t *text, uint32_t len, uint32_t i) 
     return p;
 }
 
-/* Pattern 6: `\s+(?!\S)`. Greedy codepoint-level whitespace match, then
- * backtracks one CODEPOINT (whitespace can be multi-byte, e.g. NBSP) if the
- * next char is \S, so the trailing space gets handed to pattern 2/4 on the
- * next iteration. Returns i if there is no whitespace at i, or if the run
- * is a single codepoint followed by \S (lookahead unsatisfiable). */
-static uint32_t match_trailing_ws(const uint8_t *text, uint32_t len, uint32_t i) {
+/* Patterns 6+7: `\s+(?!\S)` then fallback `\s+`. Greedy codepoint-level
+ * whitespace match, then resolves the lookahead: at end of input the full
+ * run stands; before \S a multi-cp run backtracks one CODEPOINT (whitespace
+ * can be multi-byte, e.g. NBSP) so the trailing space gets handed to
+ * pattern 2/4 on the next iteration, while a single-cp run cannot satisfy
+ * the lookahead and falls through to pattern 7, which matches the same
+ * single codepoint. Returns i if there is no whitespace at i. */
+static uint32_t match_ws_run(const uint8_t *text, uint32_t len, uint32_t i) {
     uint32_t end     = i;
     uint32_t last_cp = i; /* start offset of the run's last whitespace cp */
     while (end < len) {
@@ -532,9 +534,10 @@ static uint32_t match_trailing_ws(const uint8_t *text, uint32_t len, uint32_t i)
     }
     if (end == i) return i;
     if (end == len) return end; /* end of input - lookahead trivially OK */
-    /* text[end] is \S: backtrack one cp so the lookahead sees whitespace. */
+    /* text[end] is \S: backtrack one cp so the lookahead sees whitespace;
+     * a single-cp run is pattern 7's `\s+` match instead. */
     if (last_cp > i) return last_cp;
-    return i;
+    return end;
 }
 
 int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
@@ -564,17 +567,8 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
         /* Pattern 5: whitespace ending in a newline run. */
         if (end == i) end = match_ws_newline(text, tlen, i);
 
-        /* Pattern 6: trailing whitespace `\s+(?!\S)`. */
-        if (end == i) end = match_trailing_ws(text, tlen, i);
-
-        /* Pattern 7: fallback whitespace `\s+`. */
-        if (end == i) {
-            while (end < tlen) {
-                uc_cp_info c = uc_decode_codepoint(text, tlen, end);
-                if (!uc_is_whitespace_cp(c.cp)) break;
-                end += c.len;
-            }
-        }
+        /* Patterns 6+7: whitespace `\s+(?!\S)` with `\s+` fallback. */
+        if (end == i) end = match_ws_run(text, tlen, i);
 
         /* Fallback: single byte, so the scan always advances. */
         if (end == i) end = i + 1;
