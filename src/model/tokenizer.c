@@ -842,6 +842,31 @@ char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
     return sb_finish(&out);
 }
 
+char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
+    strbuf out = {0};
+    for (int i = 0; i < count; i++) {
+        const char *token = tokenizer_decode_token(tok, ids[i]);
+        if (!token) continue;
+        size_t tlen = strlen(token);
+        /* Registered specials ([CLS], [SEP], ...) are dropped; ordinary
+         * vocab tokens that merely start with '[' are kept. */
+        uint32_t one;
+        if (str_u32_map_get(&tok->special_tokens, token, (uint32_t)tlen, &one)) continue;
+        bool ok;
+        if (tlen >= 2 && token[0] == '#' && token[1] == '#') {
+            ok = sb_append(&out, token + 2, tlen - 2);
+        } else {
+            ok = (i == 0 || out.len == 0 || sb_append(&out, " ", 1)) &&
+                 sb_append(&out, token, tlen);
+        }
+        if (!ok) {
+            free(out.buf);
+            return NULL;
+        }
+    }
+    return sb_finish(&out);
+}
+
 void tokenizer_free(tokenizer_t *tok) {
     if (!tok) return;
     str_u32_map_free(&tok->vocab);
@@ -870,6 +895,8 @@ char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count) {
     switch (tok->type) {
     case TOKENIZER_BPE:
         return decode_byte_level(tok, ids, count);
+    case TOKENIZER_WORDPIECE:
+        return decode_wordpiece(tok, ids, count);
     default:
         return NULL;
     }

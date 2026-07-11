@@ -42,8 +42,34 @@ static void test_byte_level_decode(void) {
     tokenizer_free(tok);
 }
 
+/* --- E9: WordPiece decode ------------------------------------------------------ */
+
+static void test_wordpiece_decode(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":101,\"[SEP]\":102,"
+        "\"hello\":10,\"##ly\":11,\"world\":12}},"
+        "\"added_tokens\":[{\"content\":\"[CLS]\",\"special\":true},"
+        "{\"content\":\"[SEP]\",\"special\":true}]}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    /* Specials dropped; ## glues with no space; plain tokens get one space. */
+    expect_decode(tok, (const int32_t[]){101, 10, 11, 12, 102}, 5, "helloly world");
+    tokenizer_free(tok);
+
+    /* An ordinary vocab token that merely starts with '[' is kept: only
+     * registered specials are dropped. */
+    const char *json2 =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[\":1,\"hello\":2}}}";
+    tok = tokenizer_load_json(json2, strlen(json2));
+    assert(tok != NULL);
+    expect_decode(tok, (const int32_t[]){2, 1}, 2, "hello [");
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_byte_level_decode();
+    test_wordpiece_decode();
     printf("test_tok_decode: all tests passed\n");
     return 0;
 }

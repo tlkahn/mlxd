@@ -106,4 +106,10 @@ int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text
  * string ("" for count == 0), or NULL on allocation failure. */
 char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count);
 
+/* WordPiece decode: drop registered special tokens, glue "##" continuations,
+ * separate other tokens with single spaces. Unknown ids are skipped. Returns
+ * a malloc'd NUL-terminated string ("" for count == 0), or NULL on
+ * allocation failure. */
+char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count);
+
 #endif
