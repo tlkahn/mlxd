@@ -576,9 +576,13 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
         /* Patterns 6+7: whitespace `\s+(?!\S)` with `\s+` fallback. */
         if (end == i) end = match_ws_run(text, tlen, i, first);
 
-        /* Fallback: single byte, so the scan always advances. */
-        if (end == i) end = i + 1;
+        /* Fallback so the scan always advances. Unreachable today (patterns
+         * 2-7 cover every codepoint class, and invalid UTF-8 decodes as
+         * U+FFFD with len 1), but if it ever fires it must not split a
+         * multi-byte codepoint. */
+        if (end == i) end = i + first.len;
 
+        assert((uint32_t)count < s->pretoks_cap); /* reserve contract: cap >= len */
         s->pretoks[count].off = i;
         s->pretoks[count].len = end - i;
         count++;
