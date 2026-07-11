@@ -134,6 +134,73 @@ static void test_space_digits(void) {
     expect_pretokens(" 100", want, 4);
 }
 
+/* --- D7: full Python snippet (integration pin) -------------------------------
+ * Expected split is the HF `tokenizers` reference output. */
+
+static void test_python_snippet(void) {
+    const char *want[] = {"def", " total", "(items", "):\n", "   ", " total", " =", " ", "0"};
+    expect_pretokens("def total(items):\n    total = 0", want, 9);
+}
+
+/* --- D8: punct/letter interleaving (pattern ordering pin) --------------------- */
+
+static void test_special_token_shape(void) {
+    /* Pattern 2's optional non-LNN char beats pattern 4 for "_start". */
+    const char *want[] = {"<|", "im", "_start", "|>"};
+    expect_pretokens("<|im_start|>", want, 4);
+}
+
+/* --- D9: non-Latin letter runs ------------------------------------------------ */
+
+static void test_hebrew_run(void) {
+    const char *want[] = {"\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D"};
+    expect_pretokens("\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D", want, 1); /* שלום */
+}
+
+static void test_space_hebrew_run(void) {
+    const char *want[] = {" \xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D"};
+    expect_pretokens(" \xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D", want, 1);
+}
+
+static void test_thai_run(void) {
+    const char *want[] = {"\xE0\xB9\x84\xE0\xB8\x97\xE0\xB8\xA2"};
+    expect_pretokens("\xE0\xB9\x84\xE0\xB8\x97\xE0\xB8\xA2", want, 1); /* ไทย */
+}
+
+static void test_hebrew_then_punct(void) {
+    const char *want[] = {"\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D", "."};
+    expect_pretokens("\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D.", want, 2);
+}
+
+static void test_thai_then_punct(void) {
+    const char *want[] = {"\xE0\xB9\x84\xE0\xB8\x97\xE0\xB8\xA2", "!"};
+    expect_pretokens("\xE0\xB9\x84\xE0\xB8\x97\xE0\xB8\xA2!", want, 2);
+}
+
+/* --- D10: exact-Unicode pins (beyond the Zig reference) ------------------------
+ * Pins the exact \s decision (Arabic-Indic \p{N} is pinned in D3): NBSP
+ * (U+00A0, 2 bytes) is whitespace, so pattern 6 backtracks one 2-byte
+ * codepoint and pattern 2 absorbs the last NBSP as its optional char. A
+ * byte-level \s regression would split the NBSPs mid-sequence. */
+
+static void test_nbsp_backtrack(void) {
+    /* \142 is 'b' - octal, so it can follow a hex escape without splicing. */
+    const char *want[] = {"a", "\xC2\xA0", "\xC2\xA0\142"};
+    expect_pretokens("a\xC2\xA0\xC2\xA0\142", want, 3);
+}
+
+/* --- edge cases ---------------------------------------------------------------- */
+
+static void test_empty_input(void) {
+    expect_pretokens("", NULL, 0);
+}
+
+static void test_lone_apostrophe_at_end(void) {
+    /* Pattern 1's i+1 < len guard fails; the quote is punct via pattern 4. */
+    const char *want[] = {"don", "'"};
+    expect_pretokens("don'", want, 2);
+}
+
 int main(void) {
     test_contraction_t();
     test_contraction_re();
@@ -159,6 +226,21 @@ int main(void) {
     test_trailing_spaces();
     test_indented_assignment();
     test_space_digits();
+
+    test_python_snippet();
+
+    test_special_token_shape();
+
+    test_hebrew_run();
+    test_space_hebrew_run();
+    test_thai_run();
+    test_hebrew_then_punct();
+    test_thai_then_punct();
+
+    test_nbsp_backtrack();
+
+    test_empty_input();
+    test_lone_apostrophe_at_end();
 
     printf("All tok_pretokenize tests passed.\n");
     return 0;
