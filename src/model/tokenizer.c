@@ -7,7 +7,6 @@
 #include <yyjson/yyjson.h>
 
 #include <assert.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -437,10 +436,11 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
  * position of the match, or i if no contraction starts at i. */
 static uint32_t match_contraction(const uint8_t *text, uint32_t len, uint32_t i) {
     if (text[i] != '\'' || i + 1 >= len) return i;
-    uint8_t next = (uint8_t)tolower(text[i + 1]);
+    /* ASCII case-fold; tolower() is locale-dependent per C11. */
+    uint8_t next = (uint8_t)(text[i + 1] | 0x20);
     if (next == 's' || next == 't' || next == 'm' || next == 'd') return i + 2;
     if (i + 2 < len) {
-        uint8_t next2 = (uint8_t)tolower(text[i + 2]);
+        uint8_t next2 = (uint8_t)(text[i + 2] | 0x20);
         if ((next == 'r' && next2 == 'e') || (next == 'v' && next2 == 'e') ||
             (next == 'l' && next2 == 'l'))
             return i + 3;
