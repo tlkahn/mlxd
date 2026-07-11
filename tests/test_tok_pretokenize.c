@@ -231,6 +231,19 @@ static void test_ws_only_nbsp(void) {
     expect_pretokens("\xC2\xA0", want, 1);
 }
 
+static void test_digit_then_letters(void) {
+    /* \p{N} is excluded from pattern 2's optional class, so a digit is never
+     * absorbed as a letter run's prefix: pattern 3 takes it alone. */
+    const char *want[] = {"1", "abc"};
+    expect_pretokens("1abc", want, 2);
+}
+
+static void test_arabic_digit_then_letters(void) {
+    /* Same boundary with a multi-byte \p{N} (U+0665). */
+    const char *want[] = {"\xD9\xA5", "xy"};
+    expect_pretokens("\xD9\xA5xy", want, 2);
+}
+
 /* --- D5 fix: \s* prefix may contain newlines -----------------------------------
  * `\s*[\r\n]+` backtracks: the greedy \s* consumes newlines and later
  * whitespace, and the match ends one past the LAST \r/\n byte of the run.
@@ -331,6 +344,8 @@ int main(void) {
     test_bare_combining_mark();
     test_ws_only_single();
     test_ws_only_nbsp();
+    test_digit_then_letters();
+    test_arabic_digit_then_letters();
 
     test_cr_space_lf();
     test_lf_tab_lf();
