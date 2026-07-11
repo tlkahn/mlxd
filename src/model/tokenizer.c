@@ -26,7 +26,10 @@ struct tokenizer {
     int32_t            bos_id;
     int32_t            eos_id;
     int32_t            unk_id; /* vocab id of "<unk>", -1 if absent */
-    uc_bytes_unicode_t bytes_unicode;
+    /* Per-byte fallback token id, resolved once at load (-1 = no vocab entry):
+     * BPE maps bytes through the GPT-2 byte-to-unicode table, SentencePiece
+     * through <0xNN> tokens, WordPiece has no byte fallback. */
+    int32_t            byte_fallback_ids[256];
 };
 
 tokenizer_t *tokenizer_load(const char *path) {
@@ -147,10 +150,6 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         tok->type = TOKENIZER_SENTENCEPIECE_BPE;
     }
 
-    /* Only the byte-level BPE fallback reads the table; other types keep the
-     * calloc-zeroed struct. */
-    if (tok->type == TOKENIZER_BPE) uc_build_bytes_to_unicode(&tok->bytes_unicode);
-
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
     uint32_t    max_id = 0;
     size_t      idx, max;
@@ -179,6 +178,33 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 
     uint32_t unk;
     if (str_u32_map_get(&tok->vocab, "<unk>", 5, &unk)) tok->unk_id = (int32_t)unk;
+
+    /* Resolve the per-byte fallback ids once, now that the vocab map is
+     * built; bpe_emit_symbol then indexes instead of re-hashing per byte.
+     * The byte-to-unicode table is only needed here, so it lives on the
+     * stack (decode rebuilds its own when that stage lands). */
+    for (int b = 0; b < 256; b++) tok->byte_fallback_ids[b] = -1;
+    if (tok->type == TOKENIZER_BPE) {
+        uc_bytes_unicode_t bu;
+        uc_build_bytes_to_unicode(&bu);
+        for (int b = 0; b < 256; b++) {
+            char buf[4];
+            /* The byte table's max mapped codepoint is 323, so this always
+             * encodes to 1-2 bytes and never fails. */
+            uint32_t blen = uc_encode_codepoint(bu.byte_to_cp[b], buf);
+            uint32_t id;
+            if (str_u32_map_get(&tok->vocab, buf, blen, &id))
+                tok->byte_fallback_ids[b] = (int32_t)id;
+        }
+    } else if (tok->type == TOKENIZER_SENTENCEPIECE_BPE) {
+        for (int b = 0; b < 256; b++) {
+            char buf[8];
+            int  blen = snprintf(buf, sizeof(buf), "<0x%02X>", b);
+            uint32_t id;
+            if (str_u32_map_get(&tok->vocab, buf, (uint32_t)blen, &id))
+                tok->byte_fallback_ids[b] = (int32_t)id;
+        }
+    }
 
     tok->id_to_token_cap = tok->vocab.count ? max_id + 1 : 0;
     if (tok->id_to_token_cap) {
@@ -311,30 +337,14 @@ static int bpe_emit_symbol(const tokenizer_t *tok, const char *input, const bpe_
         ids[count++] = (int32_t)id;
         return count;
     }
-    if (tok->type == TOKENIZER_BPE) {
-        /* Byte-level BPE: every mapped byte is a base vocab token in any
-         * well-formed vocab, so a miss is pathological; emit <unk> when the
-         * vocab has one rather than silently dropping the byte. */
-        for (uint32_t b = n->start; b < n->end; b++) {
-            char buf[4];
-            /* The byte table's max mapped codepoint is 323, so this always
-             * encodes to 1-2 bytes and never fails. */
-            uint32_t blen =
-                uc_encode_codepoint(tok->bytes_unicode.byte_to_cp[(uint8_t)input[b]], buf);
-            if (str_u32_map_get(&tok->vocab, buf, blen, &id))
-                ids[count++] = (int32_t)id;
-            else if (tok->unk_id >= 0)
-                ids[count++] = tok->unk_id;
-        }
-        return count;
-    }
-    /* SentencePiece byte fallback: unknown symbols become <0xNN> byte tokens,
-     * or <unk> for vocabs without byte entries. */
+    /* Per-byte fallback: ids were resolved at load per tokenizer type (BPE
+     * byte-to-unicode tokens, SentencePiece <0xNN>). A byte without a vocab
+     * entry is pathological (e.g. truncated vocab); emit <unk> when the vocab
+     * has one rather than silently dropping the byte. */
     for (uint32_t b = n->start; b < n->end; b++) {
-        char buf[8];
-        int  blen = snprintf(buf, sizeof(buf), "<0x%02X>", (uint8_t)input[b]);
-        if (str_u32_map_get(&tok->vocab, buf, (uint32_t)blen, &id))
-            ids[count++] = (int32_t)id;
+        int32_t fid = tok->byte_fallback_ids[(uint8_t)input[b]];
+        if (fid >= 0)
+            ids[count++] = fid;
         else if (tok->unk_id >= 0)
             ids[count++] = tok->unk_id;
     }
