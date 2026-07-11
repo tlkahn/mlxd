@@ -492,7 +492,6 @@ static uint32_t match_space_punct(const uint8_t *text, uint32_t len, uint32_t i,
                                   uc_cp_info first) {
     uint32_t p = i;
     if (text[p] == ' ') p++;
-    if (p >= len) return i;
 
     uint32_t end = p;
     while (end < len) {
