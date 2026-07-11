@@ -108,12 +108,18 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     uc_build_bytes_to_unicode(&tok->bytes_unicode);
 
     yyjson_val *model_type = yyjson_obj_get(model, "type");
-    if (yyjson_is_str(model_type) && strcmp(yyjson_get_str(model_type), "WordPiece") == 0)
+    if (yyjson_is_str(model_type) && strcmp(yyjson_get_str(model_type), "WordPiece") == 0) {
         tok->type = TOKENIZER_WORDPIECE;
-    else if (has_byte_level(yyjson_obj_get(root, "pre_tokenizer")))
+    } else if (yyjson_is_str(model_type) && strcmp(yyjson_get_str(model_type), "BPE") != 0) {
+        /* Unrecognized model.type (e.g. Unigram): encoding through the BPE
+         * paths would produce silently wrong ids, so refuse the load. */
+        tokenizer_free(tok);
+        return NULL;
+    } else if (has_byte_level(yyjson_obj_get(root, "pre_tokenizer"))) {
         tok->type = TOKENIZER_BPE;
-    else
+    } else {
         tok->type = TOKENIZER_SENTENCEPIECE_BPE;
+    }
 
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
     size_t vocab_count = yyjson_obj_size(vocab_val);

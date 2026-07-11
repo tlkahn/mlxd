@@ -269,6 +269,19 @@ static void test_load_rejects_non_integer_id(void) {
     assert(tokenizer_load_json(json_real, strlen(json_real)) == NULL);
 }
 
+/* An unrecognized model.type (e.g. Unigram from T5/ALBERT) must fail the load
+ * instead of silently encoding through the SentencePiece-BPE path; absent or
+ * "BPE" types keep loading. */
+static void test_load_rejects_unigram_model_type(void) {
+    const char *unigram = "{\"model\":{\"type\":\"Unigram\",\"vocab\":{\"a\":0}}}";
+    assert(tokenizer_load_json(unigram, strlen(unigram)) == NULL);
+
+    const char *bpe = "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(bpe, strlen(bpe));
+    assert(tok != NULL);
+    tokenizer_free(tok);
+}
+
 /* --- bpe_merge tests -------------------------------------------------------- */
 
 /* bpe_node indices are int32_t, so inputs beyond INT32_MAX bytes are
@@ -545,6 +558,7 @@ int main(void) {
     test_load_rejects_negative_id();
     test_load_rejects_huge_id();
     test_load_rejects_non_integer_id();
+    test_load_rejects_unigram_model_type();
     test_reserve_rejects_oversized_input();
     test_bpe_merge_rejects_oversized_len();
     test_bpe_abcd();
