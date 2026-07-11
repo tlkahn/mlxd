@@ -104,10 +104,20 @@ static void test_sentencepiece_decode(void) {
     tokenizer_free(tok);
 }
 
+/* --- E12: U+2581 occupying the final 3 bytes still becomes a space -------------- */
+
+static void test_sentencepiece_trailing_marker(void) {
+    tokenizer_t *tok = load_sp_tok();
+    expect_decode(tok, (const int32_t[]){5, 3}, 2, "hello ");
+    expect_decode(tok, (const int32_t[]){3}, 1, " ");
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_byte_level_decode();
     test_wordpiece_decode();
     test_sentencepiece_decode();
+    test_sentencepiece_trailing_marker();
     printf("test_tok_decode: all tests passed\n");
     return 0;
 }
