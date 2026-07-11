@@ -113,6 +113,27 @@ static void test_word_newline_run(void) {
     expect_pretokens("x\n\n", want, 2);
 }
 
+/* --- D6: trailing-whitespace backtrack + fallback whitespace ------------------ */
+
+static void test_trailing_spaces(void) {
+    /* End of input satisfies the (?!\S) lookahead: all whitespace matches. */
+    const char *want[] = {"x", "   "};
+    expect_pretokens("x   ", want, 2);
+}
+
+static void test_indented_assignment(void) {
+    /* Pattern 6 leaves the last space of the leading run for pattern 2; the
+     * lone " " before "0" falls through to pattern 7 because a 1-cp run
+     * followed by \S cannot satisfy the lookahead. */
+    const char *want[] = {"   ", " total", " =", " ", "0"};
+    expect_pretokens("    total = 0", want, 5);
+}
+
+static void test_space_digits(void) {
+    const char *want[] = {" ", "1", "0", "0"};
+    expect_pretokens(" 100", want, 4);
+}
+
 int main(void) {
     test_contraction_t();
     test_contraction_re();
@@ -134,6 +155,10 @@ int main(void) {
     test_word_newline();
     test_word_spaces_newline();
     test_word_newline_run();
+
+    test_trailing_spaces();
+    test_indented_assignment();
+    test_space_digits();
 
     printf("All tok_pretokenize tests passed.\n");
     return 0;
