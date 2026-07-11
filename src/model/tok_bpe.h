@@ -52,8 +52,9 @@ void encode_scratch_free(encode_scratch *s);
 
 /* Greedy BPE: repeatedly merge the lowest-ranked adjacent pair (leftmost on
  * ties) until no pair has a rank, then emit vocab IDs for the survivors.
- * Never allocates; *out points into s->ids. Returns the id count, or -1 if
- * len exceeds INT32_MAX (before reading any input). */
+ * Never allocates; *out points into s->ids. Returns the id count, or -1
+ * (before reading any input) if len exceeds INT32_MAX or the tokenizer is
+ * WordPiece, whose greedy longest-match algorithm this does not implement. */
 int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size_t len,
               int32_t **out);
 

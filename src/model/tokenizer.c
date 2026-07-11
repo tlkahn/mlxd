@@ -306,6 +306,9 @@ static int bpe_emit_symbol(const tokenizer_t *tok, const char *input, const bpe_
 
 int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size_t len,
               int32_t **out) {
+    /* WordPiece is greedy longest-match, not pair merging; routing it through
+     * here would mis-tokenize via the SentencePiece byte fallback. */
+    if (tok->type == TOKENIZER_WORDPIECE) return -1;
     /* Node indices are int32_t and positions uint32_t: longer inputs are
      * unrepresentable (and a truncated cast below would loop forever). */
     if (len > (size_t)INT32_MAX) return -1;

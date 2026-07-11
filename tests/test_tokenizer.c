@@ -319,6 +319,26 @@ static void test_bpe_merge_rejects_oversized_len(void) {
     tokenizer_free(tok);
 }
 
+/* bpe_merge implements BPE/SentencePiece merging only; a WordPiece tokenizer
+ * (greedy longest-match, ## continuation) must be refused, not routed through
+ * the SentencePiece byte fallback. */
+static void test_bpe_merge_rejects_wordpiece(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"a\":1,\"##b\":2,\"[UNK]\":0}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    assert(encode_scratch_reserve(&s, 2));
+
+    int32_t *out = NULL;
+    assert(bpe_merge(tok, &s, "ab", 2, &out) == -1);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 static void test_bpe_abcd(void) {
     const char *json =
         "{\"model\":{\"vocab\":{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"ab\":5,\"cd\":6,\"abcd\":7},"
@@ -561,6 +581,7 @@ int main(void) {
     test_load_rejects_unigram_model_type();
     test_reserve_rejects_oversized_input();
     test_bpe_merge_rejects_oversized_len();
+    test_bpe_merge_rejects_wordpiece();
     test_bpe_abcd();
     test_bpe_aaa();
     test_bpe_aaaaa();
