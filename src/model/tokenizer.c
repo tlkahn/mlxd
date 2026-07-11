@@ -251,6 +251,9 @@ static void bpe_push_cand(const tokenizer_t *tok, encode_scratch *s, const char 
     if (!merge_map_get(&tok->merges, input + ln->start, ln->end - ln->start, input + rn->start,
                        rn->end - rn->start, &rank))
         return;
+    /* Total pushes are bounded by 3*(n_nodes-1) < heap_cap = 3*len: n_nodes-1
+     * seeds plus at most two re-pushes per merge, and merges never add nodes. */
+    assert(s->heap_len < s->heap_cap);
     s->heap[s->heap_len++] = (bpe_cand){rank, l, r, ln->ver, rn->ver};
     uint32_t i             = s->heap_len - 1;
     while (i > 0) {
