@@ -6,9 +6,14 @@
 
 #include <yyjson/yyjson.h>
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Largest accepted vocab id (4M-1). Real vocabs top out around 262K; anything
+ * larger is a malformed or hostile file, not a bigger model. */
+#define MLXD_TOK_MAX_ID ((1u << 22) - 1)
 
 struct tokenizer {
     tokenizer_type_t   type;
@@ -118,7 +123,18 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     size_t      idx, max;
     yyjson_val *key, *val;
     yyjson_obj_foreach(vocab_val, idx, max, key, val) {
-        uint32_t id = (uint32_t)yyjson_get_int(val);
+        /* Ids size id_to_token (calloc of max_id+1), so an unvalidated id is
+         * an unbounded allocation; fail the load like the Zig reference. */
+        if (!yyjson_is_int(val)) {
+            tokenizer_free(tok);
+            return NULL;
+        }
+        int64_t raw = yyjson_get_sint(val);
+        if (raw < 0 || raw > MLXD_TOK_MAX_ID) {
+            tokenizer_free(tok);
+            return NULL;
+        }
+        uint32_t id = (uint32_t)raw;
         str_u32_map_put(&tok->vocab, yyjson_get_str(key), (uint32_t)yyjson_get_len(key), id);
         if (id > max_id) max_id = id;
     }
@@ -162,6 +178,7 @@ static uint32_t utf8_encode_cp(uint32_t cp, char buf[4]) {
         buf[0] = (char)cp;
         return 1;
     }
+    assert(cp < 0x800);
     buf[0] = (char)(0xC0 | (cp >> 6));
     buf[1] = (char)(0x80 | (cp & 0x3F));
     return 2;
@@ -169,20 +186,28 @@ static uint32_t utf8_encode_cp(uint32_t cp, char buf[4]) {
 
 void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
 
-void encode_scratch_reserve(encode_scratch *s, size_t input_len) {
+bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
+    if (input_len > (size_t)INT32_MAX) return false;
     uint32_t len = input_len ? (uint32_t)input_len : 1;
     if (s->nodes_cap < len) {
-        s->nodes     = realloc(s->nodes, len * sizeof(*s->nodes));
+        bpe_node *nodes = realloc(s->nodes, (size_t)len * sizeof(*s->nodes));
+        if (!nodes) return false;
+        s->nodes     = nodes;
         s->nodes_cap = len;
     }
     if (s->ids_cap < len) {
-        s->ids     = realloc(s->ids, len * sizeof(*s->ids));
+        int32_t *ids = realloc(s->ids, (size_t)len * sizeof(*s->ids));
+        if (!ids) return false;
+        s->ids     = ids;
         s->ids_cap = len;
     }
-    if (s->heap_cap < 3 * len) {
-        s->heap     = realloc(s->heap, 3 * len * sizeof(*s->heap));
+    if (s->heap_cap / 3 < len) {
+        bpe_cand *heap = realloc(s->heap, 3 * (size_t)len * sizeof(*s->heap));
+        if (!heap) return false;
+        s->heap     = heap;
         s->heap_cap = 3 * len;
     }
+    return true;
 }
 
 void encode_scratch_free(encode_scratch *s) {
@@ -275,6 +300,10 @@ static int bpe_emit_symbol(const tokenizer_t *tok, const char *input, const bpe_
 
 int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size_t len,
               int32_t **out) {
+    /* Node indices are int32_t and positions uint32_t: longer inputs are
+     * unrepresentable (and a truncated cast below would loop forever). */
+    if (len > (size_t)INT32_MAX) return -1;
+
     /* Split into individual UTF-8 characters. */
     uint32_t n_nodes = 0;
     uint32_t pos     = 0;

@@ -6,6 +6,7 @@
 
 #include "model/tokenizer.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* One symbol in the BPE merge worklist. Symbols are always contiguous
@@ -42,13 +43,17 @@ typedef struct {
 
 void encode_scratch_init(encode_scratch *s);
 /* Grow buffers for an input of input_len bytes:
- * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len. */
-void encode_scratch_reserve(encode_scratch *s, size_t input_len);
+ * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len.
+ * Returns false (scratch unchanged, still usable at its old capacity) if
+ * input_len exceeds INT32_MAX - node indices are int32_t - or if an
+ * allocation fails. */
+bool encode_scratch_reserve(encode_scratch *s, size_t input_len);
 void encode_scratch_free(encode_scratch *s);
 
 /* Greedy BPE: repeatedly merge the lowest-ranked adjacent pair (leftmost on
  * ties) until no pair has a rank, then emit vocab IDs for the survivors.
- * Never allocates; *out points into s->ids. Returns the id count. */
+ * Never allocates; *out points into s->ids. Returns the id count, or -1 if
+ * len exceeds INT32_MAX (before reading any input). */
 int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size_t len,
               int32_t **out);
 

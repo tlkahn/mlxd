@@ -247,7 +247,64 @@ static void test_load_json_gpt2_smoke(void) {
     free(buf);
 }
 
+/* Ids are attacker-controlled sizing input (id_to_token is calloc'd to
+ * max_id+1): negative, huge, and non-integer ids must fail the load, matching
+ * the Zig reference's behavior. */
+static void test_load_rejects_negative_id(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"a\":-1},\"merges\":[]}}";
+    assert(tokenizer_load_json(json, strlen(json)) == NULL);
+}
+
+static void test_load_rejects_huge_id(void) {
+    /* 16777216 = 1 << 24, above the 4M id cap (largest real vocab ~262K). */
+    const char *json = "{\"model\":{\"vocab\":{\"a\":0,\"b\":16777216},\"merges\":[]}}";
+    assert(tokenizer_load_json(json, strlen(json)) == NULL);
+}
+
+static void test_load_rejects_non_integer_id(void) {
+    const char *json_str = "{\"model\":{\"vocab\":{\"a\":\"x\"},\"merges\":[]}}";
+    assert(tokenizer_load_json(json_str, strlen(json_str)) == NULL);
+
+    const char *json_real = "{\"model\":{\"vocab\":{\"a\":1.5},\"merges\":[]}}";
+    assert(tokenizer_load_json(json_real, strlen(json_real)) == NULL);
+}
+
 /* --- bpe_merge tests -------------------------------------------------------- */
+
+/* bpe_node indices are int32_t, so inputs beyond INT32_MAX bytes are
+ * unrepresentable: reserve must refuse them without touching the scratch. */
+static void test_reserve_rejects_oversized_input(void) {
+    encode_scratch s;
+    encode_scratch_init(&s);
+    assert(encode_scratch_reserve(&s, 8));
+    bpe_node *nodes     = s.nodes;
+    uint32_t  nodes_cap = s.nodes_cap;
+
+    assert(!encode_scratch_reserve(&s, (size_t)INT32_MAX + 1));
+    assert(s.nodes == nodes);
+    assert(s.nodes_cap == nodes_cap);
+
+    encode_scratch_free(&s);
+}
+
+/* len used to be truncated to uint32_t inside bpe_merge while the loop
+ * compared pos < len in size_t: pos stopped advancing and n_nodes overran the
+ * scratch. The guard must run before any input byte is read. */
+static void test_bpe_merge_rejects_oversized_len(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"a\":1,\"b\":2},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    assert(encode_scratch_reserve(&s, 2));
+
+    int32_t *out = NULL;
+    assert(bpe_merge(tok, &s, "ab", (size_t)UINT32_MAX + 2, &out) == -1);
+
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
 
 static void test_bpe_abcd(void) {
     const char *json =
@@ -258,7 +315,7 @@ static void test_bpe_abcd(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 4);
+    assert(encode_scratch_reserve(&s, 4));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "abcd", 4, &out);
@@ -276,7 +333,7 @@ static void test_bpe_aaa(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 3);
+    assert(encode_scratch_reserve(&s, 3));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "aaa", 3, &out);
@@ -299,7 +356,7 @@ static void test_bpe_aaaaa(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 5);
+    assert(encode_scratch_reserve(&s, 5));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "aaaaa", 5, &out);
@@ -323,7 +380,7 @@ static void test_bpe_hellohello(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 10);
+    assert(encode_scratch_reserve(&s, 10));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "hellohello", 10, &out);
@@ -348,7 +405,7 @@ static void test_bpe_version_restale(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 3);
+    assert(encode_scratch_reserve(&s, 3));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "abc", 3, &out);
@@ -372,7 +429,7 @@ static void test_bpe_bytelevel_az(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 2);
+    assert(encode_scratch_reserve(&s, 2));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "az", 2, &out);
@@ -421,7 +478,7 @@ static void test_bpe_bytelevel_fallback(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 2);
+    assert(encode_scratch_reserve(&s, 2));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "\xC3\xA9", 2, &out);
@@ -441,7 +498,7 @@ static void test_bpe_sp_hexbyte(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 2);
+    assert(encode_scratch_reserve(&s, 2));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "a\n", 2, &out);
@@ -461,7 +518,7 @@ static void test_bpe_sp_unk(void) {
 
     encode_scratch s;
     encode_scratch_init(&s);
-    encode_scratch_reserve(&s, 2);
+    assert(encode_scratch_reserve(&s, 2));
 
     int32_t *out   = NULL;
     int      count = bpe_merge(tok, &s, "a\n", 2, &out);
@@ -485,6 +542,11 @@ int main(void) {
     test_merge_map_miss();
     test_load_json_minimal();
     test_load_json_gpt2_smoke();
+    test_load_rejects_negative_id();
+    test_load_rejects_huge_id();
+    test_load_rejects_non_integer_id();
+    test_reserve_rejects_oversized_input();
+    test_bpe_merge_rejects_oversized_len();
     test_bpe_abcd();
     test_bpe_aaa();
     test_bpe_aaaaa();
