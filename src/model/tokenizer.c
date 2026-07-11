@@ -172,8 +172,11 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
             tokenizer_free(tok);
             return NULL;
         }
-        yyjson_obj_foreach(vocab_val, idx, max, key, val) {
-            tok->id_to_token[(uint32_t)yyjson_get_int(val)] = yyjson_get_str(key);
+        /* Fill from the vocab map rather than re-walking the JSON: same
+         * borrowed NUL-terminated key pointers, ids already validated. */
+        for (uint32_t i = 0; i < tok->vocab.cap; i++) {
+            const str_u32_entry *e = &tok->vocab.entries[i];
+            if (e->ptr) tok->id_to_token[e->val] = e->ptr;
         }
     }
 

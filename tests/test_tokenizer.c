@@ -227,6 +227,26 @@ static void test_load_json_minimal(void) {
     tokenizer_free(tok);
 }
 
+/* Characterization for the id_to_token fill: sparse, unordered ids must all
+ * decode back to their keys and every gap id must decode NULL, regardless of
+ * how the loader walks the vocab. */
+static void test_load_json_sparse_unordered_ids(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"x\":7,\"y\":0,\"z\":3},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    assert(tokenizer_vocab_size(tok) == 3);
+    assert(strcmp(tokenizer_decode_token(tok, 7), "x") == 0);
+    assert(strcmp(tokenizer_decode_token(tok, 0), "y") == 0);
+    assert(strcmp(tokenizer_decode_token(tok, 3), "z") == 0);
+    assert(tokenizer_decode_token(tok, 1) == NULL);
+    assert(tokenizer_decode_token(tok, 2) == NULL);
+    assert(tokenizer_decode_token(tok, 4) == NULL);
+    assert(tokenizer_decode_token(tok, 5) == NULL);
+    assert(tokenizer_decode_token(tok, 6) == NULL);
+    assert(tokenizer_decode_token(tok, 8) == NULL);
+    tokenizer_free(tok);
+}
+
 static void test_load_json_gpt2_smoke(void) {
     const char *path = MLXD_FIXTURES_DIR "/gpt2/tokenizer.json";
     FILE       *f    = fopen(path, "rb");
@@ -611,6 +631,7 @@ int main(void) {
     test_merge_map_put_get();
     test_merge_map_miss();
     test_load_json_minimal();
+    test_load_json_sparse_unordered_ids();
     test_load_json_gpt2_smoke();
     test_load_rejects_negative_id();
     test_load_rejects_huge_id();
