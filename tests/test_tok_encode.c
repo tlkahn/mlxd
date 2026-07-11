@@ -114,12 +114,19 @@ static void test_wordpiece_punct_split(void) {
                      (const int32_t[]){10, 11, 12}, 3);
 }
 
+/* --- E7: ASCII lowercasing ------------------------------------------------------ */
+
+static void test_wordpiece_lowercase(void) {
+    expect_wp_encode("{\"[UNK]\":0,\"hello\":10}", "HELLO", (const int32_t[]){10}, 1);
+}
+
 int main(void) {
     test_byte_level_encode();
     test_wordpiece_encode_wrap();
     test_wordpiece_continuation();
     test_wordpiece_unknown_word();
     test_wordpiece_punct_split();
+    test_wordpiece_lowercase();
     printf("test_tok_encode: all tests passed\n");
     return 0;
 }
