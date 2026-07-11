@@ -113,8 +113,15 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     size_t      vocab_count = yyjson_obj_size(vocab_val);
     yyjson_val *merges_val  = yyjson_obj_get(model, "merges");
     size_t      merge_count = yyjson_is_arr(merges_val) ? yyjson_arr_size(merges_val) : 0;
-    bool vocab_ok  = str_u32_map_init(&tok->vocab, vocab_count ? (uint32_t)vocab_count * 2 : 16);
-    bool merges_ok = merge_map_init(&tok->merges, merge_count ? (uint32_t)merge_count * 2 : 16);
+    /* Compute the capacity hints in size_t and clamp before the narrowing
+     * cast: counts >= 2^31 would wrap the uint32_t doubling. The hint is
+     * advisory (maps grow on demand), so clamping is transparent. */
+    size_t vocab_hint = vocab_count ? vocab_count * 2 : 16;
+    size_t merge_hint = merge_count ? merge_count * 2 : 16;
+    if (vocab_hint > (1u << 30)) vocab_hint = 1u << 30;
+    if (merge_hint > (1u << 30)) merge_hint = 1u << 30;
+    bool vocab_ok  = str_u32_map_init(&tok->vocab, (uint32_t)vocab_hint);
+    bool merges_ok = merge_map_init(&tok->merges, (uint32_t)merge_hint);
     if (!vocab_ok || !merges_ok) {
         tokenizer_free(tok);
         return NULL;
