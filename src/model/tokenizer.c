@@ -462,8 +462,9 @@ static uint32_t scan_letter_mark_run(const uint8_t *text, uint32_t len, uint32_t
 
 /* Pattern 2: `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+`. The optional codepoint may
  * be whitespace or punct - anything but \r, \n, letter, number. `first` is
- * the already-decoded codepoint at i. Returns end position of the match, or
- * i if no letters at the right place. */
+ * the already-decoded codepoint at i; the caller guarantees it is not
+ * \p{N} (a number cp dispatches to pattern 3 before this runs). Returns
+ * end position of the match, or i if no letters at the right place. */
 static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i,
                                   uc_cp_info first) {
     bool lm = uc_is_letter_or_mark(first.cp);
@@ -476,8 +477,9 @@ static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i,
      * fallback in gpt2_pretokenize, violating its unreachable contract. */
     if (lm) return scan_letter_mark_run(text, len, i + first.len);
 
-    /* Otherwise try with the optional non-LNN codepoint consumed. */
-    if (!uc_is_number(first.cp) && first.cp != '\r' && first.cp != '\n') {
+    /* Otherwise try with the optional non-LNN codepoint consumed (first is
+     * never \p{N} here, per the caller's dispatch). */
+    if (first.cp != '\r' && first.cp != '\n') {
         uint32_t after_opt = i + first.len;
         uint32_t end       = scan_letter_mark_run(text, len, after_opt);
         if (end > after_opt) return end;
@@ -553,11 +555,15 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
         /* Pattern 1: contraction. */
         end = match_contraction(text, tlen, i);
 
-        /* Pattern 2: optional non-LNN char + letter/mark run. */
-        if (end == i) end = match_letters_run(text, tlen, i, first);
-
-        /* Pattern 3: exactly ONE \p{N} codepoint (no +). */
-        if (end == i && uc_is_number(first.cp)) end = i + first.len;
+        /* Patterns 2+3. \p{N} is disjoint from \p{L}\p{M} and excluded from
+         * pattern 2's optional class, so a number cp can never start pattern
+         * 2; testing pattern 3 (exactly ONE \p{N} codepoint, no +) first is
+         * order-equivalent and avoids a second uc_is_number lookup inside
+         * match_letters_run. */
+        if (end == i) {
+            if (uc_is_number(first.cp)) end = i + first.len;
+            else end = match_letters_run(text, tlen, i, first);
+        }
 
         /* Pattern 4: optional literal space + punct run + [\r\n]* tail. */
         if (end == i) end = match_space_punct(text, tlen, i, first);
