@@ -263,6 +263,18 @@ static void test_nl_then_spaces_word(void) {
     expect_pretokens("\n  x", want, 3);
 }
 
+/* --- scratch reserve contract ---------------------------------------------------- */
+
+static void test_pretoks_cap_guard(void) {
+    /* An under-reserved scratch must fail with -1, not write out of
+     * bounds - the reserve contract has no assert in release builds. */
+    encode_scratch s;
+    encode_scratch_init(&s);
+    assert(encode_scratch_reserve(&s, 1));        /* cap = 1 */
+    assert(gpt2_pretokenize(&s, "100", 3) == -1); /* needs 3 slices */
+    encode_scratch_free(&s);
+}
+
 /* --- edge cases ---------------------------------------------------------------- */
 
 static void test_empty_input(void) {
@@ -325,6 +337,8 @@ int main(void) {
     test_nl_ws_nl_then_word();
     test_word_cr_sp_lf_word();
     test_nl_then_spaces_word();
+
+    test_pretoks_cap_guard();
 
     test_empty_input();
     test_lone_apostrophe_at_end();

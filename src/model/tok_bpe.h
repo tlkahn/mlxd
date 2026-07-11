@@ -71,8 +71,9 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
 
 /* Split input by the GPT-2 pre-tokenizer regex into slices written to
  * s->pretoks. Never allocates; caller must have called
- * encode_scratch_reserve(s, len). Returns the slice count, or -1
- * (before reading any input) if len exceeds INT32_MAX. */
+ * encode_scratch_reserve(s, len). Returns the slice count, or -1 if len
+ * exceeds INT32_MAX (before reading any input) or the scratch is
+ * under-reserved (mid-scan, before the out-of-bounds write). */
 int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len);
 
 #endif

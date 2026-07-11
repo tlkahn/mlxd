@@ -570,7 +570,9 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
          * multi-byte codepoint. */
         if (end == i) end = i + first.len;
 
-        assert((uint32_t)count < s->pretoks_cap); /* reserve contract: cap >= len */
+        /* Reserve contract: cap >= len, so count can never reach cap. The
+         * guard survives NDEBUG builds where an assert would compile away. */
+        if ((uint32_t)count >= s->pretoks_cap) return -1;
         s->pretoks[count].off = i;
         s->pretoks[count].len = end - i;
         count++;
