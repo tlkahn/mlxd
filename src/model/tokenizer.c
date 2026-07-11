@@ -468,10 +468,12 @@ static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i,
                                   uc_cp_info first) {
     bool lm = uc_is_letter_or_mark(first.cp);
 
-    /* A letter/mark at i starts the run itself (a mark reaches the same
-     * match end whether taken as the optional char or as run start, since
-     * \p{M} is in the run class); first is already classified, so the scan
-     * resumes after it. */
+    /* A letter/mark at i starts the run itself; first is already
+     * classified, so the scan resumes after it. This branch is
+     * load-bearing, not an optimization: for a BARE mark (no letter/mark
+     * following), the optional-char path below fails - nothing is left to
+     * satisfy [\p{L}\p{M}]+ - and the mark would fall through to the final
+     * fallback in gpt2_pretokenize, violating its unreachable contract. */
     if (lm) return scan_letter_mark_run(text, len, i + first.len);
 
     /* Otherwise try with the optional non-LNN codepoint consumed. */
