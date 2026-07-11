@@ -474,8 +474,9 @@ static uint32_t match_letters_run(const uint8_t *text, uint32_t len, uint32_t i)
         if (end > after_opt) return end;
     }
 
-    /* Try with the optional codepoint empty: i itself must start the run. */
-    if (uc_is_letter_or_mark(first.cp)) return scan_letter_mark_run(text, len, i);
+    /* Try with the optional codepoint empty: i itself must start the run;
+     * first is already classified, so the scan resumes after it. */
+    if (uc_is_letter_or_mark(first.cp)) return scan_letter_mark_run(text, len, i + first.len);
 
     return i;
 }
