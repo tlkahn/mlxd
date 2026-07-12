@@ -42,6 +42,19 @@ static void test_byte_level_decode(void) {
     tokenizer_free(tok);
 }
 
+/* A token holding a raw control byte: codepoint 1 is below the byte table's
+ * 324-cp range but unmapped (cp_to_byte[1] == UINT16_MAX), so it must pass
+ * through as the raw byte, exercising the below-256 unmapped branch. */
+static void test_byte_level_decode_unmapped_low_cp(void) {
+    const char *json =
+        "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"vocab\":{\"\\u0001\":1},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    expect_decode(tok, (const int32_t[]){1}, 1, "\x01");
+    tokenizer_free(tok);
+}
+
 /* --- E9: WordPiece decode ------------------------------------------------------ */
 
 static void test_wordpiece_decode(void) {
@@ -160,6 +173,7 @@ static void test_gpt2_fixture_decode(void) {
 
 int main(void) {
     test_byte_level_decode();
+    test_byte_level_decode_unmapped_low_cp();
     test_wordpiece_decode();
     test_wordpiece_decode_custom_prefix();
     test_sentencepiece_decode();

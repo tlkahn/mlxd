@@ -108,9 +108,9 @@ int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text
 int encode_sentencepiece(const tokenizer_t *tok, encode_scratch *s, const char *text,
                          size_t len, int32_t **out);
 
-/* Byte-level BPE decode: concatenate token strings, then map each codepoint
- * back through the byte-to-unicode table (unmapped codepoints pass through as
- * raw UTF-8). Unknown ids are skipped. Returns a malloc'd NUL-terminated
+/* Byte-level BPE decode: map each token's codepoints back through the
+ * byte-to-unicode table (unmapped codepoints pass through as raw UTF-8).
+ * Unknown ids are skipped. Returns a malloc'd NUL-terminated
  * string ("" for count == 0), or NULL on allocation failure. */
 char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count);
 

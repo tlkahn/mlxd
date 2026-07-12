@@ -836,41 +836,41 @@ static char *sb_finish(strbuf *sb) {
 }
 
 char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
-    strbuf concat = {0};
+    const uc_bytes_unicode_t *bu  = &tok->bytes_unicode;
+    strbuf                    out = {0};
+    /* One pass per token, no concat buffer: vocab tokens are yyjson-validated
+     * UTF-8, so a codepoint never spans a token boundary and scanning each
+     * token alone equals scanning their concatenation. */
     for (int i = 0; i < count; i++) {
         const char *token = tokenizer_decode_token(tok, ids[i]);
         if (!token) continue;
-        if (!sb_append(&concat, token, strlen(token))) {
-            free(concat.buf);
-            return NULL;
-        }
-    }
-
-    const uc_bytes_unicode_t *bu = &tok->bytes_unicode;
-
-    strbuf         out  = {0};
-    const uint8_t *text = (const uint8_t *)concat.buf;
-    uint32_t       tlen = (uint32_t)concat.len;
-    uint32_t       i    = 0;
-    while (i < tlen) {
-        /* Invalid UTF-8 decodes as U+FFFD with len 1: above the byte table's
-         * range, so the raw-bytes branch passes the byte through unchanged. */
-        uc_cp_info c  = uc_decode_codepoint(text, tlen, i);
-        bool       ok;
-        if (c.cp < UC_BYTES_UNICODE_REV_SIZE && bu->cp_to_byte[c.cp] != UINT16_MAX) {
-            char b = (char)(uint8_t)bu->cp_to_byte[c.cp];
-            ok     = sb_append(&out, &b, 1);
-        } else {
-            ok = sb_append(&out, (const char *)text + i, c.len);
-        }
-        if (!ok) {
-            free(concat.buf);
+        size_t slen = strlen(token);
+        if (slen > UINT32_MAX) {
             free(out.buf);
             return NULL;
         }
-        i += c.len;
+        const uint8_t *text = (const uint8_t *)token;
+        uint32_t       tlen = (uint32_t)slen;
+        uint32_t       j    = 0;
+        while (j < tlen) {
+            /* Invalid UTF-8 decodes as U+FFFD with len 1: above the byte
+             * table's range, so the raw-bytes branch passes the byte through
+             * unchanged. */
+            uc_cp_info c = uc_decode_codepoint(text, tlen, j);
+            bool       ok;
+            if (c.cp < UC_BYTES_UNICODE_REV_SIZE && bu->cp_to_byte[c.cp] != UINT16_MAX) {
+                char b = (char)(uint8_t)bu->cp_to_byte[c.cp];
+                ok     = sb_append(&out, &b, 1);
+            } else {
+                ok = sb_append(&out, (const char *)text + j, c.len);
+            }
+            if (!ok) {
+                free(out.buf);
+                return NULL;
+            }
+            j += c.len;
+        }
     }
-    free(concat.buf);
     return sb_finish(&out);
 }
 
