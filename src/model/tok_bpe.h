@@ -48,11 +48,18 @@ typedef struct {
     uint32_t      ids_cap;
     pretok_slice *pretoks; /* filled by gpt2_pretokenize */
     uint32_t      pretoks_cap;
+    char         *text; /* normalization buffer (byte-to-unicode, U+2581, lowercase) */
+    uint32_t      text_cap;
+    int32_t      *out; /* id accumulator across words; bpe_merge resets s->ids */
+    uint32_t      out_cap;
+    char         *cand; /* WordPiece "##" + piece lookup key */
+    uint32_t      cand_cap;
 } encode_scratch;
 
 void encode_scratch_init(encode_scratch *s);
 /* Grow buffers for an input of input_len bytes:
- * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len, pretoks_cap >= len.
+ * nodes_cap >= len, ids_cap >= len, heap_cap >= 3*len, pretoks_cap >= len,
+ * text_cap >= len, out_cap >= len, cand_cap >= len + 2.
  * Returns false if input_len exceeds UINT32_MAX / 3 - heap_cap = 3*len is
  * uint32_t arithmetic - or if an allocation fails. On failure the scratch
  * may be PARTIALLY grown (capacities never shrink) and remains usable at
@@ -75,5 +82,52 @@ int bpe_merge(const tokenizer_t *tok, encode_scratch *s, const char *input, size
  * exceeds INT32_MAX (before reading any input) or the scratch is
  * under-reserved (mid-scan, before the out-of-bounds write). */
 int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len);
+
+/* Byte-level BPE encode (GPT-2/Qwen-style): gpt2_pretokenize into words, map
+ * each word's bytes through the byte-to-unicode table, bpe_merge per word.
+ * Reserves nodes/heap/ids/pretoks/text/out (every buffer but cand) at 2*len.
+ * *out points into scratch (valid until the next encode or free). Returns the
+ * id count, or -1 on overflow/allocation failure. */
+int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                      int32_t **out);
+
+/* WordPiece encode (BERT-style): ASCII-lowercase, split on ASCII whitespace
+ * and punctuation, greedy longest-match per word with continuation pieces
+ * prefixed by model.continuing_subword_prefix (default "##"); an
+ * unmatchable word emits one unk id. Emits bos/eos around the body when
+ * set (Stage F relocates that wrap to the public entry point). Reserves
+ * text/out/cand (greedy longest-match, so no merge buffers) at
+ * len + 2 + prefix_len; *out points into scratch. Returns the id count, or
+ * -1 on overflow/allocation failure. */
+int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                     int32_t **out);
+
+/* SentencePiece BPE encode (Gemma-style): replace each ' ' with U+2581 and
+ * bpe_merge the whole string - no pre-tokenization. Reserves nodes/heap/ids/
+ * text (ids return via bpe_merge, so no pretoks/out/cand) at 3*len; *out
+ * points into scratch. Returns the id count, or -1 on overflow/allocation
+ * failure. */
+int encode_sentencepiece(const tokenizer_t *tok, encode_scratch *s, const char *text,
+                         size_t len, int32_t **out);
+
+/* Byte-level BPE decode: map each token's codepoints back through the
+ * byte-to-unicode table (unmapped codepoints pass through as raw UTF-8).
+ * Unknown ids are skipped. Returns a malloc'd NUL-terminated
+ * string ("" for count == 0), or NULL on allocation failure. */
+char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count);
+
+/* WordPiece decode: drop registered special tokens, glue continuation
+ * pieces (the configured prefix, default "##") without a space, separate
+ * other tokens with single spaces. Unknown ids are skipped. Returns
+ * a malloc'd NUL-terminated string ("" for count == 0), or NULL on
+ * allocation failure. */
+char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count);
+
+/* SentencePiece decode: <0xNN> tokens emit the raw byte, others verbatim;
+ * then every U+2581 becomes ' '. strip_leading_space drops exactly one
+ * leading space. Unknown ids are skipped. Returns a malloc'd NUL-terminated
+ * string ("" for count == 0), or NULL on allocation failure. */
+char *decode_sentencepiece(const tokenizer_t *tok, const int32_t *ids, int count,
+                           bool strip_leading_space);
 
 #endif

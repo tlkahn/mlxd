@@ -32,6 +32,11 @@ int tokenizer_encode(const tokenizer_t *tok, const char *text, int32_t *out_ids,
 const char *tokenizer_decode_token(const tokenizer_t *tok, int32_t id);
 
 /* Decode a sequence of token IDs to text.
+ * Special tokens: WordPiece drops registered specials ([CLS], [SEP], ...);
+ * byte-level BPE and SentencePiece render them verbatim (e.g. bos/eos as
+ * <|endoftext|>), so callers must strip specials from ids themselves. The
+ * serving path never feeds them back: the engine signals end-of-stream out
+ * of band instead of emitting the eos token.
  * Returns a heap-allocated string. Caller must free. NULL on error. */
 char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count);
 

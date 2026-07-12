@@ -20,16 +20,26 @@ struct tokenizer {
     yyjson_doc        *doc; /* owns all borrowed vocab/merge strings */
     str_u32_map        vocab;
     merge_map          merges;
+    /* Membership set (val unused) of added_tokens[].content with
+     * "special": true; keys borrowed from doc. Decode drops members. */
+    str_u32_map        special_tokens;
     const char       **id_to_token;
     uint32_t           id_to_token_cap;
     int                vocab_size;
     int32_t            bos_id;
     int32_t            eos_id;
     int32_t            unk_id; /* vocab id of "<unk>", -1 if absent */
+    /* WordPiece continuation prefix (HF model.continuing_subword_prefix),
+     * default "##"; borrowed from doc when overridden. */
+    const char        *wp_prefix;
+    uint32_t           wp_prefix_len;
     /* Per-byte fallback token id, resolved once at load (-1 = no vocab entry):
      * BPE maps bytes through the GPT-2 byte-to-unicode table, SentencePiece
      * through <0xNN> tokens, WordPiece has no byte fallback. */
     int32_t            byte_fallback_ids[256];
+    /* GPT-2 byte-to-unicode table, built once at load for every tokenizer
+     * type: decode_byte_level is callable regardless of type. */
+    uc_bytes_unicode_t bytes_unicode;
 };
 
 tokenizer_t *tokenizer_load(const char *path) {
@@ -106,10 +116,17 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         yyjson_doc_free(doc);
         return NULL;
     }
-    tok->doc    = doc;
-    tok->bos_id = -1;
-    tok->eos_id = -1;
-    tok->unk_id = -1;
+    tok->doc           = doc;
+    tok->bos_id        = -1;
+    tok->eos_id        = -1;
+    tok->unk_id        = -1;
+    tok->wp_prefix     = "##";
+    tok->wp_prefix_len = 2;
+    yyjson_val *cs_prefix = yyjson_obj_get(model, "continuing_subword_prefix");
+    if (yyjson_is_str(cs_prefix)) {
+        tok->wp_prefix     = yyjson_get_str(cs_prefix);
+        tok->wp_prefix_len = (uint32_t)yyjson_get_len(cs_prefix);
+    }
 
     /* Initialize both maps up front so every early error path below frees
      * fully-initialized maps instead of relying on the calloc-zeroed struct. */
@@ -123,9 +140,10 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     size_t merge_hint = merge_count ? merge_count * 2 : 16;
     if (vocab_hint > (1u << 30)) vocab_hint = 1u << 30;
     if (merge_hint > (1u << 30)) merge_hint = 1u << 30;
-    bool vocab_ok  = str_u32_map_init(&tok->vocab, (uint32_t)vocab_hint);
-    bool merges_ok = merge_map_init(&tok->merges, (uint32_t)merge_hint);
-    if (!vocab_ok || !merges_ok) {
+    bool vocab_ok    = str_u32_map_init(&tok->vocab, (uint32_t)vocab_hint);
+    bool merges_ok   = merge_map_init(&tok->merges, (uint32_t)merge_hint);
+    bool specials_ok = str_u32_map_init(&tok->special_tokens, 16);
+    if (!vocab_ok || !merges_ok || !specials_ok) {
         tokenizer_free(tok);
         return NULL;
     }
@@ -179,19 +197,40 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     uint32_t unk;
     if (str_u32_map_get(&tok->vocab, "<unk>", 5, &unk)) tok->unk_id = (int32_t)unk;
 
+    yyjson_val *added = yyjson_obj_get(root, "added_tokens");
+    if (yyjson_is_arr(added)) {
+        yyjson_val *entry;
+        yyjson_arr_foreach(added, idx, max, entry) {
+            yyjson_val *content = yyjson_obj_get(entry, "content");
+            if (!yyjson_is_str(content)) continue;
+            if (!yyjson_is_true(yyjson_obj_get(entry, "special"))) continue;
+            if (!str_u32_map_put(&tok->special_tokens, yyjson_get_str(content),
+                                 (uint32_t)yyjson_get_len(content), 1)) {
+                tokenizer_free(tok);
+                return NULL;
+            }
+        }
+    }
+
+    /* Stage-E-minimal special-id resolution: WordPiece names its specials
+     * [CLS]/[SEP]/[UNK]. Stage G generalizes this across tokenizer types. */
+    if (tok->type == TOKENIZER_WORDPIECE) {
+        uint32_t id;
+        if (str_u32_map_get(&tok->vocab, "[CLS]", 5, &id)) tok->bos_id = (int32_t)id;
+        if (str_u32_map_get(&tok->vocab, "[SEP]", 5, &id)) tok->eos_id = (int32_t)id;
+        if (str_u32_map_get(&tok->vocab, "[UNK]", 5, &id)) tok->unk_id = (int32_t)id;
+    }
+
     /* Resolve the per-byte fallback ids once, now that the vocab map is
-     * built; bpe_emit_symbol then indexes instead of re-hashing per byte.
-     * The byte-to-unicode table is only needed here, so it lives on the
-     * stack (decode rebuilds its own when that stage lands). */
+     * built; bpe_emit_symbol then indexes instead of re-hashing per byte. */
+    uc_build_bytes_to_unicode(&tok->bytes_unicode);
     for (int b = 0; b < 256; b++) tok->byte_fallback_ids[b] = -1;
     if (tok->type == TOKENIZER_BPE) {
-        uc_bytes_unicode_t bu;
-        uc_build_bytes_to_unicode(&bu);
         for (int b = 0; b < 256; b++) {
             char buf[4];
             /* The byte table's max mapped codepoint is 323, so this always
              * encodes to 1-2 bytes and never fails. */
-            uint32_t blen = uc_encode_codepoint(bu.byte_to_cp[b], buf);
+            uint32_t blen = uc_encode_codepoint(tok->bytes_unicode.byte_to_cp[b], buf);
             uint32_t id;
             if (str_u32_map_get(&tok->vocab, buf, blen, &id))
                 tok->byte_fallback_ids[b] = (int32_t)id;
@@ -239,37 +278,72 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 
 void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
 
-bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
+/* One bit per scratch buffer, so each encoder reserves only what its mode
+ * touches (WordPiece never merges; SentencePiece never pre-tokenizes). */
+enum {
+    SCRATCH_NODES   = 1u << 0,
+    SCRATCH_HEAP    = 1u << 1,
+    SCRATCH_IDS     = 1u << 2,
+    SCRATCH_PRETOKS = 1u << 3,
+    SCRATCH_TEXT    = 1u << 4,
+    SCRATCH_OUT     = 1u << 5,
+    SCRATCH_CAND    = 1u << 6,
+    SCRATCH_ALL     = (1u << 7) - 1,
+};
+
+static bool scratch_reserve_mask(encode_scratch *s, size_t input_len, unsigned mask) {
     /* heap_cap = 3 * len is uint32_t arithmetic: refuse any len that would
      * wrap it. UINT32_MAX / 3 < INT32_MAX, so this also keeps node indices
      * representable as int32_t. */
     if (input_len > UINT32_MAX / 3) return false;
     uint32_t len = input_len ? (uint32_t)input_len : 1;
-    if (s->nodes_cap < len) {
+    if ((mask & SCRATCH_NODES) && s->nodes_cap < len) {
         bpe_node *nodes = realloc(s->nodes, (size_t)len * sizeof(*s->nodes));
         if (!nodes) return false;
         s->nodes     = nodes;
         s->nodes_cap = len;
     }
-    if (s->ids_cap < len) {
+    if ((mask & SCRATCH_IDS) && s->ids_cap < len) {
         int32_t *ids = realloc(s->ids, (size_t)len * sizeof(*s->ids));
         if (!ids) return false;
         s->ids     = ids;
         s->ids_cap = len;
     }
-    if (s->heap_cap / 3 < len) {
+    if ((mask & SCRATCH_HEAP) && s->heap_cap / 3 < len) {
         bpe_cand *heap = realloc(s->heap, 3 * (size_t)len * sizeof(*s->heap));
         if (!heap) return false;
         s->heap     = heap;
         s->heap_cap = 3 * len;
     }
-    if (s->pretoks_cap < len) {
+    if ((mask & SCRATCH_PRETOKS) && s->pretoks_cap < len) {
         pretok_slice *pretoks = realloc(s->pretoks, (size_t)len * sizeof(*s->pretoks));
         if (!pretoks) return false;
         s->pretoks     = pretoks;
         s->pretoks_cap = len;
     }
+    if ((mask & SCRATCH_TEXT) && s->text_cap < len) {
+        char *text = realloc(s->text, len);
+        if (!text) return false;
+        s->text     = text;
+        s->text_cap = len;
+    }
+    if ((mask & SCRATCH_OUT) && s->out_cap < len) {
+        int32_t *out = realloc(s->out, (size_t)len * sizeof(*s->out));
+        if (!out) return false;
+        s->out     = out;
+        s->out_cap = len;
+    }
+    if ((mask & SCRATCH_CAND) && s->cand_cap < len + 2) {
+        char *cand = realloc(s->cand, (size_t)len + 2);
+        if (!cand) return false;
+        s->cand     = cand;
+        s->cand_cap = len + 2;
+    }
     return true;
+}
+
+bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
+    return scratch_reserve_mask(s, input_len, SCRATCH_ALL);
 }
 
 void encode_scratch_free(encode_scratch *s) {
@@ -277,6 +351,9 @@ void encode_scratch_free(encode_scratch *s) {
     free(s->heap);
     free(s->ids);
     free(s->pretoks);
+    free(s->text);
+    free(s->out);
+    free(s->cand);
     memset(s, 0, sizeof(*s));
 }
 
@@ -597,10 +674,334 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len) {
     return count;
 }
 
+/* --- Per-mode encoders ------------------------------------------------------- */
+
+int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                      int32_t **out) {
+    if (len > (size_t)INT32_MAX) return -1;
+    /* 2*len: each input byte expands to a 1-2 byte codepoint in s->text, and
+     * bpe_merge on that expansion needs nodes/ids sized to its byte length.
+     * Byte-level uses every buffer except cand (no WordPiece key building). */
+    if (!scratch_reserve_mask(s, 2 * len,
+                              SCRATCH_NODES | SCRATCH_HEAP | SCRATCH_IDS | SCRATCH_PRETOKS |
+                                  SCRATCH_TEXT | SCRATCH_OUT))
+        return -1;
+
+    int n_words = gpt2_pretokenize(s, text, len);
+    if (n_words < 0) return -1;
+
+    const uc_bytes_unicode_t *bu = &tok->bytes_unicode;
+
+    int total = 0;
+    for (int w = 0; w < n_words; w++) {
+        pretok_slice word = s->pretoks[w];
+        uint32_t     tlen = 0;
+        for (uint32_t b = 0; b < word.len; b++) {
+            /* Byte-table codepoints top out at 323: always 1-2 bytes. */
+            tlen += uc_encode_codepoint(bu->byte_to_cp[(uint8_t)text[word.off + b]],
+                                        s->text + tlen);
+        }
+        int32_t *ids;
+        int      n = bpe_merge(tok, s, s->text, tlen, &ids);
+        if (n < 0) return -1;
+        /* Accumulate: bpe_merge reuses s->ids from offset 0 on every call.
+         * Total ids across words <= total expanded bytes <= 2*len = out_cap. */
+        memcpy(s->out + total, ids, (size_t)n * sizeof(*ids));
+        total += n;
+    }
+    *out = s->out;
+    return total;
+}
+
+int encode_sentencepiece(const tokenizer_t *tok, encode_scratch *s, const char *text,
+                         size_t len, int32_t **out) {
+    if (len > (size_t)INT32_MAX) return -1;
+    /* 3*len: each ' ' becomes the 3-byte U+2581 in s->text, and bpe_merge on
+     * that expansion needs nodes/ids sized to its byte length. No
+     * pre-tokenization and ids come back via bpe_merge's s->ids, so pretoks,
+     * out, and cand stay untouched. */
+    if (!scratch_reserve_mask(s, 3 * len,
+                              SCRATCH_NODES | SCRATCH_HEAP | SCRATCH_IDS | SCRATCH_TEXT))
+        return -1;
+
+    uint32_t tlen = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == ' ') {
+            memcpy(s->text + tlen, "\xe2\x96\x81", 3);
+            tlen += 3;
+        } else {
+            s->text[tlen++] = text[i];
+        }
+    }
+    return bpe_merge(tok, s, s->text, tlen, out);
+}
+
+/* BERT punctuation: the four ASCII symbol runs around the alphanumerics. */
+static bool wp_is_punct(uint8_t c) {
+    return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) ||
+           (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E);
+}
+
+/* Greedy longest-match one lowercased word into s->out at *total: probe
+ * word[pos..end] (prefixed tok->wp_prefix via s->cand when pos > 0), shrink
+ * end by one UTF-8 char on a miss; a word with no match at any pos is bad and
+ * becomes a single unk, discarding pieces already emitted for it (BERT
+ * is_bad). */
+static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *word,
+                         uint32_t wlen, int32_t unk, int *total) {
+    int      start = *total;
+    uint32_t pos   = 0;
+    while (pos < wlen) {
+        uint32_t end   = wlen;
+        bool     found = false;
+        /* The probe key depends only on pos: build prefix + word[pos..wlen]
+         * once, shrinking end just shortens klen. */
+        const char *key;
+        uint32_t    plen;
+        if (pos > 0) {
+            memcpy(s->cand, tok->wp_prefix, tok->wp_prefix_len);
+            memcpy(s->cand + tok->wp_prefix_len, word + pos, wlen - pos);
+            key  = s->cand;
+            plen = tok->wp_prefix_len;
+        } else {
+            key  = word + pos;
+            plen = 0;
+        }
+        while (end > pos) {
+            uint32_t klen = end - pos + plen;
+            uint32_t id;
+            if (str_u32_map_get(&tok->vocab, key, klen, &id)) {
+                s->out[(*total)++] = (int32_t)id;
+                pos   = end;
+                found = true;
+                break;
+            }
+            /* Shrink by one UTF-8 character: skip continuation bytes. */
+            end--;
+            while (end > pos && ((uint8_t)word[end] & 0xC0) == 0x80) end--;
+        }
+        if (!found) {
+            *total             = start;
+            s->out[(*total)++] = unk;
+            return;
+        }
+    }
+}
+
+int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
+                     int32_t **out) {
+    if (len > (size_t)INT32_MAX) return -1;
+    /* len + 2 covers out (at most len body ids plus the bos/eos wrap);
+     * + wp_prefix_len covers cand's worst case, prefix + whole word.
+     * Greedy longest-match, so nodes/heap/ids/pretoks stay untouched. */
+    if (!scratch_reserve_mask(s, len + 2 + tok->wp_prefix_len,
+                              SCRATCH_TEXT | SCRATCH_OUT | SCRATCH_CAND))
+        return -1;
+
+    int total = 0;
+    /* Stage F seam: F4 moves this wrap to the public tokenizer_encode. */
+    if (tok->bos_id >= 0) s->out[total++] = tok->bos_id;
+
+    for (size_t i = 0; i < len; i++) {
+        char c     = text[i];
+        s->text[i] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+    }
+
+    int32_t unk = tok->unk_id >= 0 ? tok->unk_id : 0;
+
+    /* Split: ASCII whitespace drops, each punct byte is its own word. */
+    size_t wstart = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s->text[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (i > wstart)
+                wp_emit_word(tok, s, s->text + wstart, (uint32_t)(i - wstart), unk, &total);
+            wstart = i + 1;
+        } else if (wp_is_punct((uint8_t)c)) {
+            if (i > wstart)
+                wp_emit_word(tok, s, s->text + wstart, (uint32_t)(i - wstart), unk, &total);
+            wp_emit_word(tok, s, s->text + i, 1, unk, &total);
+            wstart = i + 1;
+        }
+    }
+    if (wstart < len) wp_emit_word(tok, s, s->text + wstart, (uint32_t)(len - wstart), unk, &total);
+
+    if (tok->eos_id >= 0) s->out[total++] = tok->eos_id;
+    *out = s->out;
+    return total;
+}
+
+/* --- Per-mode decoders ------------------------------------------------------- */
+
+/* Realloc-doubling byte accumulator for the decoders. buf is NUL-terminated
+ * after every successful append; a NULL buf means nothing appended yet. */
+typedef struct {
+    char  *buf;
+    size_t len;
+    size_t cap;
+} strbuf;
+
+static bool sb_append(strbuf *sb, const char *bytes, size_t n) {
+    /* len + n + 1 must not wrap size_t. */
+    if (n >= SIZE_MAX - sb->len) return false;
+    if (sb->len + n + 1 > sb->cap) {
+        size_t cap = sb->cap ? sb->cap : 16;
+        while (cap < sb->len + n + 1) {
+            if (cap > SIZE_MAX / 2) return false;
+            cap *= 2;
+        }
+        char *buf = realloc(sb->buf, cap);
+        if (!buf) return false;
+        sb->buf = buf;
+        sb->cap = cap;
+    }
+    memcpy(sb->buf + sb->len, bytes, n);
+    sb->len += n;
+    sb->buf[sb->len] = '\0';
+    return true;
+}
+
+/* Hand ownership of the accumulated string to the caller; an untouched
+ * strbuf becomes a malloc'd empty string so decoders never return NULL for
+ * an empty result. */
+static char *sb_finish(strbuf *sb) {
+    if (sb->buf) return sb->buf;
+    char *s = malloc(1);
+    if (s) s[0] = '\0';
+    return s;
+}
+
+char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
+    const uc_bytes_unicode_t *bu  = &tok->bytes_unicode;
+    strbuf                    out = {0};
+    /* One pass per token, no concat buffer: vocab tokens are yyjson-validated
+     * UTF-8, so a codepoint never spans a token boundary and scanning each
+     * token alone equals scanning their concatenation. */
+    for (int i = 0; i < count; i++) {
+        const char *token = tokenizer_decode_token(tok, ids[i]);
+        if (!token) continue;
+        size_t slen = strlen(token);
+        if (slen > UINT32_MAX) {
+            free(out.buf);
+            return NULL;
+        }
+        const uint8_t *text = (const uint8_t *)token;
+        uint32_t       tlen = (uint32_t)slen;
+        uint32_t       j    = 0;
+        while (j < tlen) {
+            /* Invalid UTF-8 decodes as U+FFFD with len 1: above the byte
+             * table's range, so the raw-bytes branch passes the byte through
+             * unchanged. */
+            uc_cp_info c = uc_decode_codepoint(text, tlen, j);
+            bool       ok;
+            if (c.cp < UC_BYTES_UNICODE_REV_SIZE && bu->cp_to_byte[c.cp] != UINT16_MAX) {
+                char b = (char)(uint8_t)bu->cp_to_byte[c.cp];
+                ok     = sb_append(&out, &b, 1);
+            } else {
+                ok = sb_append(&out, (const char *)text + j, c.len);
+            }
+            if (!ok) {
+                free(out.buf);
+                return NULL;
+            }
+            j += c.len;
+        }
+    }
+    return sb_finish(&out);
+}
+
+char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
+    strbuf out = {0};
+    for (int i = 0; i < count; i++) {
+        const char *token = tokenizer_decode_token(tok, ids[i]);
+        if (!token) continue;
+        size_t tlen = strlen(token);
+        /* Registered specials ([CLS], [SEP], ...) are dropped; ordinary
+         * vocab tokens that merely start with '[' are kept. */
+        uint32_t one;
+        if (str_u32_map_get(&tok->special_tokens, token, (uint32_t)tlen, &one)) continue;
+        bool     ok;
+        uint32_t plen = tok->wp_prefix_len;
+        if (tlen >= plen && memcmp(token, tok->wp_prefix, plen) == 0) {
+            ok = sb_append(&out, token + plen, tlen - plen);
+        } else {
+            ok = (i == 0 || out.len == 0 || sb_append(&out, " ", 1)) &&
+                 sb_append(&out, token, tlen);
+        }
+        if (!ok) {
+            free(out.buf);
+            return NULL;
+        }
+    }
+    return sb_finish(&out);
+}
+
+/* Parse a <0xNN> byte-fallback token: exactly len 6, "<0x", two hex digits,
+ * ">". Returns the byte value, or -1 when the token is not that shape. */
+static int sp_byte_fallback(const char *token, size_t len) {
+    if (len != 6 || memcmp(token, "<0x", 3) != 0 || token[5] != '>') return -1;
+    int v = 0;
+    for (int i = 3; i < 5; i++) {
+        char c = token[i];
+        int  d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+char *decode_sentencepiece(const tokenizer_t *tok, const int32_t *ids, int count,
+                           bool strip_leading_space) {
+    strbuf raw = {0};
+    for (int i = 0; i < count; i++) {
+        const char *token = tokenizer_decode_token(tok, ids[i]);
+        if (!token) continue;
+        size_t tlen = strlen(token);
+        int    b    = sp_byte_fallback(token, tlen);
+        bool   ok;
+        if (b >= 0) {
+            char c = (char)(uint8_t)b;
+            ok     = sb_append(&raw, &c, 1);
+        } else {
+            ok = sb_append(&raw, token, tlen);
+        }
+        if (!ok) {
+            free(raw.buf);
+            return NULL;
+        }
+    }
+
+    if (raw.buf) {
+        /* Rewrite every 3-byte U+2581 as ' ' in place; r + 2 < len still
+         * admits a U+2581 occupying the final 3 bytes. */
+        size_t w = 0, r = 0;
+        while (r < raw.len) {
+            if (r + 2 < raw.len && (uint8_t)raw.buf[r] == 0xE2 &&
+                (uint8_t)raw.buf[r + 1] == 0x96 && (uint8_t)raw.buf[r + 2] == 0x81) {
+                raw.buf[w++] = ' ';
+                r += 3;
+            } else {
+                raw.buf[w++] = raw.buf[r++];
+            }
+        }
+        raw.len = w;
+        if (strip_leading_space && raw.len > 0 && raw.buf[0] == ' ') {
+            memmove(raw.buf, raw.buf + 1, raw.len - 1);
+            raw.len--;
+        }
+        raw.buf[raw.len] = '\0';
+    }
+    return sb_finish(&raw);
+}
+
 void tokenizer_free(tokenizer_t *tok) {
     if (!tok) return;
     str_u32_map_free(&tok->vocab);
     merge_map_free(&tok->merges);
+    str_u32_map_free(&tok->special_tokens);
     free((void *)tok->id_to_token);
     yyjson_doc_free(tok->doc);
     free(tok);
@@ -620,9 +1021,17 @@ const char *tokenizer_decode_token(const tokenizer_t *tok, int32_t id) {
 }
 
 char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count) {
-    (void)tok;
-    (void)ids;
-    (void)count;
+    if (!tok || count < 0 || (count > 0 && !ids)) return NULL;
+    switch (tok->type) {
+    case TOKENIZER_BPE:
+        return decode_byte_level(tok, ids, count);
+    case TOKENIZER_WORDPIECE:
+        return decode_wordpiece(tok, ids, count);
+    case TOKENIZER_SENTENCEPIECE_BPE:
+        /* Leading-space stripping is a caller policy (chat template glue);
+         * the public entry point always preserves it. */
+        return decode_sentencepiece(tok, ids, count, false);
+    }
     return NULL;
 }
 
