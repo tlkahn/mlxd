@@ -107,6 +107,16 @@ static void test_wordpiece_unknown_word(void) {
     expect_wp_encode("{\"hello\":10}", "hello xyz", (const int32_t[]){10, 0}, 2);
 }
 
+/* An unmatchable word collapses to ONE unk even when a prefix matched: BERT
+ * marks the whole word bad and replaces it, discarding partial pieces. Here
+ * "hel" matches "hello" at pos 0 but "lo" has no continuation piece. */
+static void test_wordpiece_whole_word_unk_collapse(void) {
+    expect_wp_encode("{\"[UNK]\":0,\"hel\":1}", "hello", (const int32_t[]){0}, 1);
+    /* Only the bad word collapses; the following good word still encodes. */
+    expect_wp_encode("{\"[UNK]\":0,\"hel\":1,\"ok\":2}", "hello ok",
+                     (const int32_t[]){0, 2}, 2);
+}
+
 /* --- E6: each punct byte is its own word ---------------------------------------- */
 
 static void test_wordpiece_punct_split(void) {
@@ -200,6 +210,7 @@ int main(void) {
     test_wordpiece_encode_wrap();
     test_wordpiece_continuation();
     test_wordpiece_unknown_word();
+    test_wordpiece_whole_word_unk_collapse();
     test_wordpiece_punct_split();
     test_wordpiece_lowercase();
     test_wordpiece_multi_shrink();

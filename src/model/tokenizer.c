@@ -709,10 +709,12 @@ static bool wp_is_punct(uint8_t c) {
 
 /* Greedy longest-match one lowercased word into s->out at *total: probe
  * word[pos..end] (prefixed "##" via s->cand when pos > 0), shrink end by one
- * UTF-8 char on a miss; a word with no match at pos becomes a single unk. */
+ * UTF-8 char on a miss; a word with no match at any pos is bad and becomes a
+ * single unk, discarding pieces already emitted for it (BERT is_bad). */
 static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *word,
                          uint32_t wlen, int32_t unk, int *total) {
-    uint32_t pos = 0;
+    int      start = *total;
+    uint32_t pos   = 0;
     while (pos < wlen) {
         uint32_t end   = wlen;
         bool     found = false;
@@ -741,6 +743,7 @@ static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *
             while (end > pos && ((uint8_t)word[end] & 0xC0) == 0x80) end--;
         }
         if (!found) {
+            *total             = start;
             s->out[(*total)++] = unk;
             return;
         }
