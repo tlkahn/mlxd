@@ -20,8 +20,9 @@ struct tokenizer {
     yyjson_doc        *doc; /* owns all borrowed vocab/merge strings */
     str_u32_map        vocab;
     merge_map          merges;
-    /* Membership set (val unused) of added_tokens[].content with
-     * "special": true; keys borrowed from doc. Decode drops members. */
+    /* Content -> id map of added_tokens[] entries with "special": true; keys
+     * borrowed from doc. Decode drops members; encode's special scan emits
+     * the id atomically. */
     str_u32_map        special_tokens;
     const char       **id_to_token;
     uint32_t           id_to_token_cap;
@@ -204,8 +205,21 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
             yyjson_val *content = yyjson_obj_get(entry, "content");
             if (!yyjson_is_str(content)) continue;
             if (!yyjson_is_true(yyjson_obj_get(entry, "special"))) continue;
+            /* A special entry must carry a valid id: the encode scan emits
+             * it verbatim, so a missing or out-of-range id would inject a
+             * garbage token. Fail the load like the Zig reference. */
+            yyjson_val *idv = yyjson_obj_get(entry, "id");
+            if (!yyjson_is_int(idv)) {
+                tokenizer_free(tok);
+                return NULL;
+            }
+            int64_t raw_id = yyjson_get_sint(idv);
+            if (raw_id < 0 || raw_id > MLXD_TOK_MAX_ID) {
+                tokenizer_free(tok);
+                return NULL;
+            }
             if (!str_u32_map_put(&tok->special_tokens, yyjson_get_str(content),
-                                 (uint32_t)yyjson_get_len(content), 1)) {
+                                 (uint32_t)yyjson_get_len(content), (uint32_t)raw_id)) {
                 tokenizer_free(tok);
                 return NULL;
             }
@@ -276,6 +290,21 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 
 /* --- BPE merge (heap + linked list) ---------------------------------------- */
 
+/* Analyzer-only escape hint for the scratch buffers. MallocChecker does not
+ * treat a const-pointer argument as a pointer escape, so when a non-inlined
+ * call receives a const char* view into the scratch (bpe_merge's input,
+ * wp_emit_word's word) while the same call invalidates *s, the buffer's only
+ * tracked binding dies and scan-build reports a false leak at the call site.
+ * Every real path frees via encode_scratch_free; the test suite's leaks(1)
+ * runs cover the encode paths. The extern function is never defined -
+ * --analyze does not link - and the macro is a no-op in real builds. */
+#ifdef __clang_analyzer__
+void mlxd_analyzer_escape(void *p);
+#define ANALYZER_ESCAPE(p) mlxd_analyzer_escape(p)
+#else
+#define ANALYZER_ESCAPE(p) ((void)0)
+#endif
+
 void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
 
 /* One bit per scratch buffer, so each encoder reserves only what its mode
@@ -339,6 +368,8 @@ static bool scratch_reserve_mask(encode_scratch *s, size_t input_len, unsigned m
         s->cand     = cand;
         s->cand_cap = len + 2;
     }
+    ANALYZER_ESCAPE(s->text);
+    ANALYZER_ESCAPE(s->out);
     return true;
 }
 
@@ -791,16 +822,14 @@ static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *
 int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
                      int32_t **out) {
     if (len > (size_t)INT32_MAX) return -1;
-    /* len + 2 covers out (at most len body ids plus the bos/eos wrap);
-     * + wp_prefix_len covers cand's worst case, prefix + whole word.
-     * Greedy longest-match, so nodes/heap/ids/pretoks stay untouched. */
-    if (!scratch_reserve_mask(s, len + 2 + tok->wp_prefix_len,
+    /* len covers out (at most len body ids); + wp_prefix_len covers cand's
+     * worst case, prefix + whole word. Greedy longest-match, so
+     * nodes/heap/ids/pretoks stay untouched. */
+    if (!scratch_reserve_mask(s, len + tok->wp_prefix_len,
                               SCRATCH_TEXT | SCRATCH_OUT | SCRATCH_CAND))
         return -1;
 
     int total = 0;
-    /* Stage F seam: F4 moves this wrap to the public tokenizer_encode. */
-    if (tok->bos_id >= 0) s->out[total++] = tok->bos_id;
 
     for (size_t i = 0; i < len; i++) {
         char c     = text[i];
@@ -826,7 +855,6 @@ int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text
     }
     if (wstart < len) wp_emit_word(tok, s, s->text + wstart, (uint32_t)(len - wstart), unk, &total);
 
-    if (tok->eos_id >= 0) s->out[total++] = tok->eos_id;
     *out = s->out;
     return total;
 }
@@ -1007,12 +1035,168 @@ void tokenizer_free(tokenizer_t *tok) {
     free(tok);
 }
 
-int tokenizer_encode(const tokenizer_t *tok, const char *text, int32_t *out_ids, int max_ids) {
-    (void)tok;
-    (void)text;
-    (void)out_ids;
-    (void)max_ids;
+/* --- Public encode entry points ---------------------------------------------- */
+
+/* First occurrence of needle in hay[from..hlen), or SIZE_MAX when absent.
+ * memmem is not C11, so memchr on the first byte + memcmp. */
+static size_t find_sub(const char *hay, size_t hlen, size_t from, const char *needle,
+                       size_t nlen) {
+    if (nlen == 0 || nlen > hlen) return SIZE_MAX;
+    while (from + nlen <= hlen) {
+        const char *p = memchr(hay + from, needle[0], hlen - nlen - from + 1);
+        if (!p) return SIZE_MAX;
+        size_t pos = (size_t)(p - hay);
+        if (memcmp(p, needle, nlen) == 0) return pos;
+        from = pos + 1;
+    }
+    return SIZE_MAX;
+}
+
+/* Encode one special-free text segment with the mode's encoder; *out points
+ * into scratch. */
+static int encode_segment(const tokenizer_t *tok, encode_scratch *s, const char *text,
+                          size_t len, int32_t **out) {
+    switch (tok->type) {
+    case TOKENIZER_BPE:
+        return encode_byte_level(tok, s, text, len, out);
+    case TOKENIZER_WORDPIECE:
+        return encode_wordpiece(tok, s, text, len, out);
+    case TOKENIZER_SENTENCEPIECE_BPE:
+        return encode_sentencepiece(tok, s, text, len, out);
+    }
     return -1;
+}
+
+/* Realloc-doubling id accumulator for tokenizer_encode_alloc; ids stays NULL
+ * until the first append. */
+typedef struct {
+    int32_t *ids;
+    size_t   len;
+    size_t   cap;
+} idbuf;
+
+static bool idbuf_append(idbuf *b, const int32_t *ids, size_t n) {
+    if (b->len + n > b->cap) {
+        size_t cap = b->cap ? b->cap : 16;
+        while (cap < b->len + n) {
+            if (cap > SIZE_MAX / (2 * sizeof(int32_t))) return false;
+            cap *= 2;
+        }
+        int32_t *p = realloc(b->ids, cap * sizeof(*p));
+        if (!p) return false;
+        b->ids = p;
+        b->cap = cap;
+    }
+    memcpy(b->ids + b->len, ids, n * sizeof(*ids));
+    b->len += n;
+    return true;
+}
+
+/* One special token's cached next occurrence; SIZE_MAX = no more matches. */
+typedef struct {
+    const char *key;
+    uint32_t    klen;
+    int32_t     id;
+    size_t      next;
+} special_site;
+
+int tokenizer_encode_alloc(const tokenizer_t *tok, const char *text, size_t len,
+                           bool parse_special, int32_t **out_ids) {
+    if (!tok || !out_ids || (!text && len > 0)) return -1;
+    if (len > (size_t)INT32_MAX) return -1;
+    *out_ids = NULL;
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    idbuf         out     = {0};
+    special_site *sites   = NULL;
+    uint32_t      n_sites = 0;
+
+    if (tok->type == TOKENIZER_WORDPIECE) {
+        /* WordPiece: wrap [CLS] ... [SEP] around the body and skip the
+         * special scan entirely - the wrap is added by the tokenizer, not
+         * parsed from input, so parse_special does not gate it. */
+        int32_t *seg;
+        int      n = encode_wordpiece(tok, &s, text, len, &seg);
+        if (n < 0) goto fail;
+        if (tok->bos_id >= 0 && !idbuf_append(&out, &tok->bos_id, 1)) goto fail;
+        if (!idbuf_append(&out, seg, (size_t)n)) goto fail;
+        if (tok->eos_id >= 0 && !idbuf_append(&out, &tok->eos_id, 1)) goto fail;
+    } else {
+        /* Special-token scan: split the text around added special tokens,
+         * emit their ids atomically, encode the gaps per mode. Each
+         * special's next occurrence is cached and re-probed only once it
+         * falls behind the cursor. O(n_specials) probe per match; a
+         * multi-pattern matcher is tracked in issue #14. */
+        if (parse_special && tok->special_tokens.count > 0) {
+            sites = malloc(tok->special_tokens.count * sizeof(*sites));
+            if (!sites) goto fail;
+            str_u32_map_foreach(&tok->special_tokens, e) {
+                sites[n_sites++] = (special_site){
+                    .key  = e->ptr,
+                    .klen = e->len,
+                    .id   = (int32_t)e->val,
+                    .next = find_sub(text, len, 0, e->ptr, e->len),
+                };
+            }
+        }
+
+        size_t pos = 0;
+        while (pos < len) {
+            special_site *best = NULL;
+            for (uint32_t i = 0; i < n_sites; i++) {
+                special_site *site = &sites[i];
+                if (site->next != SIZE_MAX && site->next < pos)
+                    site->next = find_sub(text, len, pos, site->key, site->klen);
+                if (site->next == SIZE_MAX) continue;
+                /* Earliest match wins; ties go to the longest key so an
+                 * overlapping shorter special (e.g. "<|im" vs "<|im_end|>")
+                 * cannot shadow the full token. */
+                if (!best || site->next < best->next ||
+                    (site->next == best->next && site->klen > best->klen))
+                    best = site;
+            }
+            if (!best) break;
+            if (best->next > pos) {
+                int32_t *seg;
+                int      n = encode_segment(tok, &s, text + pos, best->next - pos, &seg);
+                if (n < 0 || !idbuf_append(&out, seg, (size_t)n)) goto fail;
+            }
+            if (!idbuf_append(&out, &best->id, 1)) goto fail;
+            pos = best->next + best->klen;
+        }
+        if (pos < len) {
+            int32_t *seg;
+            int      n = encode_segment(tok, &s, text + pos, len - pos, &seg);
+            if (n < 0 || !idbuf_append(&out, seg, (size_t)n)) goto fail;
+        }
+    }
+
+    free(sites);
+    encode_scratch_free(&s);
+    if (out.len > (size_t)INT32_MAX) {
+        free(out.ids);
+        return -1;
+    }
+    *out_ids = out.ids;
+    return (int)out.len;
+
+fail:
+    free(sites);
+    encode_scratch_free(&s);
+    free(out.ids);
+    return -1;
+}
+
+int tokenizer_encode(const tokenizer_t *tok, const char *text, int32_t *out_ids, int max_ids) {
+    if (!tok || !text || max_ids < 0 || (!out_ids && max_ids > 0)) return -1;
+    int32_t *ids;
+    int      count = tokenizer_encode_alloc(tok, text, strlen(text), true, &ids);
+    if (count < 0) return -1;
+    int n_copy = count < max_ids ? count : max_ids;
+    if (n_copy > 0) memcpy(out_ids, ids, (size_t)n_copy * sizeof(*ids));
+    free(ids);
+    return count;
 }
 
 const char *tokenizer_decode_token(const tokenizer_t *tok, int32_t id) {

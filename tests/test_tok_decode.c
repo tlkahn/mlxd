@@ -61,8 +61,8 @@ static void test_wordpiece_decode(void) {
     const char *json =
         "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":101,\"[SEP]\":102,"
         "\"hello\":10,\"##ly\":11,\"world\":12}},"
-        "\"added_tokens\":[{\"content\":\"[CLS]\",\"special\":true},"
-        "{\"content\":\"[SEP]\",\"special\":true}]}";
+        "\"added_tokens\":[{\"id\":101,\"content\":\"[CLS]\",\"special\":true},"
+        "{\"id\":102,\"content\":\"[SEP]\",\"special\":true}]}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
     assert(tok != NULL);
 
