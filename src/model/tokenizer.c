@@ -811,9 +811,14 @@ typedef struct {
 } strbuf;
 
 static bool sb_append(strbuf *sb, const char *bytes, size_t n) {
+    /* len + n + 1 must not wrap size_t. */
+    if (n >= SIZE_MAX - sb->len) return false;
     if (sb->len + n + 1 > sb->cap) {
         size_t cap = sb->cap ? sb->cap : 16;
-        while (cap < sb->len + n + 1) cap *= 2;
+        while (cap < sb->len + n + 1) {
+            if (cap > SIZE_MAX / 2) return false;
+            cap *= 2;
+        }
         char *buf = realloc(sb->buf, cap);
         if (!buf) return false;
         sb->buf = buf;
