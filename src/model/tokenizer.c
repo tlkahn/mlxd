@@ -754,18 +754,21 @@ static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *
     while (pos < wlen) {
         uint32_t end   = wlen;
         bool     found = false;
+        /* The probe key depends only on pos: build prefix + word[pos..wlen]
+         * once, shrinking end just shortens klen. */
+        const char *key;
+        uint32_t    plen;
+        if (pos > 0) {
+            memcpy(s->cand, tok->wp_prefix, tok->wp_prefix_len);
+            memcpy(s->cand + tok->wp_prefix_len, word + pos, wlen - pos);
+            key  = s->cand;
+            plen = tok->wp_prefix_len;
+        } else {
+            key  = word + pos;
+            plen = 0;
+        }
         while (end > pos) {
-            const char *key;
-            uint32_t    klen;
-            if (pos > 0) {
-                memcpy(s->cand, tok->wp_prefix, tok->wp_prefix_len);
-                memcpy(s->cand + tok->wp_prefix_len, word + pos, end - pos);
-                key  = s->cand;
-                klen = end - pos + tok->wp_prefix_len;
-            } else {
-                key  = word + pos;
-                klen = end - pos;
-            }
+            uint32_t klen = end - pos + plen;
             uint32_t id;
             if (str_u32_map_get(&tok->vocab, key, klen, &id)) {
                 s->out[(*total)++] = (int32_t)id;
