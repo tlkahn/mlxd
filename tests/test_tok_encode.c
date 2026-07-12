@@ -137,6 +137,26 @@ static void test_wordpiece_multi_shrink(void) {
                      "international", (const int32_t[]){1, 2, 3, 4}, 4);
 }
 
+/* --- Review #6: model.continuing_subword_prefix overrides "##" ------------------- */
+
+static void test_wordpiece_custom_prefix(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"continuing_subword_prefix\":\"++\","
+        "\"vocab\":{\"[UNK]\":0,\"un\":1,\"++able\":2}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    encode_scratch s;
+    encode_scratch_init(&s);
+    int32_t *ids;
+    int      n = encode_wordpiece(tok, &s, "unable", 6, &ids);
+    assert(n == 2);
+    assert(ids[0] == 1);
+    assert(ids[1] == 2);
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 /* --- E10: SentencePiece encode --------------------------------------------------- */
 
 /* No model.type and no ByteLevel pre_tokenizer: detected as SentencePiece.
@@ -214,6 +234,7 @@ int main(void) {
     test_wordpiece_punct_split();
     test_wordpiece_lowercase();
     test_wordpiece_multi_shrink();
+    test_wordpiece_custom_prefix();
     test_sentencepiece_encode();
     test_gpt2_fixture_encode();
     printf("test_tok_encode: all tests passed\n");

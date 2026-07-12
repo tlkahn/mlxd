@@ -92,8 +92,9 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
                       int32_t **out);
 
 /* WordPiece encode (BERT-style): ASCII-lowercase, split on ASCII whitespace
- * and punctuation, greedy longest-match per word with "##" continuations;
- * an unmatchable word emits one unk id. Emits bos/eos around the body when
+ * and punctuation, greedy longest-match per word with continuation pieces
+ * prefixed by model.continuing_subword_prefix (default "##"); an
+ * unmatchable word emits one unk id. Emits bos/eos around the body when
  * set (Stage F relocates that wrap to the public entry point). Reserves
  * scratch internally; *out points into scratch. Returns the id count, or -1
  * on overflow/allocation failure. */
@@ -113,8 +114,9 @@ int encode_sentencepiece(const tokenizer_t *tok, encode_scratch *s, const char *
  * string ("" for count == 0), or NULL on allocation failure. */
 char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count);
 
-/* WordPiece decode: drop registered special tokens, glue "##" continuations,
- * separate other tokens with single spaces. Unknown ids are skipped. Returns
+/* WordPiece decode: drop registered special tokens, glue continuation
+ * pieces (the configured prefix, default "##") without a space, separate
+ * other tokens with single spaces. Unknown ids are skipped. Returns
  * a malloc'd NUL-terminated string ("" for count == 0), or NULL on
  * allocation failure. */
 char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count);

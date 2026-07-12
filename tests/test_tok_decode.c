@@ -67,6 +67,26 @@ static void test_wordpiece_decode(void) {
     tokenizer_free(tok);
 }
 
+/* --- Review #6: decode glues on the configured continuation prefix --------------- */
+
+static void test_wordpiece_decode_custom_prefix(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"continuing_subword_prefix\":\"++\","
+        "\"vocab\":{\"[UNK]\":0,\"un\":1,\"++able\":2}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    expect_decode(tok, (const int32_t[]){1, 2}, 2, "unable");
+    tokenizer_free(tok);
+
+    /* Absent field: the default prefix is still "##". */
+    const char *json2 =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"un\":1,\"##able\":2}}}";
+    tok = tokenizer_load_json(json2, strlen(json2));
+    assert(tok != NULL);
+    expect_decode(tok, (const int32_t[]){1, 2}, 2, "unable");
+    tokenizer_free(tok);
+}
+
 /* --- E11: SentencePiece decode -------------------------------------------------- */
 
 /* SP fixture shared by E11/E12: byte-fallback tokens, U+2581-prefixed and
@@ -141,6 +161,7 @@ static void test_gpt2_fixture_decode(void) {
 int main(void) {
     test_byte_level_decode();
     test_wordpiece_decode();
+    test_wordpiece_decode_custom_prefix();
     test_sentencepiece_decode();
     test_sentencepiece_trailing_marker();
     test_gpt2_fixture_decode();

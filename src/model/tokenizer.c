@@ -29,6 +29,10 @@ struct tokenizer {
     int32_t            bos_id;
     int32_t            eos_id;
     int32_t            unk_id; /* vocab id of "<unk>", -1 if absent */
+    /* WordPiece continuation prefix (HF model.continuing_subword_prefix),
+     * default "##"; borrowed from doc when overridden. */
+    const char        *wp_prefix;
+    uint32_t           wp_prefix_len;
     /* Per-byte fallback token id, resolved once at load (-1 = no vocab entry):
      * BPE maps bytes through the GPT-2 byte-to-unicode table, SentencePiece
      * through <0xNN> tokens, WordPiece has no byte fallback. */
@@ -109,10 +113,17 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         yyjson_doc_free(doc);
         return NULL;
     }
-    tok->doc    = doc;
-    tok->bos_id = -1;
-    tok->eos_id = -1;
-    tok->unk_id = -1;
+    tok->doc           = doc;
+    tok->bos_id        = -1;
+    tok->eos_id        = -1;
+    tok->unk_id        = -1;
+    tok->wp_prefix     = "##";
+    tok->wp_prefix_len = 2;
+    yyjson_val *cs_prefix = yyjson_obj_get(model, "continuing_subword_prefix");
+    if (yyjson_is_str(cs_prefix)) {
+        tok->wp_prefix     = yyjson_get_str(cs_prefix);
+        tok->wp_prefix_len = (uint32_t)yyjson_get_len(cs_prefix);
+    }
 
     /* Initialize both maps up front so every early error path below frees
      * fully-initialized maps instead of relying on the calloc-zeroed struct. */
@@ -708,9 +719,10 @@ static bool wp_is_punct(uint8_t c) {
 }
 
 /* Greedy longest-match one lowercased word into s->out at *total: probe
- * word[pos..end] (prefixed "##" via s->cand when pos > 0), shrink end by one
- * UTF-8 char on a miss; a word with no match at any pos is bad and becomes a
- * single unk, discarding pieces already emitted for it (BERT is_bad). */
+ * word[pos..end] (prefixed tok->wp_prefix via s->cand when pos > 0), shrink
+ * end by one UTF-8 char on a miss; a word with no match at any pos is bad and
+ * becomes a single unk, discarding pieces already emitted for it (BERT
+ * is_bad). */
 static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *word,
                          uint32_t wlen, int32_t unk, int *total) {
     int      start = *total;
@@ -722,11 +734,10 @@ static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *
             const char *key;
             uint32_t    klen;
             if (pos > 0) {
-                s->cand[0] = '#';
-                s->cand[1] = '#';
-                memcpy(s->cand + 2, word + pos, end - pos);
+                memcpy(s->cand, tok->wp_prefix, tok->wp_prefix_len);
+                memcpy(s->cand + tok->wp_prefix_len, word + pos, end - pos);
                 key  = s->cand;
-                klen = end - pos + 2;
+                klen = end - pos + tok->wp_prefix_len;
             } else {
                 key  = word + pos;
                 klen = end - pos;
@@ -753,8 +764,9 @@ static void wp_emit_word(const tokenizer_t *tok, encode_scratch *s, const char *
 int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
                      int32_t **out) {
     if (len > (size_t)INT32_MAX) return -1;
-    /* len + 2: body emits at most len ids, plus the bos/eos wrap. */
-    if (!encode_scratch_reserve(s, len + 2)) return -1;
+    /* len + 2 covers out (at most len body ids plus the bos/eos wrap);
+     * + wp_prefix_len covers cand's worst case, prefix + whole word. */
+    if (!encode_scratch_reserve(s, len + 2 + tok->wp_prefix_len)) return -1;
 
     int total = 0;
     /* Stage F seam: F4 moves this wrap to the public tokenizer_encode. */
@@ -874,9 +886,10 @@ char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
          * vocab tokens that merely start with '[' are kept. */
         uint32_t one;
         if (str_u32_map_get(&tok->special_tokens, token, (uint32_t)tlen, &one)) continue;
-        bool ok;
-        if (tlen >= 2 && token[0] == '#' && token[1] == '#') {
-            ok = sb_append(&out, token + 2, tlen - 2);
+        bool     ok;
+        uint32_t plen = tok->wp_prefix_len;
+        if (tlen >= plen && memcmp(token, tok->wp_prefix, plen) == 0) {
+            ok = sb_append(&out, token + plen, tlen - plen);
         } else {
             ok = (i == 0 || out.len == 0 || sb_append(&out, " ", 1)) &&
                  sb_append(&out, token, tlen);
