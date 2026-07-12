@@ -37,6 +37,9 @@ struct tokenizer {
      * BPE maps bytes through the GPT-2 byte-to-unicode table, SentencePiece
      * through <0xNN> tokens, WordPiece has no byte fallback. */
     int32_t            byte_fallback_ids[256];
+    /* GPT-2 byte-to-unicode table, built once at load for every tokenizer
+     * type: decode_byte_level is callable regardless of type. */
+    uc_bytes_unicode_t bytes_unicode;
 };
 
 tokenizer_t *tokenizer_load(const char *path) {
@@ -219,18 +222,15 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     }
 
     /* Resolve the per-byte fallback ids once, now that the vocab map is
-     * built; bpe_emit_symbol then indexes instead of re-hashing per byte.
-     * The byte-to-unicode table is only needed here, so it lives on the
-     * stack (decode rebuilds its own when that stage lands). */
+     * built; bpe_emit_symbol then indexes instead of re-hashing per byte. */
+    uc_build_bytes_to_unicode(&tok->bytes_unicode);
     for (int b = 0; b < 256; b++) tok->byte_fallback_ids[b] = -1;
     if (tok->type == TOKENIZER_BPE) {
-        uc_bytes_unicode_t bu;
-        uc_build_bytes_to_unicode(&bu);
         for (int b = 0; b < 256; b++) {
             char buf[4];
             /* The byte table's max mapped codepoint is 323, so this always
              * encodes to 1-2 bytes and never fails. */
-            uint32_t blen = uc_encode_codepoint(bu.byte_to_cp[b], buf);
+            uint32_t blen = uc_encode_codepoint(tok->bytes_unicode.byte_to_cp[b], buf);
             uint32_t id;
             if (str_u32_map_get(&tok->vocab, buf, blen, &id))
                 tok->byte_fallback_ids[b] = (int32_t)id;
@@ -669,8 +669,7 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
     int n_words = gpt2_pretokenize(s, text, len);
     if (n_words < 0) return -1;
 
-    uc_bytes_unicode_t bu;
-    uc_build_bytes_to_unicode(&bu);
+    const uc_bytes_unicode_t *bu = &tok->bytes_unicode;
 
     int total = 0;
     for (int w = 0; w < n_words; w++) {
@@ -678,7 +677,7 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
         uint32_t     tlen = 0;
         for (uint32_t b = 0; b < word.len; b++) {
             /* Byte-table codepoints top out at 323: always 1-2 bytes. */
-            tlen += uc_encode_codepoint(bu.byte_to_cp[(uint8_t)text[word.off + b]],
+            tlen += uc_encode_codepoint(bu->byte_to_cp[(uint8_t)text[word.off + b]],
                                         s->text + tlen);
         }
         int32_t *ids;
@@ -847,8 +846,7 @@ char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
         }
     }
 
-    uc_bytes_unicode_t bu;
-    uc_build_bytes_to_unicode(&bu);
+    const uc_bytes_unicode_t *bu = &tok->bytes_unicode;
 
     strbuf         out  = {0};
     const uint8_t *text = (const uint8_t *)concat.buf;
@@ -859,8 +857,8 @@ char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
          * range, so the raw-bytes branch passes the byte through unchanged. */
         uc_cp_info c  = uc_decode_codepoint(text, tlen, i);
         bool       ok;
-        if (c.cp < UC_BYTES_UNICODE_REV_SIZE && bu.cp_to_byte[c.cp] != UINT16_MAX) {
-            char b = (char)(uint8_t)bu.cp_to_byte[c.cp];
+        if (c.cp < UC_BYTES_UNICODE_REV_SIZE && bu->cp_to_byte[c.cp] != UINT16_MAX) {
+            char b = (char)(uint8_t)bu->cp_to_byte[c.cp];
             ok     = sb_append(&out, &b, 1);
         } else {
             ok = sb_append(&out, (const char *)text + i, c.len);
