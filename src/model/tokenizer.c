@@ -278,55 +278,72 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 
 void encode_scratch_init(encode_scratch *s) { memset(s, 0, sizeof(*s)); }
 
-bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
+/* One bit per scratch buffer, so each encoder reserves only what its mode
+ * touches (WordPiece never merges; SentencePiece never pre-tokenizes). */
+enum {
+    SCRATCH_NODES   = 1u << 0,
+    SCRATCH_HEAP    = 1u << 1,
+    SCRATCH_IDS     = 1u << 2,
+    SCRATCH_PRETOKS = 1u << 3,
+    SCRATCH_TEXT    = 1u << 4,
+    SCRATCH_OUT     = 1u << 5,
+    SCRATCH_CAND    = 1u << 6,
+    SCRATCH_ALL     = (1u << 7) - 1,
+};
+
+static bool scratch_reserve_mask(encode_scratch *s, size_t input_len, unsigned mask) {
     /* heap_cap = 3 * len is uint32_t arithmetic: refuse any len that would
      * wrap it. UINT32_MAX / 3 < INT32_MAX, so this also keeps node indices
      * representable as int32_t. */
     if (input_len > UINT32_MAX / 3) return false;
     uint32_t len = input_len ? (uint32_t)input_len : 1;
-    if (s->nodes_cap < len) {
+    if ((mask & SCRATCH_NODES) && s->nodes_cap < len) {
         bpe_node *nodes = realloc(s->nodes, (size_t)len * sizeof(*s->nodes));
         if (!nodes) return false;
         s->nodes     = nodes;
         s->nodes_cap = len;
     }
-    if (s->ids_cap < len) {
+    if ((mask & SCRATCH_IDS) && s->ids_cap < len) {
         int32_t *ids = realloc(s->ids, (size_t)len * sizeof(*s->ids));
         if (!ids) return false;
         s->ids     = ids;
         s->ids_cap = len;
     }
-    if (s->heap_cap / 3 < len) {
+    if ((mask & SCRATCH_HEAP) && s->heap_cap / 3 < len) {
         bpe_cand *heap = realloc(s->heap, 3 * (size_t)len * sizeof(*s->heap));
         if (!heap) return false;
         s->heap     = heap;
         s->heap_cap = 3 * len;
     }
-    if (s->pretoks_cap < len) {
+    if ((mask & SCRATCH_PRETOKS) && s->pretoks_cap < len) {
         pretok_slice *pretoks = realloc(s->pretoks, (size_t)len * sizeof(*s->pretoks));
         if (!pretoks) return false;
         s->pretoks     = pretoks;
         s->pretoks_cap = len;
     }
-    if (s->text_cap < len) {
+    if ((mask & SCRATCH_TEXT) && s->text_cap < len) {
         char *text = realloc(s->text, len);
         if (!text) return false;
         s->text     = text;
         s->text_cap = len;
     }
-    if (s->out_cap < len) {
+    if ((mask & SCRATCH_OUT) && s->out_cap < len) {
         int32_t *out = realloc(s->out, (size_t)len * sizeof(*s->out));
         if (!out) return false;
         s->out     = out;
         s->out_cap = len;
     }
-    if (s->cand_cap < len + 2) {
+    if ((mask & SCRATCH_CAND) && s->cand_cap < len + 2) {
         char *cand = realloc(s->cand, (size_t)len + 2);
         if (!cand) return false;
         s->cand     = cand;
         s->cand_cap = len + 2;
     }
     return true;
+}
+
+bool encode_scratch_reserve(encode_scratch *s, size_t input_len) {
+    return scratch_reserve_mask(s, input_len, SCRATCH_ALL);
 }
 
 void encode_scratch_free(encode_scratch *s) {
@@ -663,8 +680,12 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
                       int32_t **out) {
     if (len > (size_t)INT32_MAX) return -1;
     /* 2*len: each input byte expands to a 1-2 byte codepoint in s->text, and
-     * bpe_merge on that expansion needs nodes/ids sized to its byte length. */
-    if (!encode_scratch_reserve(s, 2 * len)) return -1;
+     * bpe_merge on that expansion needs nodes/ids sized to its byte length.
+     * Byte-level uses every buffer except cand (no WordPiece key building). */
+    if (!scratch_reserve_mask(s, 2 * len,
+                              SCRATCH_NODES | SCRATCH_HEAP | SCRATCH_IDS | SCRATCH_PRETOKS |
+                                  SCRATCH_TEXT | SCRATCH_OUT))
+        return -1;
 
     int n_words = gpt2_pretokenize(s, text, len);
     if (n_words < 0) return -1;
@@ -696,8 +717,12 @@ int encode_sentencepiece(const tokenizer_t *tok, encode_scratch *s, const char *
                          size_t len, int32_t **out) {
     if (len > (size_t)INT32_MAX) return -1;
     /* 3*len: each ' ' becomes the 3-byte U+2581 in s->text, and bpe_merge on
-     * that expansion needs nodes/ids sized to its byte length. */
-    if (!encode_scratch_reserve(s, 3 * len)) return -1;
+     * that expansion needs nodes/ids sized to its byte length. No
+     * pre-tokenization and ids come back via bpe_merge's s->ids, so pretoks,
+     * out, and cand stay untouched. */
+    if (!scratch_reserve_mask(s, 3 * len,
+                              SCRATCH_NODES | SCRATCH_HEAP | SCRATCH_IDS | SCRATCH_TEXT))
+        return -1;
 
     uint32_t tlen = 0;
     for (size_t i = 0; i < len; i++) {
@@ -764,8 +789,11 @@ int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text
                      int32_t **out) {
     if (len > (size_t)INT32_MAX) return -1;
     /* len + 2 covers out (at most len body ids plus the bos/eos wrap);
-     * + wp_prefix_len covers cand's worst case, prefix + whole word. */
-    if (!encode_scratch_reserve(s, len + 2 + tok->wp_prefix_len)) return -1;
+     * + wp_prefix_len covers cand's worst case, prefix + whole word.
+     * Greedy longest-match, so nodes/heap/ids/pretoks stay untouched. */
+    if (!scratch_reserve_mask(s, len + 2 + tok->wp_prefix_len,
+                              SCRATCH_TEXT | SCRATCH_OUT | SCRATCH_CAND))
+        return -1;
 
     int total = 0;
     /* Stage F seam: F4 moves this wrap to the public tokenizer_encode. */

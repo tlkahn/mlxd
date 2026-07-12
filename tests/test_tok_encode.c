@@ -192,6 +192,51 @@ static void test_sentencepiece_encode(void) {
     tokenizer_free(tok);
 }
 
+/* --- Review #7: encoders reserve only the buffers their mode touches ------------- */
+
+static void test_encoder_scratch_footprint(void) {
+    encode_scratch s;
+    int32_t       *ids;
+
+    /* SentencePiece never pre-tokenizes, returns ids via bpe_merge's s->ids,
+     * and builds no candidate keys: pretoks/out/cand stay unallocated. */
+    const char *sp_json = "{\"model\":{\"vocab\":{\"h\":1,\"i\":2},\"merges\":[]}}";
+    tokenizer_t *tok    = tokenizer_load_json(sp_json, strlen(sp_json));
+    assert(tok != NULL);
+    encode_scratch_init(&s);
+    int n = encode_sentencepiece(tok, &s, "hi", 2, &ids);
+    assert(n == 2);
+    assert(s.pretoks_cap == 0 && s.cand_cap == 0 && s.out_cap == 0);
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+
+    /* WordPiece is greedy longest-match, no merging or pre-tokenization:
+     * nodes/heap/ids/pretoks stay unallocated. */
+    const char *wp_json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[UNK]\":0,\"hi\":1}}}";
+    tok = tokenizer_load_json(wp_json, strlen(wp_json));
+    assert(tok != NULL);
+    encode_scratch_init(&s);
+    n = encode_wordpiece(tok, &s, "hi", 2, &ids);
+    assert(n == 1);
+    assert(s.nodes_cap == 0 && s.heap_cap == 0 && s.ids_cap == 0 && s.pretoks_cap == 0);
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+
+    /* Byte-level builds no WordPiece candidate keys: cand stays unallocated. */
+    const char *bl_json =
+        "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"vocab\":{\"h\":1,\"i\":2},\"merges\":[]}}";
+    tok = tokenizer_load_json(bl_json, strlen(bl_json));
+    assert(tok != NULL);
+    encode_scratch_init(&s);
+    n = encode_byte_level(tok, &s, "hi", 2, &ids);
+    assert(n == 2);
+    assert(s.cand_cap == 0);
+    encode_scratch_free(&s);
+    tokenizer_free(tok);
+}
+
 /* --- Capstone: real GPT-2 vocab -------------------------------------------------- */
 
 static void test_gpt2_fixture_encode(void) {
@@ -236,6 +281,7 @@ int main(void) {
     test_wordpiece_multi_shrink();
     test_wordpiece_custom_prefix();
     test_sentencepiece_encode();
+    test_encoder_scratch_footprint();
     test_gpt2_fixture_encode();
     printf("test_tok_encode: all tests passed\n");
     return 0;

@@ -85,9 +85,9 @@ int gpt2_pretokenize(encode_scratch *s, const char *input, size_t len);
 
 /* Byte-level BPE encode (GPT-2/Qwen-style): gpt2_pretokenize into words, map
  * each word's bytes through the byte-to-unicode table, bpe_merge per word.
- * Reserves scratch internally. *out points into scratch (valid until the next
- * encode or free). Returns the id count, or -1 on overflow/allocation
- * failure. */
+ * Reserves nodes/heap/ids/pretoks/text/out (every buffer but cand) at 2*len.
+ * *out points into scratch (valid until the next encode or free). Returns the
+ * id count, or -1 on overflow/allocation failure. */
 int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
                       int32_t **out);
 
@@ -96,15 +96,17 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
  * prefixed by model.continuing_subword_prefix (default "##"); an
  * unmatchable word emits one unk id. Emits bos/eos around the body when
  * set (Stage F relocates that wrap to the public entry point). Reserves
- * scratch internally; *out points into scratch. Returns the id count, or -1
- * on overflow/allocation failure. */
+ * text/out/cand (greedy longest-match, so no merge buffers) at
+ * len + 2 + prefix_len; *out points into scratch. Returns the id count, or
+ * -1 on overflow/allocation failure. */
 int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
                      int32_t **out);
 
 /* SentencePiece BPE encode (Gemma-style): replace each ' ' with U+2581 and
- * bpe_merge the whole string - no pre-tokenization. Reserves scratch
- * internally; *out points into scratch. Returns the id count, or -1 on
- * overflow/allocation failure. */
+ * bpe_merge the whole string - no pre-tokenization. Reserves nodes/heap/ids/
+ * text (ids return via bpe_merge, so no pretoks/out/cand) at 3*len; *out
+ * points into scratch. Returns the id count, or -1 on overflow/allocation
+ * failure. */
 int encode_sentencepiece(const tokenizer_t *tok, encode_scratch *s, const char *text,
                          size_t len, int32_t **out);
 
