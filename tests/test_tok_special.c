@@ -192,6 +192,68 @@ static void test_empty_input(void) {
     tokenizer_free(tok);
 }
 
+/* --- F7: WordPiece without [CLS]/[SEP] on empty input -------------------------- */
+
+/* Regression: with bos_id/eos_id unresolved and an empty body, every
+ * idbuf_append is n==0 on a NULL buffer; the old code reached
+ * memcpy(NULL + 0, ...), UB that UBSan flags as "applying zero offset to
+ * null pointer". Must return count 0 with *out_ids NULL. */
+static void test_wordpiece_no_cls_sep_empty(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[UNK]\":0,"
+        "\"hello\":10,\"world\":11}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    int32_t *ids = (int32_t *)&ids; /* poison: must come back NULL */
+    assert(tokenizer_encode_alloc(tok, "", 0, true, &ids) == 0);
+    assert(ids == NULL);
+    ids = (int32_t *)&ids;
+    assert(tokenizer_encode_alloc(tok, "", 0, false, &ids) == 0);
+    assert(ids == NULL);
+
+    /* Non-empty input still encodes, just without the wrap. */
+    int n = tokenizer_encode_alloc(tok, "hello world", 11, true, &ids);
+    assert(n == 2);
+    assert(ids[0] == 10);
+    assert(ids[1] == 11);
+    free(ids);
+
+    tokenizer_free(tok);
+}
+
+/* --- F8: empty-content special is skipped at load ------------------------------- */
+
+/* Regression: an added_tokens entry with content "" can never match input;
+ * the loader must skip it (not fail, not store a dead probe) and encoding
+ * must never emit its id. */
+static void test_empty_content_special_skipped(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{"
+        "\"<unk>\":0,\"\xe2\x96\x81\":3,\"\xe2\x96\x81hello\":4,\"hello\":5},"
+        "\"merges\":[]},"
+        "\"added_tokens\":["
+        "{\"id\":99,\"content\":\"\",\"special\":true},"
+        "{\"id\":20,\"content\":\"<|im_end|>\",\"special\":true}]}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    int32_t *ids;
+    int      n = tokenizer_encode_alloc(tok, "hello", 5, true, &ids);
+    assert(n >= 1);
+    for (int i = 0; i < n; i++) assert(ids[i] != 99);
+    free(ids);
+
+    /* A real special alongside the empty one still resolves. */
+    n = tokenizer_encode_alloc(tok, "hello<|im_end|>", 15, true, &ids);
+    assert(n >= 2);
+    assert(ids[n - 1] == 20);
+    for (int i = 0; i < n; i++) assert(ids[i] != 99);
+    free(ids);
+
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_parse_special_true();
     test_parse_special_false();
@@ -199,6 +261,8 @@ int main(void) {
     test_wordpiece_wrap_in_entry();
     test_encode_truncation();
     test_empty_input();
+    test_wordpiece_no_cls_sep_empty();
+    test_empty_content_special_skipped();
     printf("test_tok_special: all tests passed\n");
     return 0;
 }

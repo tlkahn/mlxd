@@ -204,6 +204,10 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         yyjson_arr_foreach(added, idx, max, entry) {
             yyjson_val *content = yyjson_obj_get(entry, "content");
             if (!yyjson_is_str(content)) continue;
+            /* An empty content can never match input; storing it would only
+             * add a dead probe to every encode scan. Skip, not fail: it is
+             * inert, unlike a missing id which would inject garbage. */
+            if (yyjson_get_len(content) == 0) continue;
             if (!yyjson_is_true(yyjson_obj_get(entry, "special"))) continue;
             /* A special entry must carry a valid id: the encode scan emits
              * it verbatim, so a missing or out-of-range id would inject a
@@ -1060,7 +1064,9 @@ static int encode_segment(const tokenizer_t *tok, encode_scratch *s, const char 
     case TOKENIZER_BPE:
         return encode_byte_level(tok, s, text, len, out);
     case TOKENIZER_WORDPIECE:
-        return encode_wordpiece(tok, s, text, len, out);
+        /* Handled by the entry-point early branch; reaching here would skip
+         * the [CLS]/[SEP] wrap, so fail instead. */
+        return -1;
     case TOKENIZER_SENTENCEPIECE_BPE:
         return encode_sentencepiece(tok, s, text, len, out);
     }
@@ -1076,6 +1082,8 @@ typedef struct {
 } idbuf;
 
 static bool idbuf_append(idbuf *b, const int32_t *ids, size_t n) {
+    if (n == 0) return true;
+    if (n > SIZE_MAX - b->len) return false;
     if (b->len + n > b->cap) {
         size_t cap = b->cap ? b->cap : 16;
         while (cap < b->len + n) {

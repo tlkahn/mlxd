@@ -28,8 +28,9 @@ void tokenizer_free(tokenizer_t *tok);
  * their ids atomically (earliest match wins, ties go to the longest key).
  * parse_special=false encodes the whole text as ordinary content: use it for
  * untrusted user text so a literal "<|im_end|>" cannot inject the control
- * token id. The WordPiece [CLS]/[SEP] wrap is not gated by the flag - it is
- * added by the tokenizer, not parsed from input.
+ * token id. WordPiece skips the special-token scan entirely, so parse_special
+ * only applies to BPE/SentencePiece; the WordPiece [CLS]/[SEP] wrap is not
+ * gated by the flag - it is added by the tokenizer, not parsed from input.
  * Returns the id count, or -1 on error. *out_ids is malloc'd (caller frees)
  * and NULL when the count is 0. */
 int tokenizer_encode_alloc(const tokenizer_t *tok, const char *text, size_t len,
