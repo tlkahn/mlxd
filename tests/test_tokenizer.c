@@ -1,3 +1,4 @@
+#include "core/log.h"
 #include "model/tok_bpe.h"
 #include "model/tok_map.h"
 #include "model/tok_unicode.h"
@@ -7,6 +8,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* Run fn with stderr redirected into a tmpfile; returns the captured bytes
+ * as a malloc'd NUL-terminated string (log_warn writes to stderr and the
+ * logger has no capture hook). Caller frees. */
+static char *capture_stderr(void (*fn)(void)) {
+    FILE *tmp = tmpfile();
+    assert(tmp != NULL);
+    fflush(stderr);
+    int saved = dup(2);
+    assert(saved >= 0);
+    assert(dup2(fileno(tmp), 2) == 2);
+    fn();
+    fflush(stderr);
+    assert(dup2(saved, 2) == 2);
+    close(saved);
+    long sz = ftell(tmp);
+    assert(sz >= 0);
+    rewind(tmp);
+    char *buf = malloc((size_t)sz + 1);
+    assert(buf != NULL);
+    assert(fread(buf, 1, (size_t)sz, tmp) == (size_t)sz);
+    buf[sz] = '\0';
+    fclose(tmp);
+    return buf;
+}
 
 static void test_str_map_put_get(void) {
     str_u32_map m;
@@ -344,6 +371,33 @@ static void test_load_accepts_wordpiece_type(void) {
     tokenizer_free(tok);
 }
 
+/* --- F8: rejected model.type is diagnosed on stderr, not silent ----------------- */
+
+static void load_unigram_fails(void) {
+    const char *json = "{\"model\":{\"type\":\"Unigram\",\"vocab\":{\"a\":0}}}";
+    assert(tokenizer_load_json(json, strlen(json)) == NULL);
+}
+
+static void load_missing_type_fails(void) {
+    const char *json = "{\"model\":{\"vocab\":{\"a\":0},\"merges\":[]}}";
+    assert(tokenizer_load_json(json, strlen(json)) == NULL);
+}
+
+/* A user pointing mlxd at a T5/ALBERT checkpoint gets NULL back through
+ * several call layers; without a warning there is nothing to say WHY the
+ * model refused to load. */
+static void test_unsupported_model_type_warns(void) {
+    log_set_level(LOG_WARN);
+    char *err = capture_stderr(load_unigram_fails);
+    assert(strstr(err, "unsupported model type") != NULL);
+    assert(strstr(err, "Unigram") != NULL);
+    free(err);
+
+    err = capture_stderr(load_missing_type_fails);
+    assert(strstr(err, "model.type") != NULL);
+    free(err);
+}
+
 /* --- G3: ALL added_tokens entries are stored (special and non-special) --------- */
 
 /* Non-special added tokens like <think> / <tool_call> must still match
@@ -417,6 +471,28 @@ static void test_added_tokens_id_mismatch_rejected(void) {
     const char *json =
         "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"x\":1,\"<s>\":2},\"merges\":[]},"
         "\"added_tokens\":[{\"id\":5000,\"content\":\"<s>\",\"special\":true}]}";
+    assert(tokenizer_load_json(json, strlen(json)) == NULL);
+}
+
+/* Two vocab KEYS sharing one id is HF-tolerated (their fast loader keeps the
+ * last entry); the decode winner must be deterministic in JSON document
+ * order, not hash-iteration order. */
+static void test_vocab_duplicate_id_last_wins(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":1,\"b\":1},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    assert(strcmp(tokenizer_decode_token(tok, 1), "b") == 0);
+    tokenizer_free(tok);
+}
+
+/* An added_token whose ID is already taken by a DIFFERENT base-vocab string
+ * is the same inconsistency as the content/id mismatch above, seen from the
+ * id side: reject rather than let decode silently pick a winner. */
+static void test_added_tokens_id_collision_rejected(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"hello\":5},\"merges\":[]},"
+        "\"added_tokens\":[{\"id\":5,\"content\":\"world\",\"special\":true}]}";
     assert(tokenizer_load_json(json, strlen(json)) == NULL);
 }
 
@@ -497,6 +573,34 @@ static void test_bos_eos_wordpiece_regression(void) {
     tokenizer_free(tok);
 }
 
+/* A WordPiece vocab carrying both the BERT names and stray <s>/</s> entries
+ * must still wrap with [CLS]/[SEP]: for WordPiece the type-correct BERT
+ * names outrank the generic list order (deliberate divergence from the
+ * flat Zig list). */
+static void test_bos_eos_wordpiece_prefers_cls_sep(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"<s>\":3,\"</s>\":4,"
+        "\"[CLS]\":5,\"[SEP]\":6,\"[UNK]\":0,\"hello\":10}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    assert(tokenizer_bos_id(tok) == 5);
+    assert(tokenizer_eos_id(tok) == 6);
+    tokenizer_free(tok);
+}
+
+/* Control: for BPE the generic list order stands - <s>/</s> outrank
+ * [CLS]/[SEP] even when both are present. */
+static void test_bos_eos_bpe_keeps_s_priority(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"<s>\":3,\"</s>\":4,"
+        "\"[CLS]\":5,\"[SEP]\":6,\"a\":10},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    assert(tokenizer_bos_id(tok) == 3);
+    assert(tokenizer_eos_id(tok) == 4);
+    tokenizer_free(tok);
+}
+
 /* Names present ONLY in model.vocab (no added_tokens at all) still resolve:
  * the scan falls back from special_tokens to vocab. */
 static void test_bos_eos_vocab_fallback(void) {
@@ -507,6 +611,42 @@ static void test_bos_eos_vocab_fallback(void) {
     assert(tok != NULL);
     assert(tokenizer_bos_id(tok) == 5);
     assert(tokenizer_eos_id(tok) == 6);
+    tokenizer_free(tok);
+}
+
+/* --- JSON-null members are "absent", not malformed ------------------------------- */
+
+/* HF serializers emit explicit nulls for absent members; a Sequence
+ * pre_tokenizer with pretokenizers:null is "no sub-pretokenizers", not a
+ * structural error (mirrors parse_normalizer's null handling). No ByteLevel
+ * found, so the type resolves to SentencePiece BPE - which decodes U+2581
+ * to a space, distinguishable from byte-level's Ġ mapping. */
+static void test_pretokenizers_null_loads(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]},"
+        "\"pre_tokenizer\":{\"type\":\"Sequence\",\"pretokenizers\":null}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    tokenizer_free(tok);
+}
+
+/* WordPiece exports carry model.merges:null (no merge table); that is
+ * "no merges", not the malformed non-array case. */
+static void test_merges_null_loads(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"a\":0},\"merges\":null}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    tokenizer_free(tok);
+}
+
+/* added_tokens:null means "no added tokens", same as an absent member. */
+static void test_added_tokens_null_loads(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]},"
+        "\"added_tokens\":null}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
     tokenizer_free(tok);
 }
 
@@ -587,6 +727,11 @@ static void test_tokenizer_load_devnull(void) {
     assert(tokenizer_load("/dev/null") == NULL);
 }
 
+/* NULL path must be refused up front: passing it to fopen is UB per C11. */
+static void test_tokenizer_load_null_path(void) {
+    assert(tokenizer_load(NULL) == NULL);
+}
+
 /* --- G7: tokenizer_load_dir - tokenizer.json preferred, legacy fallback ---------- */
 
 static void test_load_dir_gpt2(void) {
@@ -663,6 +808,26 @@ static void test_load_dir_legacy_escape(void) {
     tokenizer_free(tok);
 }
 
+/* Legacy pair whose vocab.json carries a known special name: the loader must
+ * synthesize an added_tokens entry for it so the encode scan emits its id
+ * atomically - without it, "<|endoftext|>" byte-level-encodes as ordinary
+ * punctuation and letters instead of id 5. */
+static void test_load_dir_legacy_special_atomic(void) {
+    tokenizer_t *tok = tokenizer_load_dir(MLXD_FIXTURES_DIR "/legacy_bpe_special");
+    assert(tok != NULL);
+    assert(tokenizer_eos_id(tok) == 5);
+
+    int32_t *ids;
+    int      n = tokenizer_encode_alloc(tok, "a<|endoftext|>b", 15, true, &ids);
+    assert(n == 3);
+    assert(ids[0] == 0);
+    assert(ids[1] == 5);
+    assert(ids[2] == 1);
+    free(ids);
+
+    tokenizer_free(tok);
+}
+
 /* A dir whose tokenizer.json EXISTS but is corrupt must fail loudly, even
  * with valid legacy files beside it: fallback is existence-based only. */
 static void test_load_dir_corrupt_tokenizer_json_fails(void) {
@@ -723,6 +888,42 @@ static void test_normalizer_sequence_non_array_rejected(void) {
         "{\"normalizer\":{\"type\":\"Sequence\",\"normalizers\":42},"
         "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":1},\"merges\":[]}}";
     assert(tokenizer_load_json(json, strlen(json)) == NULL);
+}
+
+static void load_nfc_normalizer_ok(void) {
+    const char *json =
+        "{\"normalizer\":{\"type\":\"NFC\"},"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    tokenizer_free(tok);
+}
+
+static void load_replace_normalizer_ok(void) {
+    const char *json =
+        "{\"normalizer\":{\"type\":\"Replace\",\"pattern\":{\"String\":\" \"},"
+        "\"content\":\"\xe2\x96\x81\"},"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    tokenizer_free(tok);
+}
+
+/* Normalizers the encode path does not implement (NFC/NFKC/Lowercase/
+ * StripAccents) still load - a missed normalizer degrades fidelity, it does
+ * not corrupt ids - but must say so on stderr instead of silently encoding
+ * differently from HF. Replace stays silent: its space-to-U+2581 rewrite IS
+ * implemented by the SentencePiece encoder. */
+static void test_normalizer_unimplemented_warns(void) {
+    log_set_level(LOG_WARN);
+    char *err = capture_stderr(load_nfc_normalizer_ok);
+    assert(strstr(err, "not implemented") != NULL);
+    assert(strstr(err, "NFC") != NULL);
+    free(err);
+
+    err = capture_stderr(load_replace_normalizer_ok);
+    assert(strstr(err, "not implemented") == NULL);
+    free(err);
 }
 
 static void test_normalizer_null_or_absent(void) {
@@ -1167,33 +1368,44 @@ int main(void) {
     test_load_rejects_wordlevel_model_type();
     test_load_accepts_bpe_type();
     test_load_accepts_wordpiece_type();
+    test_unsupported_model_type_warns();
     test_added_tokens_non_special_stored();
     test_added_tokens_missing_special_field_stored();
     test_added_tokens_added_to_vocab_if_missing();
     test_added_tokens_already_in_vocab_no_dup();
     test_added_tokens_id_mismatch_rejected();
+    test_vocab_duplicate_id_last_wins();
+    test_added_tokens_id_collision_rejected();
     test_bos_eos_sp_names();
     test_bos_eos_llama3_names();
     test_bos_eos_first_match_wins();
     test_bos_eos_gpt2_fixture();
     test_bos_eos_wordpiece_regression();
+    test_bos_eos_wordpiece_prefers_cls_sep();
+    test_bos_eos_bpe_keeps_s_priority();
     test_bos_eos_vocab_fallback();
+    test_pretokenizers_null_loads();
+    test_merges_null_loads();
+    test_added_tokens_null_loads();
     test_malformed_json_table_driven();
     test_tokenizer_load_gpt2();
     test_tokenizer_load_bert();
     test_tokenizer_load_nonexistent();
     test_tokenizer_load_devnull();
+    test_tokenizer_load_null_path();
     test_load_dir_gpt2();
     test_load_dir_bert();
     test_load_dir_nonexistent();
     test_load_dir_legacy_fallback();
     test_load_dir_legacy_escape();
+    test_load_dir_legacy_special_atomic();
     test_load_dir_corrupt_tokenizer_json_fails();
     test_normalizer_prepend_sets_flag();
     test_normalizer_replace_is_noop();
     test_normalizer_unknown_loads_ok();
     test_normalizer_sequence_with_prepend();
     test_normalizer_sequence_non_array_rejected();
+    test_normalizer_unimplemented_warns();
     test_normalizer_null_or_absent();
     test_bos_eos_config_string_form();
     test_bos_eos_config_object_form();

@@ -80,6 +80,28 @@ static void test_wordpiece_decode(void) {
     tokenizer_free(tok);
 }
 
+/* Only special:true added tokens are dropped by WordPiece decode; a
+ * non-special added token like <tool_call> is real content and must render
+ * (HF skip_special_tokens semantics). An absent special field counts as
+ * non-special. */
+static void test_wordpiece_decode_keeps_non_special_added(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":101,\"hello\":10}},"
+        "\"added_tokens\":[{\"id\":101,\"content\":\"[CLS]\",\"special\":true},"
+        "{\"id\":50,\"content\":\"<tool_call>\",\"special\":false},"
+        "{\"id\":51,\"content\":\"<think>\"}]}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    /* special:true dropped, special:false kept. */
+    expect_decode(tok, (const int32_t[]){101, 50, 10}, 3, "<tool_call> hello");
+
+    /* No special field at all: kept. */
+    expect_decode(tok, (const int32_t[]){51}, 1, "<think>");
+
+    tokenizer_free(tok);
+}
+
 /* --- Review #6: decode glues on the configured continuation prefix --------------- */
 
 static void test_wordpiece_decode_custom_prefix(void) {
@@ -175,6 +197,7 @@ int main(void) {
     test_byte_level_decode();
     test_byte_level_decode_unmapped_low_cp();
     test_wordpiece_decode();
+    test_wordpiece_decode_keeps_non_special_added();
     test_wordpiece_decode_custom_prefix();
     test_sentencepiece_decode();
     test_sentencepiece_trailing_marker();
