@@ -1,0 +1,1 @@
+{"model":{"type":"BPE","vocab":{"<s>":1,"</s>":2,"a":3},"merges":[]},"added_tokens":[{"id":1,"content":"<s>","special":true},{"id":2,"content":"</s>","special":true}]}

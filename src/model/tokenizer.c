@@ -1,5 +1,6 @@
 #include "model/tokenizer.h"
 
+#include "core/log.h"
 #include "model/tok_bpe.h"
 #include "model/tok_map.h"
 #include "model/tok_unicode.h"
@@ -7,6 +8,7 @@
 #include <yyjson/yyjson.h>
 
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,9 +22,10 @@ struct tokenizer {
     yyjson_doc        *doc; /* owns all borrowed vocab/merge strings */
     str_u32_map        vocab;
     merge_map          merges;
-    /* Content -> id map of added_tokens[] entries with "special": true; keys
-     * borrowed from doc. Decode drops members; encode's special scan emits
-     * the id atomically. */
+    /* Content -> id map of ALL added_tokens[] entries, special or not (the
+     * Zig-faithful single map: <think>/<tool_call> match atomically too);
+     * keys borrowed from doc. WordPiece decode drops members; encode's
+     * parse_special scan emits the id atomically. */
     str_u32_map        special_tokens;
     const char       **id_to_token;
     uint32_t           id_to_token_cap;
@@ -30,6 +33,9 @@ struct tokenizer {
     int32_t            bos_id;
     int32_t            eos_id;
     int32_t            unk_id; /* vocab id of "<unk>", -1 if absent */
+    /* Normalizer prepends the SentencePiece dummy prefix U+2581. Set by the
+     * loader; not yet consumed by the encode path (future stage). */
+    bool               add_dummy_prefix;
     /* WordPiece continuation prefix (HF model.continuing_subword_prefix),
      * default "##"; borrowed from doc when overridden. */
     const char        *wp_prefix;
@@ -43,9 +49,54 @@ struct tokenizer {
     uc_bytes_unicode_t bytes_unicode;
 };
 
+/* Cap on loaded tokenizer-adjacent files (Zig parity, 256 MB): anything
+ * larger is a hostile or wrong file, not a bigger model - refuse rather than
+ * malloc unbounded. Mirrors the MLXD_TOK_MAX_ID stance. */
+#define MLXD_TOK_MAX_FILE ((size_t)256 * 1024 * 1024)
+
+/* Read a whole file into a malloc'd NUL-free byte buffer; *len gets the byte
+ * count. Returns NULL on any I/O error or when the file exceeds the size cap.
+ * Caller frees. */
+static char *read_file(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long sz = ftell(f);
+    if (sz < 0 || (size_t)sz > MLXD_TOK_MAX_FILE) {
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    /* malloc(0) may return NULL; a 1-byte floor keeps empty files (which
+     * fail JSON parsing later) distinguishable from allocation failure. */
+    char *buf = malloc(sz > 0 ? (size_t)sz : 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    *len = (size_t)sz;
+    return buf;
+}
+
 tokenizer_t *tokenizer_load(const char *path) {
-    (void)path;
-    return NULL;
+    size_t len;
+    char  *buf = read_file(path, &len);
+    if (!buf) return NULL;
+    tokenizer_t *tok = tokenizer_load_json(buf, len);
+    free(buf);
+    return tok;
 }
 
 /* Parse one BPE merge entry, accepting both on-disk formats:
@@ -81,23 +132,65 @@ static bool parse_merge_pair(yyjson_val *entry, const char **l, uint32_t *llen,
 }
 
 /* Check if a pre_tokenizer JSON value contains a ByteLevel type, recursing
- * into Sequence.pretokenizers. */
-static bool has_byte_level(yyjson_val *pt) {
+ * into Sequence.pretokenizers. A Sequence whose pretokenizers member is
+ * present but not an array is malformed: *err is set and the caller must
+ * fail the load (Zig ref: InvalidTokenizerJson). */
+static bool has_byte_level(yyjson_val *pt, bool *err) {
     if (!yyjson_is_obj(pt)) return false;
     yyjson_val *t = yyjson_obj_get(pt, "type");
     if (!yyjson_is_str(t)) return false;
     if (strcmp(yyjson_get_str(t), "ByteLevel") == 0) return true;
     if (strcmp(yyjson_get_str(t), "Sequence") == 0) {
         yyjson_val *pts = yyjson_obj_get(pt, "pretokenizers");
+        if (pts && !yyjson_is_arr(pts)) {
+            *err = true;
+            return false;
+        }
         if (yyjson_is_arr(pts)) {
             size_t      idx, max;
             yyjson_val *sub;
             yyjson_arr_foreach(pts, idx, max, sub) {
-                if (has_byte_level(sub)) return true;
+                if (has_byte_level(sub, err)) return true;
+                if (*err) return false;
             }
         }
     }
     return false;
+}
+
+/* Recognize the normalizer(s): Prepend of U+2581 sets add_dummy_prefix;
+ * Sequence recurses; a known set of text-level normalizers are accepted
+ * no-ops (the encode path does not implement them); anything else logs a
+ * warning but never fails the load - a missed normalizer degrades encode
+ * fidelity, it does not corrupt ids. */
+static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok) {
+    if (!yyjson_is_obj(norm)) return;
+    yyjson_val *t = yyjson_obj_get(norm, "type");
+    if (!yyjson_is_str(t)) return;
+    const char *type = yyjson_get_str(t);
+    if (strcmp(type, "Prepend") == 0) {
+        yyjson_val *pv = yyjson_obj_get(norm, "prepend");
+        if (yyjson_is_str(pv) && strcmp(yyjson_get_str(pv), "\xe2\x96\x81") == 0) {
+            tok->add_dummy_prefix = true;
+        } else {
+            log_warn("tokenizer: unsupported Prepend normalizer payload");
+        }
+        return;
+    }
+    if (strcmp(type, "Sequence") == 0) {
+        yyjson_val *subs = yyjson_obj_get(norm, "normalizers");
+        if (yyjson_is_arr(subs)) {
+            size_t      idx, max;
+            yyjson_val *sub;
+            yyjson_arr_foreach(subs, idx, max, sub) parse_normalizer(sub, tok);
+        }
+        return;
+    }
+    if (strcmp(type, "Replace") == 0 || strcmp(type, "BertNormalizer") == 0 ||
+        strcmp(type, "NFC") == 0 || strcmp(type, "NFKC") == 0 ||
+        strcmp(type, "Lowercase") == 0 || strcmp(type, "StripAccents") == 0)
+        return;
+    log_warn("tokenizer: unknown normalizer type \"%s\"", type);
 }
 
 tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
@@ -108,6 +201,13 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     yyjson_val *model     = yyjson_obj_get(root, "model");
     yyjson_val *vocab_val = yyjson_obj_get(model, "vocab");
     if (!yyjson_is_obj(vocab_val)) {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
+    /* A present-but-non-array merges member is malformed, not "no merges":
+     * treating it as empty would silently degrade every multi-char token. */
+    yyjson_val *merges_val = yyjson_obj_get(model, "merges");
+    if (merges_val && !yyjson_is_arr(merges_val)) {
         yyjson_doc_free(doc);
         return NULL;
     }
@@ -131,9 +231,8 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
 
     /* Initialize both maps up front so every early error path below frees
      * fully-initialized maps instead of relying on the calloc-zeroed struct. */
-    size_t      vocab_count = yyjson_obj_size(vocab_val);
-    yyjson_val *merges_val  = yyjson_obj_get(model, "merges");
-    size_t      merge_count = yyjson_is_arr(merges_val) ? yyjson_arr_size(merges_val) : 0;
+    size_t vocab_count = yyjson_obj_size(vocab_val);
+    size_t merge_count = merges_val ? yyjson_arr_size(merges_val) : 0;
     /* Compute the capacity hints in size_t and clamp before the narrowing
      * cast: counts >= 2^31 would wrap the uint32_t doubling. The hint is
      * advisory (maps grow on demand), so clamping is transparent. */
@@ -149,25 +248,31 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         return NULL;
     }
 
-    /* Absent model.type is fine (BPE/SP detection below); a present value
-     * must be a recognized string - non-string or unrecognized types (e.g.
-     * Unigram) would encode through the BPE paths with silently wrong ids. */
+    /* Strict model.type whitelist: only BPE and WordPiece are implemented.
+     * Absent, non-string, or unrecognized types (e.g. Unigram, WordLevel)
+     * fail the load - guessing a path would encode with silently wrong ids. */
     yyjson_val *model_type = yyjson_obj_get(model, "type");
     const char *type_str   = model_type ? yyjson_get_str(model_type) : NULL;
-    if (model_type && !type_str) {
+    if (!type_str) {
         tokenizer_free(tok);
         return NULL;
     }
-    if (type_str && strcmp(type_str, "WordPiece") == 0) {
+    if (strcmp(type_str, "WordPiece") == 0) {
         tok->type = TOKENIZER_WORDPIECE;
-    } else if (type_str && strcmp(type_str, "BPE") != 0) {
+    } else if (strcmp(type_str, "BPE") == 0) {
+        bool pt_err = false;
+        bool bl     = has_byte_level(yyjson_obj_get(root, "pre_tokenizer"), &pt_err);
+        if (pt_err) {
+            tokenizer_free(tok);
+            return NULL;
+        }
+        tok->type = bl ? TOKENIZER_BPE : TOKENIZER_SENTENCEPIECE_BPE;
+    } else {
         tokenizer_free(tok);
         return NULL;
-    } else if (has_byte_level(yyjson_obj_get(root, "pre_tokenizer"))) {
-        tok->type = TOKENIZER_BPE;
-    } else {
-        tok->type = TOKENIZER_SENTENCEPIECE_BPE;
     }
+
+    parse_normalizer(yyjson_obj_get(root, "normalizer"), tok);
 
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
     uint32_t    max_id = 0;
@@ -193,25 +298,36 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         }
         if (id > max_id) max_id = id;
     }
-    tok->vocab_size = (int)tok->vocab.count;
 
     uint32_t unk;
     if (str_u32_map_get(&tok->vocab, "<unk>", 5, &unk)) tok->unk_id = (int32_t)unk;
 
     yyjson_val *added = yyjson_obj_get(root, "added_tokens");
-    if (yyjson_is_arr(added)) {
+    if (added && !yyjson_is_arr(added)) {
+        tokenizer_free(tok);
+        return NULL;
+    }
+    if (added) {
         yyjson_val *entry;
         yyjson_arr_foreach(added, idx, max, entry) {
+            /* A non-object entry or a missing/non-string content is
+             * malformed input, not a skippable oddity: fail the load like
+             * the Zig reference. (obj_get on a non-object yields NULL, so
+             * one string check covers both shapes.) */
             yyjson_val *content = yyjson_obj_get(entry, "content");
-            if (!yyjson_is_str(content)) continue;
+            if (!yyjson_is_str(content)) {
+                tokenizer_free(tok);
+                return NULL;
+            }
             /* An empty content can never match input; storing it would only
              * add a dead probe to every encode scan. Skip, not fail: it is
              * inert, unlike a missing id which would inject garbage. */
             if (yyjson_get_len(content) == 0) continue;
-            if (!yyjson_is_true(yyjson_obj_get(entry, "special"))) continue;
-            /* A special entry must carry a valid id: the encode scan emits
-             * it verbatim, so a missing or out-of-range id would inject a
-             * garbage token. Fail the load like the Zig reference. */
+            /* ALL entries are stored, special or not: the encode scan must
+             * match <think>/<tool_call>-style tokens atomically too. An entry
+             * must carry a valid id - the scan emits it verbatim, so a missing
+             * or out-of-range id would inject a garbage token. Fail the load
+             * like the Zig reference. */
             yyjson_val *idv = yyjson_obj_get(entry, "id");
             if (!yyjson_is_int(idv)) {
                 tokenizer_free(tok);
@@ -222,20 +338,59 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
                 tokenizer_free(tok);
                 return NULL;
             }
-            if (!str_u32_map_put(&tok->special_tokens, yyjson_get_str(content),
-                                 (uint32_t)yyjson_get_len(content), (uint32_t)raw_id)) {
+            const char *cstr = yyjson_get_str(content);
+            uint32_t    clen = (uint32_t)yyjson_get_len(content);
+            if (!str_u32_map_put(&tok->special_tokens, cstr, clen, (uint32_t)raw_id)) {
                 tokenizer_free(tok);
                 return NULL;
             }
+            /* Content absent from model.vocab joins it (Zig ref), so the id
+             * decodes back to the content and counts toward vocab_size. */
+            uint32_t have;
+            if (!str_u32_map_get(&tok->vocab, cstr, clen, &have)) {
+                if (!str_u32_map_put(&tok->vocab, cstr, clen, (uint32_t)raw_id)) {
+                    tokenizer_free(tok);
+                    return NULL;
+                }
+                if ((uint32_t)raw_id > max_id) max_id = (uint32_t)raw_id;
+            }
         }
     }
+    /* After the added_tokens fold-in, so added entries count. */
+    tok->vocab_size = (int)tok->vocab.count;
 
-    /* Stage-E-minimal special-id resolution: WordPiece names its specials
-     * [CLS]/[SEP]/[UNK]. Stage G generalizes this across tokenizer types. */
+    /* BOS/EOS resolution: ordered name lists (verbatim from the Zig
+     * reference), most family-specific first - Gemma, Llama/Mistral,
+     * Llama 3, ChatML/GPT-2-style, then BERT. Each name is looked up in
+     * special_tokens first, then vocab (superset of Zig: some checkpoints
+     * carry the names only in model.vocab). First hit wins. */
+    static const char *bos_names[] = {
+        "<bos>", "<s>", "<|begin_of_text|>", "<|startoftext|>", "[CLS]",
+    };
+    static const char *eos_names[] = {
+        "<eos>", "</s>", "<|end_of_text|>", "<|eot_id|>",
+        "<|im_end|>", "<|endoftext|>", "[SEP]",
+    };
+    for (size_t i = 0; i < sizeof(bos_names) / sizeof(*bos_names); i++) {
+        uint32_t id;
+        uint32_t nlen = (uint32_t)strlen(bos_names[i]);
+        if (str_u32_map_get(&tok->special_tokens, bos_names[i], nlen, &id) ||
+            str_u32_map_get(&tok->vocab, bos_names[i], nlen, &id)) {
+            tok->bos_id = (int32_t)id;
+            break;
+        }
+    }
+    for (size_t i = 0; i < sizeof(eos_names) / sizeof(*eos_names); i++) {
+        uint32_t id;
+        uint32_t nlen = (uint32_t)strlen(eos_names[i]);
+        if (str_u32_map_get(&tok->special_tokens, eos_names[i], nlen, &id) ||
+            str_u32_map_get(&tok->vocab, eos_names[i], nlen, &id)) {
+            tok->eos_id = (int32_t)id;
+            break;
+        }
+    }
     if (tok->type == TOKENIZER_WORDPIECE) {
         uint32_t id;
-        if (str_u32_map_get(&tok->vocab, "[CLS]", 5, &id)) tok->bos_id = (int32_t)id;
-        if (str_u32_map_get(&tok->vocab, "[SEP]", 5, &id)) tok->eos_id = (int32_t)id;
         if (str_u32_map_get(&tok->vocab, "[UNK]", 5, &id)) tok->unk_id = (int32_t)id;
     }
 
@@ -1227,8 +1382,167 @@ char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count) {
     return NULL;
 }
 
+/* --- Directory loading --------------------------------------------------------- */
+
+/* malloc'd "{dir}/{name}"; caller frees. NULL on allocation failure. */
+static char *path_join(const char *dir, const char *name) {
+    size_t dlen = strlen(dir);
+    size_t nlen = strlen(name);
+    char  *p    = malloc(dlen + 1 + nlen + 1);
+    if (!p) return NULL;
+    memcpy(p, dir, dlen);
+    p[dlen] = '/';
+    memcpy(p + dlen + 1, name, nlen);
+    p[dlen + 1 + nlen] = '\0';
+    return p;
+}
+
+/* Append s[0..n) as a JSON string literal (quotes + escapes) to sb. */
+static bool sb_append_json_str(strbuf *sb, const char *s, size_t n) {
+    if (!sb_append(sb, "\"", 1)) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') {
+            char esc[2] = {'\\', (char)c};
+            if (!sb_append(sb, esc, 2)) return false;
+        } else if (c < 0x20) {
+            char esc[8];
+            int  m = snprintf(esc, sizeof(esc), "\\u%04x", c);
+            if (m != 6 || !sb_append(sb, esc, (size_t)m)) return false;
+        } else {
+            if (!sb_append(sb, (const char *)&s[i], 1)) return false;
+        }
+    }
+    return sb_append(sb, "\"", 1);
+}
+
+/* Legacy HF slow format: synthesize tokenizer.json content from vocab.json +
+ * merges.txt exactly like the Zig reference and feed it to the fast loader.
+ * The ByteLevel pre_tokenizer member is load-bearing: without it the type
+ * whitelist would classify the tokenizer as SentencePiece BPE. */
+static tokenizer_t *tokenizer_load_dir_legacy(const char *dir_path) {
+    tokenizer_t *tok        = NULL;
+    char        *vocab_json = NULL, *merges_txt = NULL;
+    size_t       vocab_len = 0, merges_len = 0;
+    strbuf       out = {0};
+
+    char *vocab_path = path_join(dir_path, "vocab.json");
+    if (!vocab_path) return NULL;
+    vocab_json = read_file(vocab_path, &vocab_len);
+    free(vocab_path);
+    if (!vocab_json) goto done;
+
+    char *merges_path = path_join(dir_path, "merges.txt");
+    if (!merges_path) goto done;
+    merges_txt = read_file(merges_path, &merges_len);
+    free(merges_path);
+    if (!merges_txt) goto done;
+
+    /* Trim the vocab so it splices cleanly into the synthesized object. */
+    size_t vs = 0, ve = vocab_len;
+    while (vs < ve && strchr(" \t\r\n", vocab_json[vs])) vs++;
+    while (ve > vs && strchr(" \t\r\n", vocab_json[ve - 1])) ve--;
+
+    static const char head[] =
+        "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":";
+    if (!sb_append(&out, head, sizeof(head) - 1)) goto done;
+    if (!sb_append(&out, vocab_json + vs, ve - vs)) goto done;
+    if (!sb_append(&out, ",\"merges\":[", 11)) goto done;
+
+    /* merges.txt lines become JSON strings; blanks and #-comments skip. */
+    bool   first = true;
+    size_t pos   = 0;
+    while (pos < merges_len) {
+        size_t eol = pos;
+        while (eol < merges_len && merges_txt[eol] != '\n') eol++;
+        size_t ls = pos, le = eol;
+        while (ls < le && strchr(" \t\r", merges_txt[ls])) ls++;
+        while (le > ls && strchr(" \t\r", merges_txt[le - 1])) le--;
+        pos = eol + 1;
+        if (ls == le || merges_txt[ls] == '#') continue;
+        if (!first && !sb_append(&out, ",", 1)) goto done;
+        first = false;
+        if (!sb_append_json_str(&out, merges_txt + ls, le - ls)) goto done;
+    }
+    if (!sb_append(&out, "]}}", 3)) goto done;
+
+    tok = tokenizer_load_json(out.buf, out.len);
+
+done:
+    free(out.buf);
+    free(vocab_json);
+    free(merges_txt);
+    return tok;
+}
+
+/* Resolve one tokenizer_config.json token value - plain string or
+ * {"content": string} object - against special_tokens then vocab; a hit
+ * overrides *slot, a miss leaves the heuristic value. */
+static void apply_one_override(tokenizer_t *tok, yyjson_val *v, int32_t *slot) {
+    yyjson_val *sv = yyjson_is_obj(v) ? yyjson_obj_get(v, "content") : v;
+    if (!yyjson_is_str(sv)) return;
+    const char *name = yyjson_get_str(sv);
+    uint32_t    nlen = (uint32_t)yyjson_get_len(sv);
+    if (nlen == 0) return;
+    uint32_t id;
+    if (str_u32_map_get(&tok->special_tokens, name, nlen, &id) ||
+        str_u32_map_get(&tok->vocab, name, nlen, &id))
+        *slot = (int32_t)id;
+}
+
+/* Apply {dir}/tokenizer_config.json bos_token/eos_token overrides: the
+ * config's explicit names beat the ordered-name-list heuristic. An absent
+ * or unparsable config is silently ignored - it is optional metadata.
+ * (add_bos_token/add_eos_token/chat_template: later stages.) */
+static void apply_config_overrides(tokenizer_t *tok, const char *dir_path) {
+    char *path = path_join(dir_path, "tokenizer_config.json");
+    if (!path) return;
+    size_t len = 0;
+    char  *buf = read_file(path, &len);
+    free(path);
+    if (!buf) return;
+    yyjson_doc *doc = yyjson_read(buf, len, 0);
+    free(buf);
+    if (!doc) return;
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    if (yyjson_is_obj(root)) {
+        apply_one_override(tok, yyjson_obj_get(root, "bos_token"), &tok->bos_id);
+        apply_one_override(tok, yyjson_obj_get(root, "eos_token"), &tok->eos_id);
+    }
+    yyjson_doc_free(doc);
+}
+
+tokenizer_t *tokenizer_load_dir(const char *dir_path) {
+    if (!dir_path) return NULL;
+    char *tj_path = path_join(dir_path, "tokenizer.json");
+    if (!tj_path) return NULL;
+
+    /* Fallback is EXISTENCE-based (Zig ref: only FileNotFound falls back):
+     * when tokenizer.json is present, its load result is final - a corrupt
+     * file fails loudly instead of silently degrading to the legacy pair. */
+    tokenizer_t *tok;
+    FILE        *f = fopen(tj_path, "rb");
+    if (f) {
+        fclose(f);
+        tok = tokenizer_load(tj_path);
+        free(tj_path);
+    } else {
+        bool absent = errno == ENOENT;
+        free(tj_path);
+        if (!absent) return NULL;
+        tok = tokenizer_load_dir_legacy(dir_path);
+    }
+    if (tok) apply_config_overrides(tok, dir_path);
+    return tok;
+}
+
 int tokenizer_vocab_size(const tokenizer_t *tok) { return tok ? tok->vocab_size : 0; }
 
 int32_t tokenizer_bos_id(const tokenizer_t *tok) { return tok ? tok->bos_id : -1; }
 
 int32_t tokenizer_eos_id(const tokenizer_t *tok) { return tok ? tok->eos_id : -1; }
+
+bool tokenizer_add_dummy_prefix(const tokenizer_t *tok) {
+    return tok ? tok->add_dummy_prefix : false;
+}

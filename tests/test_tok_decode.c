@@ -21,7 +21,7 @@ static void test_byte_level_decode(void) {
      * exercise the unmapped-codepoint raw UTF-8 fallback. */
     const char *json =
         "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
-        "\"model\":{\"vocab\":{\"a\":1,\"b\":2,\"\xc4\xa0\":3,\"\xc4\xa0" "b\":4,"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":1,\"b\":2,\"\xc4\xa0\":3,\"\xc4\xa0" "b\":4,"
         "\"\xe8\x90\xac\":5},"
         "\"merges\":[[\"\xc4\xa0\",\"b\"]]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
@@ -48,7 +48,7 @@ static void test_byte_level_decode(void) {
 static void test_byte_level_decode_unmapped_low_cp(void) {
     const char *json =
         "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
-        "\"model\":{\"vocab\":{\"\\u0001\":1},\"merges\":[]}}";
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"\\u0001\":1},\"merges\":[]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
     assert(tok != NULL);
     expect_decode(tok, (const int32_t[]){1}, 1, "\x01");
@@ -107,7 +107,7 @@ static void test_wordpiece_decode_custom_prefix(void) {
  * length, so it must render verbatim. */
 static tokenizer_t *load_sp_tok(void) {
     const char *json =
-        "{\"model\":{\"vocab\":{\"<unk>\":0,\"<s>\":1,\"</s>\":2,"
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"<unk>\":0,\"<s>\":1,\"</s>\":2,"
         "\"\xe2\x96\x81\":3,\"\xe2\x96\x81hello\":4,\"hello\":5,"
         "\"<0x0A>\":10,\"<0x41>\":11,\"a\":12,\"<0x1>\":13},\"merges\":[]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));

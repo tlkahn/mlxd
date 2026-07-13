@@ -1,0 +1,1 @@
+{"model":{"type":"BPE","vocab":{"<s>":1,"</s>":2,"<bos_override>":10,"<eos_override>":11,"a":3},"merges":[]},"added_tokens":[{"id":1,"content":"<s>","special":true},{"id":2,"content":"</s>","special":true},{"id":10,"content":"<bos_override>","special":true},{"id":11,"content":"<eos_override>","special":true}]}
