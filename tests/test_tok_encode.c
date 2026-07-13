@@ -12,7 +12,7 @@
 static void test_byte_level_encode(void) {
     const char *json =
         "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
-        "\"model\":{\"vocab\":{\"a\":1,\"b\":2,\"\xc4\xa0\":3,\"\xc4\xa0" "b\":4},"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":1,\"b\":2,\"\xc4\xa0\":3,\"\xc4\xa0" "b\":4},"
         "\"merges\":[[\"\xc4\xa0\",\"b\"]]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
     assert(tok != NULL);
@@ -155,13 +155,13 @@ static void test_wordpiece_custom_prefix(void) {
 
 /* --- E10: SentencePiece encode --------------------------------------------------- */
 
-/* No model.type and no ByteLevel pre_tokenizer: detected as SentencePiece.
+/* BPE model.type with no ByteLevel pre_tokenizer: classified as SentencePiece.
  * Spaces normalize to U+2581 (\xe2\x96\x81) and the whole string is merged
  * with NO pre-tokenization, so " hi" folds into one token but "hi" cannot
  * reach any "\xe2\x96\x81"-prefixed merge. */
 static void test_sentencepiece_encode(void) {
     const char *json =
-        "{\"model\":{\"vocab\":{\"h\":1,\"i\":2,\"\xe2\x96\x81\":3,"
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"h\":1,\"i\":2,\"\xe2\x96\x81\":3,"
         "\"\xe2\x96\x81h\":10,\"\xe2\x96\x81hi\":4},"
         "\"merges\":[[\"\xe2\x96\x81\",\"h\"],[\"\xe2\x96\x81h\",\"i\"]]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
@@ -196,7 +196,7 @@ static void test_encoder_scratch_footprint(void) {
 
     /* SentencePiece never pre-tokenizes, returns ids via bpe_merge's s->ids,
      * and builds no candidate keys: pretoks/out/cand stay unallocated. */
-    const char *sp_json = "{\"model\":{\"vocab\":{\"h\":1,\"i\":2},\"merges\":[]}}";
+    const char *sp_json = "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"h\":1,\"i\":2},\"merges\":[]}}";
     tokenizer_t *tok    = tokenizer_load_json(sp_json, strlen(sp_json));
     assert(tok != NULL);
     encode_scratch_init(&s);
@@ -222,7 +222,7 @@ static void test_encoder_scratch_footprint(void) {
     /* Byte-level builds no WordPiece candidate keys: cand stays unallocated. */
     const char *bl_json =
         "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
-        "\"model\":{\"vocab\":{\"h\":1,\"i\":2},\"merges\":[]}}";
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"h\":1,\"i\":2},\"merges\":[]}}";
     tok = tokenizer_load_json(bl_json, strlen(bl_json));
     assert(tok != NULL);
     encode_scratch_init(&s);

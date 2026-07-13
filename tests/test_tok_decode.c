@@ -21,7 +21,7 @@ static void test_byte_level_decode(void) {
      * exercise the unmapped-codepoint raw UTF-8 fallback. */
     const char *json =
         "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
-        "\"model\":{\"vocab\":{\"a\":1,\"b\":2,\"\xc4\xa0\":3,\"\xc4\xa0" "b\":4,"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":1,\"b\":2,\"\xc4\xa0\":3,\"\xc4\xa0" "b\":4,"
         "\"\xe8\x90\xac\":5},"
         "\"merges\":[[\"\xc4\xa0\",\"b\"]]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
@@ -48,7 +48,7 @@ static void test_byte_level_decode(void) {
 static void test_byte_level_decode_unmapped_low_cp(void) {
     const char *json =
         "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
-        "\"model\":{\"vocab\":{\"\\u0001\":1},\"merges\":[]}}";
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"\\u0001\":1},\"merges\":[]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
     assert(tok != NULL);
     expect_decode(tok, (const int32_t[]){1}, 1, "\x01");
@@ -80,6 +80,28 @@ static void test_wordpiece_decode(void) {
     tokenizer_free(tok);
 }
 
+/* Only special:true added tokens are dropped by WordPiece decode; a
+ * non-special added token like <tool_call> is real content and must render
+ * (HF skip_special_tokens semantics). An absent special field counts as
+ * non-special. */
+static void test_wordpiece_decode_keeps_non_special_added(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":101,\"hello\":10}},"
+        "\"added_tokens\":[{\"id\":101,\"content\":\"[CLS]\",\"special\":true},"
+        "{\"id\":50,\"content\":\"<tool_call>\",\"special\":false},"
+        "{\"id\":51,\"content\":\"<think>\"}]}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    /* special:true dropped, special:false kept. */
+    expect_decode(tok, (const int32_t[]){101, 50, 10}, 3, "<tool_call> hello");
+
+    /* No special field at all: kept. */
+    expect_decode(tok, (const int32_t[]){51}, 1, "<think>");
+
+    tokenizer_free(tok);
+}
+
 /* --- Review #6: decode glues on the configured continuation prefix --------------- */
 
 static void test_wordpiece_decode_custom_prefix(void) {
@@ -100,6 +122,36 @@ static void test_wordpiece_decode_custom_prefix(void) {
     tokenizer_free(tok);
 }
 
+/* BERT-style checkpoints often carry [CLS]/[SEP] only in model.vocab (no
+ * added_tokens): encode wraps with them via the name-list heuristic, so
+ * decode must strip the resolved bos/eos ids too, not just added_special
+ * members - otherwise encode->decode round-trips grow "[CLS] ... [SEP]". */
+static void test_wordpiece_decode_strips_vocab_only_bos_eos(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":101,\"[SEP]\":102,"
+        "\"hello\":10}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    assert(tokenizer_bos_id(tok) == 101);
+    assert(tokenizer_eos_id(tok) == 102);
+    expect_decode(tok, (const int32_t[]){101, 10, 102}, 3, "hello");
+    tokenizer_free(tok);
+}
+
+/* An empty continuing_subword_prefix means "no continuation marker" (HF
+ * semantics): every token is a word start, so decode joins with spaces. The
+ * naive prefix test is vacuously true for plen == 0 and would glue
+ * everything. */
+static void test_wordpiece_decode_empty_prefix(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"continuing_subword_prefix\":\"\","
+        "\"vocab\":{\"hello\":1,\"world\":2}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    expect_decode(tok, (const int32_t[]){1, 2}, 2, "hello world");
+    tokenizer_free(tok);
+}
+
 /* --- E11: SentencePiece decode -------------------------------------------------- */
 
 /* SP fixture shared by E11/E12: byte-fallback tokens, U+2581-prefixed and
@@ -107,7 +159,7 @@ static void test_wordpiece_decode_custom_prefix(void) {
  * length, so it must render verbatim. */
 static tokenizer_t *load_sp_tok(void) {
     const char *json =
-        "{\"model\":{\"vocab\":{\"<unk>\":0,\"<s>\":1,\"</s>\":2,"
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"<unk>\":0,\"<s>\":1,\"</s>\":2,"
         "\"\xe2\x96\x81\":3,\"\xe2\x96\x81hello\":4,\"hello\":5,"
         "\"<0x0A>\":10,\"<0x41>\":11,\"a\":12,\"<0x1>\":13},\"merges\":[]}}";
     tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
@@ -175,7 +227,10 @@ int main(void) {
     test_byte_level_decode();
     test_byte_level_decode_unmapped_low_cp();
     test_wordpiece_decode();
+    test_wordpiece_decode_keeps_non_special_added();
+    test_wordpiece_decode_strips_vocab_only_bos_eos();
     test_wordpiece_decode_custom_prefix();
+    test_wordpiece_decode_empty_prefix();
     test_sentencepiece_decode();
     test_sentencepiece_trailing_marker();
     test_gpt2_fixture_decode();
