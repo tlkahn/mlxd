@@ -94,11 +94,11 @@ int encode_byte_level(const tokenizer_t *tok, encode_scratch *s, const char *tex
 /* WordPiece encode (BERT-style): ASCII-lowercase, split on ASCII whitespace
  * and punctuation, greedy longest-match per word with continuation pieces
  * prefixed by model.continuing_subword_prefix (default "##"); an
- * unmatchable word emits one unk id. Emits bos/eos around the body when
- * set (Stage F relocates that wrap to the public entry point). Reserves
- * text/out/cand (greedy longest-match, so no merge buffers) at
- * len + 2 + prefix_len; *out points into scratch. Returns the id count, or
- * -1 on overflow/allocation failure. */
+ * unmatchable word emits one unk id. Returns the bare body - the public
+ * entry points add the [CLS]/[SEP] wrap. Reserves text/out/cand (greedy
+ * longest-match, so no merge buffers) at len + prefix_len; *out points
+ * into scratch. Returns the id count, or -1 on overflow/allocation
+ * failure. */
 int encode_wordpiece(const tokenizer_t *tok, encode_scratch *s, const char *text, size_t len,
                      int32_t **out);
 
