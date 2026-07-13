@@ -56,10 +56,16 @@ struct tokenizer {
 
 /* Read a whole file into a malloc'd NUL-free byte buffer; *len gets the byte
  * count. Returns NULL on any I/O error or when the file exceeds the size cap.
- * Caller frees. */
-static char *read_file(const char *path, size_t *len) {
+ * Optional *not_found is set true exactly when the open fails with ENOENT -
+ * captured at the fopen site because errno is unspecified after the later
+ * (successful) calls on the error paths. Caller frees. */
+static char *read_file(const char *path, size_t *len, bool *not_found) {
+    if (not_found) *not_found = false;
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+    if (!f) {
+        if (not_found && errno == ENOENT) *not_found = true;
+        return NULL;
+    }
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
         return NULL;
@@ -92,7 +98,7 @@ static char *read_file(const char *path, size_t *len) {
 
 tokenizer_t *tokenizer_load(const char *path) {
     size_t len;
-    char  *buf = read_file(path, &len);
+    char  *buf = read_file(path, &len, NULL);
     if (!buf) return NULL;
     tokenizer_t *tok = tokenizer_load_json(buf, len);
     free(buf);
@@ -160,10 +166,12 @@ static bool has_byte_level(yyjson_val *pt, bool *err) {
 
 /* Recognize the normalizer(s): Prepend of U+2581 sets add_dummy_prefix;
  * Sequence recurses; a known set of text-level normalizers are accepted
- * no-ops (the encode path does not implement them); anything else logs a
- * warning but never fails the load - a missed normalizer degrades encode
- * fidelity, it does not corrupt ids. */
-static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok) {
+ * no-ops (the encode path does not implement them). Structural malformation
+ * (a Sequence whose normalizers member is present but not an array) sets
+ * *err and the caller must fail the load, mirroring has_byte_level. Unknown
+ * but well-formed types only log a warning - a missed normalizer degrades
+ * encode fidelity, it does not corrupt ids. */
+static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok, bool *err) {
     if (!yyjson_is_obj(norm)) return;
     yyjson_val *t = yyjson_obj_get(norm, "type");
     if (!yyjson_is_str(t)) return;
@@ -179,10 +187,17 @@ static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok) {
     }
     if (strcmp(type, "Sequence") == 0) {
         yyjson_val *subs = yyjson_obj_get(norm, "normalizers");
+        if (subs && !yyjson_is_arr(subs) && !yyjson_is_null(subs)) {
+            *err = true;
+            return;
+        }
         if (yyjson_is_arr(subs)) {
             size_t      idx, max;
             yyjson_val *sub;
-            yyjson_arr_foreach(subs, idx, max, sub) parse_normalizer(sub, tok);
+            yyjson_arr_foreach(subs, idx, max, sub) {
+                parse_normalizer(sub, tok, err);
+                if (*err) return;
+            }
         }
         return;
     }
@@ -272,7 +287,12 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         return NULL;
     }
 
-    parse_normalizer(yyjson_obj_get(root, "normalizer"), tok);
+    bool norm_err = false;
+    parse_normalizer(yyjson_obj_get(root, "normalizer"), tok, &norm_err);
+    if (norm_err) {
+        tokenizer_free(tok);
+        return NULL;
+    }
 
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
     uint32_t    max_id = 0;
@@ -345,7 +365,11 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
                 return NULL;
             }
             /* Content absent from model.vocab joins it (Zig ref), so the id
-             * decodes back to the content and counts toward vocab_size. */
+             * decodes back to the content and counts toward vocab_size.
+             * Content present under a DIFFERENT id is an inconsistent file:
+             * fail the load like HF's deserializer - accepting it would leave
+             * id_to_token/max_id stale for the added id, so bos/eos could
+             * resolve to an undecodable id. */
             uint32_t have;
             if (!str_u32_map_get(&tok->vocab, cstr, clen, &have)) {
                 if (!str_u32_map_put(&tok->vocab, cstr, clen, (uint32_t)raw_id)) {
@@ -353,6 +377,9 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
                     return NULL;
                 }
                 if ((uint32_t)raw_id > max_id) max_id = (uint32_t)raw_id;
+            } else if (have != (uint32_t)raw_id) {
+                tokenizer_free(tok);
+                return NULL;
             }
         }
     }
@@ -1397,62 +1424,53 @@ static char *path_join(const char *dir, const char *name) {
     return p;
 }
 
-/* Append s[0..n) as a JSON string literal (quotes + escapes) to sb. */
-static bool sb_append_json_str(strbuf *sb, const char *s, size_t n) {
-    if (!sb_append(sb, "\"", 1)) return false;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c == '"' || c == '\\') {
-            char esc[2] = {'\\', (char)c};
-            if (!sb_append(sb, esc, 2)) return false;
-        } else if (c < 0x20) {
-            char esc[8];
-            int  m = snprintf(esc, sizeof(esc), "\\u%04x", c);
-            if (m != 6 || !sb_append(sb, esc, (size_t)m)) return false;
-        } else {
-            if (!sb_append(sb, (const char *)&s[i], 1)) return false;
-        }
-    }
-    return sb_append(sb, "\"", 1);
-}
-
 /* Legacy HF slow format: synthesize tokenizer.json content from vocab.json +
  * merges.txt exactly like the Zig reference and feed it to the fast loader.
+ * The synthesis builds a yyjson mut-doc (never concatenates JSON text):
+ * vocab.json is parsed and its root copied in, so an unparseable vocab.json
+ * fails here just as its splice used to fail inside tokenizer_load_json.
  * The ByteLevel pre_tokenizer member is load-bearing: without it the type
  * whitelist would classify the tokenizer as SentencePiece BPE. */
 static tokenizer_t *tokenizer_load_dir_legacy(const char *dir_path) {
-    tokenizer_t *tok        = NULL;
-    char        *vocab_json = NULL, *merges_txt = NULL;
-    size_t       vocab_len = 0, merges_len = 0;
-    strbuf       out = {0};
+    tokenizer_t    *tok        = NULL;
+    char           *vocab_json = NULL, *merges_txt = NULL, *out = NULL;
+    size_t          vocab_len = 0, merges_len = 0, out_len = 0;
+    yyjson_doc     *vocab_doc = NULL;
+    yyjson_mut_doc *doc       = NULL;
 
     char *vocab_path = path_join(dir_path, "vocab.json");
     if (!vocab_path) return NULL;
-    vocab_json = read_file(vocab_path, &vocab_len);
+    vocab_json = read_file(vocab_path, &vocab_len, NULL);
     free(vocab_path);
     if (!vocab_json) goto done;
 
     char *merges_path = path_join(dir_path, "merges.txt");
     if (!merges_path) goto done;
-    merges_txt = read_file(merges_path, &merges_len);
+    merges_txt = read_file(merges_path, &merges_len, NULL);
     free(merges_path);
     if (!merges_txt) goto done;
 
-    /* Trim the vocab so it splices cleanly into the synthesized object. */
-    size_t vs = 0, ve = vocab_len;
-    while (vs < ve && strchr(" \t\r\n", vocab_json[vs])) vs++;
-    while (ve > vs && strchr(" \t\r\n", vocab_json[ve - 1])) ve--;
+    vocab_doc = yyjson_read(vocab_json, vocab_len, 0);
+    if (!vocab_doc) goto done;
 
-    static const char head[] =
-        "{\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
-        "\"model\":{\"type\":\"BPE\",\"vocab\":";
-    if (!sb_append(&out, head, sizeof(head) - 1)) goto done;
-    if (!sb_append(&out, vocab_json + vs, ve - vs)) goto done;
-    if (!sb_append(&out, ",\"merges\":[", 11)) goto done;
+    doc = yyjson_mut_doc_new(NULL);
+    if (!doc) goto done;
+    yyjson_mut_val *root   = yyjson_mut_obj(doc);
+    yyjson_mut_val *pt     = yyjson_mut_obj(doc);
+    yyjson_mut_val *model  = yyjson_mut_obj(doc);
+    yyjson_mut_val *vocab  = yyjson_val_mut_copy(doc, yyjson_doc_get_root(vocab_doc));
+    yyjson_mut_val *merges = yyjson_mut_arr(doc);
+    if (!root || !pt || !model || !vocab || !merges) goto done;
+    if (!yyjson_mut_obj_add_str(doc, pt, "type", "ByteLevel")) goto done;
+    if (!yyjson_mut_obj_add_val(doc, root, "pre_tokenizer", pt)) goto done;
+    if (!yyjson_mut_obj_add_str(doc, model, "type", "BPE")) goto done;
+    if (!yyjson_mut_obj_add_val(doc, model, "vocab", vocab)) goto done;
+    if (!yyjson_mut_obj_add_val(doc, model, "merges", merges)) goto done;
+    if (!yyjson_mut_obj_add_val(doc, root, "model", model)) goto done;
+    yyjson_mut_doc_set_root(doc, root);
 
-    /* merges.txt lines become JSON strings; blanks and #-comments skip. */
-    bool   first = true;
-    size_t pos   = 0;
+    /* merges.txt lines become array entries; blanks and #-comments skip. */
+    size_t pos = 0;
     while (pos < merges_len) {
         size_t eol = pos;
         while (eol < merges_len && merges_txt[eol] != '\n') eol++;
@@ -1461,16 +1479,17 @@ static tokenizer_t *tokenizer_load_dir_legacy(const char *dir_path) {
         while (le > ls && strchr(" \t\r", merges_txt[le - 1])) le--;
         pos = eol + 1;
         if (ls == le || merges_txt[ls] == '#') continue;
-        if (!first && !sb_append(&out, ",", 1)) goto done;
-        first = false;
-        if (!sb_append_json_str(&out, merges_txt + ls, le - ls)) goto done;
+        if (!yyjson_mut_arr_add_strncpy(doc, merges, merges_txt + ls, le - ls)) goto done;
     }
-    if (!sb_append(&out, "]}}", 3)) goto done;
 
-    tok = tokenizer_load_json(out.buf, out.len);
+    out = yyjson_mut_write(doc, 0, &out_len);
+    if (!out) goto done;
+    tok = tokenizer_load_json(out, out_len);
 
 done:
-    free(out.buf);
+    free(out);
+    yyjson_mut_doc_free(doc);
+    yyjson_doc_free(vocab_doc);
     free(vocab_json);
     free(merges_txt);
     return tok;
@@ -1499,7 +1518,7 @@ static void apply_config_overrides(tokenizer_t *tok, const char *dir_path) {
     char *path = path_join(dir_path, "tokenizer_config.json");
     if (!path) return;
     size_t len = 0;
-    char  *buf = read_file(path, &len);
+    char  *buf = read_file(path, &len, NULL);
     free(path);
     if (!buf) return;
     yyjson_doc *doc = yyjson_read(buf, len, 0);
@@ -1520,17 +1539,20 @@ tokenizer_t *tokenizer_load_dir(const char *dir_path) {
 
     /* Fallback is EXISTENCE-based (Zig ref: only FileNotFound falls back):
      * when tokenizer.json is present, its load result is final - a corrupt
-     * file fails loudly instead of silently degrading to the legacy pair. */
+     * file fails loudly instead of silently degrading to the legacy pair.
+     * A single read_file both probes and reads, so there is no window for
+     * the file to disappear between an existence check and the read; its
+     * not_found flag discriminates "absent" from every other failure. */
     tokenizer_t *tok;
-    FILE        *f = fopen(tj_path, "rb");
-    if (f) {
-        fclose(f);
-        tok = tokenizer_load(tj_path);
-        free(tj_path);
+    size_t       len       = 0;
+    bool         not_found = false;
+    char        *buf       = read_file(tj_path, &len, &not_found);
+    free(tj_path);
+    if (buf) {
+        tok = tokenizer_load_json(buf, len);
+        free(buf);
     } else {
-        bool absent = errno == ENOENT;
-        free(tj_path);
-        if (!absent) return NULL;
+        if (!not_found) return NULL;
         tok = tokenizer_load_dir_legacy(dir_path);
     }
     if (tok) apply_config_overrides(tok, dir_path);

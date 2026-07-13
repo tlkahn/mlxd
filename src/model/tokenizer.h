@@ -14,6 +14,9 @@ typedef enum {
 } tokenizer_type_t;
 
 /* Load a tokenizer from a HuggingFace tokenizer.json file.
+ * BOS/EOS come from the ordered-name heuristic only; tokenizer_config.json
+ * overrides are applied exclusively by tokenizer_load_dir, which is the
+ * server path.
  * Returns NULL on error. Caller must free with tokenizer_free. */
 tokenizer_t *tokenizer_load(const char *path);
 
@@ -21,10 +24,14 @@ tokenizer_t *tokenizer_load(const char *path);
  * when it is ABSENT the legacy vocab.json + merges.txt pair is synthesized
  * into a byte-level BPE tokenizer. The fallback is existence-based only: a
  * present-but-corrupt tokenizer.json fails the load, it does not fall back.
+ * This is the server path: it alone applies {dir}/tokenizer_config.json
+ * bos_token/eos_token overrides on top of the ordered-name heuristic.
  * Returns NULL on error. Caller must free with tokenizer_free. */
 tokenizer_t *tokenizer_load_dir(const char *dir_path);
 
 /* Load a tokenizer from an in-memory tokenizer.json buffer.
+ * Like tokenizer_load, BOS/EOS come from the ordered-name heuristic only;
+ * only tokenizer_load_dir applies tokenizer_config.json overrides.
  * Returns NULL on error. Caller must free with tokenizer_free. */
 tokenizer_t *tokenizer_load_json(const char *json, size_t len);
 

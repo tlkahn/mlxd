@@ -409,6 +409,17 @@ static void test_added_tokens_already_in_vocab_no_dup(void) {
     tokenizer_free(tok);
 }
 
+/* An added_token whose content is in model.vocab under a DIFFERENT id is an
+ * inconsistent file: the load must fail (HF deserialization rejects it too).
+ * Accepting it would leave id_to_token/max_id stale for the added id, so
+ * bos/eos could resolve to an undecodable id. */
+static void test_added_tokens_id_mismatch_rejected(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"x\":1,\"<s>\":2},\"merges\":[]},"
+        "\"added_tokens\":[{\"id\":5000,\"content\":\"<s>\",\"special\":true}]}";
+    assert(tokenizer_load_json(json, strlen(json)) == NULL);
+}
+
 /* --- G4: BOS/EOS resolution via ordered name lists ------------------------------ */
 
 static void test_bos_eos_sp_names(void) {
@@ -630,6 +641,28 @@ static void test_load_dir_legacy_fallback(void) {
     tokenizer_free(tok);
 }
 
+/* Legacy pair whose merges.txt lines contain JSON-special characters (quote,
+ * backslash): pins the escaping behavior of the synthesized tokenizer.json
+ * through the merges. Both merges must apply: `"`+`!` then `"!`+`\`. */
+static void test_load_dir_legacy_escape(void) {
+    tokenizer_t *tok = tokenizer_load_dir(MLXD_FIXTURES_DIR "/legacy_bpe_escape");
+    assert(tok != NULL);
+    assert(tokenizer_vocab_size(tok) == 5);
+
+    int32_t *ids;
+    int      n = tokenizer_encode_alloc(tok, "\"!", 2, true, &ids);
+    assert(n == 1);
+    assert(ids[0] == 3);
+    free(ids);
+
+    n = tokenizer_encode_alloc(tok, "\"!\\", 3, true, &ids);
+    assert(n == 1);
+    assert(ids[0] == 4);
+    free(ids);
+
+    tokenizer_free(tok);
+}
+
 /* A dir whose tokenizer.json EXISTS but is corrupt must fail loudly, even
  * with valid legacy files beside it: fallback is existence-based only. */
 static void test_load_dir_corrupt_tokenizer_json_fails(void) {
@@ -680,6 +713,16 @@ static void test_normalizer_sequence_with_prepend(void) {
     assert(tok != NULL);
     assert(tokenizer_add_dummy_prefix(tok));
     tokenizer_free(tok);
+}
+
+/* A Sequence normalizer whose normalizers member is present but not an array
+ * is structurally malformed: the load fails (mirroring has_byte_level on the
+ * pre_tokenizer side). Unknown-but-well-formed types still warn only. */
+static void test_normalizer_sequence_non_array_rejected(void) {
+    const char *json =
+        "{\"normalizer\":{\"type\":\"Sequence\",\"normalizers\":42},"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":1},\"merges\":[]}}";
+    assert(tokenizer_load_json(json, strlen(json)) == NULL);
 }
 
 static void test_normalizer_null_or_absent(void) {
@@ -1128,6 +1171,7 @@ int main(void) {
     test_added_tokens_missing_special_field_stored();
     test_added_tokens_added_to_vocab_if_missing();
     test_added_tokens_already_in_vocab_no_dup();
+    test_added_tokens_id_mismatch_rejected();
     test_bos_eos_sp_names();
     test_bos_eos_llama3_names();
     test_bos_eos_first_match_wins();
@@ -1143,11 +1187,13 @@ int main(void) {
     test_load_dir_bert();
     test_load_dir_nonexistent();
     test_load_dir_legacy_fallback();
+    test_load_dir_legacy_escape();
     test_load_dir_corrupt_tokenizer_json_fails();
     test_normalizer_prepend_sets_flag();
     test_normalizer_replace_is_noop();
     test_normalizer_unknown_loads_ok();
     test_normalizer_sequence_with_prepend();
+    test_normalizer_sequence_non_array_rejected();
     test_normalizer_null_or_absent();
     test_bos_eos_config_string_form();
     test_bos_eos_config_object_form();
