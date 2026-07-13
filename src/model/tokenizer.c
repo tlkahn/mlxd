@@ -142,6 +142,14 @@ static bool parse_merge_pair(yyjson_val *entry, const char **l, uint32_t *llen,
     return false;
 }
 
+/* Shared shape guard for optional array members (merges, added_tokens,
+ * Sequence sub-lists): absent and JSON null both mean "none" - HF
+ * serializers emit explicit nulls - while any other non-array shape is
+ * malformed and the caller must fail the load. */
+static bool json_arr_or_absent(yyjson_val *v) {
+    return !v || yyjson_is_arr(v) || yyjson_is_null(v);
+}
+
 /* Check if a pre_tokenizer JSON value contains a ByteLevel type, recursing
  * into Sequence.pretokenizers. A Sequence whose pretokenizers member is
  * present but not an array is malformed: *err is set and the caller must
@@ -153,9 +161,7 @@ static bool has_byte_level(yyjson_val *pt, bool *err) {
     if (strcmp(yyjson_get_str(t), "ByteLevel") == 0) return true;
     if (strcmp(yyjson_get_str(t), "Sequence") == 0) {
         yyjson_val *pts = yyjson_obj_get(pt, "pretokenizers");
-        /* JSON null means "absent" (HF serializers emit explicit nulls),
-         * mirroring parse_normalizer's Sequence handling. */
-        if (pts && !yyjson_is_arr(pts) && !yyjson_is_null(pts)) {
+        if (!json_arr_or_absent(pts)) {
             *err = true;
             return false;
         }
@@ -197,7 +203,7 @@ static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok, bool *err) {
     }
     if (strcmp(type, "Sequence") == 0) {
         yyjson_val *subs = yyjson_obj_get(norm, "normalizers");
-        if (subs && !yyjson_is_arr(subs) && !yyjson_is_null(subs)) {
+        if (!json_arr_or_absent(subs)) {
             *err = true;
             return;
         }
@@ -257,10 +263,9 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
         return NULL;
     }
     /* A present-but-non-array merges member is malformed, not "no merges":
-     * treating it as empty would silently degrade every multi-char token.
-     * JSON null is exempt - WordPiece exports serialize merges:null. */
+     * treating it as empty would silently degrade every multi-char token. */
     yyjson_val *merges_val = yyjson_obj_get(model, "merges");
-    if (merges_val && !yyjson_is_arr(merges_val) && !yyjson_is_null(merges_val)) {
+    if (!json_arr_or_absent(merges_val)) {
         yyjson_doc_free(doc);
         return NULL;
     }
@@ -363,10 +368,8 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     uint32_t unk;
     if (str_u32_map_get(&tok->vocab, "<unk>", 5, &unk)) tok->unk_id = (int32_t)unk;
 
-    /* added_tokens:null means "none", like an absent member; any other
-     * non-array shape is malformed. */
     yyjson_val *added = yyjson_obj_get(root, "added_tokens");
-    if (added && !yyjson_is_arr(added) && !yyjson_is_null(added)) {
+    if (!json_arr_or_absent(added)) {
         tokenizer_free(tok);
         return NULL;
     }
@@ -1201,14 +1204,19 @@ char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
         const char *token = tokenizer_decode_token(tok, ids[i]);
         if (!token) continue;
         size_t tlen = strlen(token);
-        /* Only special:true added tokens ([CLS], [SEP], ...) are dropped;
-         * non-special added tokens (<tool_call>) and ordinary vocab tokens
-         * that merely start with '[' are kept. */
+        /* Two drop conditions: the resolved BOS/EOS wrap ids (which may live
+         * only in model.vocab - encode injects them, so decode must strip
+         * them; -1 never matches a decodable id) and special:true added
+         * tokens ([CLS], [SEP], ...). Non-special added tokens (<tool_call>)
+         * and ordinary vocab tokens that merely start with '[' are kept. */
+        if (ids[i] == tok->bos_id || ids[i] == tok->eos_id) continue;
         uint32_t one;
         if (str_u32_map_get(&tok->added_special, token, (uint32_t)tlen, &one)) continue;
         bool     ok;
+        /* plen == 0 (empty continuing_subword_prefix) means "no continuation
+         * marker": every token is a word start, never a gluing continuation. */
         uint32_t plen = tok->wp_prefix_len;
-        if (tlen >= plen && memcmp(token, tok->wp_prefix, plen) == 0) {
+        if (plen > 0 && tlen >= plen && memcmp(token, tok->wp_prefix, plen) == 0) {
             ok = sb_append(&out, token + plen, tlen - plen);
         } else {
             ok = (i == 0 || out.len == 0 || sb_append(&out, " ", 1)) &&
@@ -1507,7 +1515,11 @@ static char *path_join(const char *dir, const char *name) {
  * format has no added_tokens, so entries are synthesized for the known
  * special names (BOS/EOS candidates, <unk>, <pad>) found in vocab.json -
  * without them the encode scan would split e.g. "<|endoftext|>" into
- * ordinary punctuation and letters instead of emitting its id atomically. */
+ * ordinary punctuation and letters instead of emitting its id atomically.
+ * Names outside these lists (e.g. <mask>, ChatML markers) get no synthesized
+ * entry and will not encode atomically - scanning vocab for bracket-shaped
+ * names is deliberately avoided (it would match <0xNN> byte-fallback
+ * tokens). */
 static tokenizer_t *tokenizer_load_dir_legacy(const char *dir_path) {
     tokenizer_t    *tok        = NULL;
     char           *vocab_json = NULL, *merges_txt = NULL, *out = NULL;
@@ -1598,18 +1610,23 @@ done:
 }
 
 /* Resolve one tokenizer_config.json token value - plain string or
- * {"content": string} object - against special_tokens then vocab; a hit
- * overrides *slot, a miss leaves the heuristic value. */
-static void apply_one_override(tokenizer_t *tok, yyjson_val *v, int32_t *slot) {
+ * {"content": string} object - against special_tokens then vocab (via
+ * resolve_token_name; yyjson strings are NUL-terminated). A hit overrides
+ * *slot; a miss keeps the heuristic value and warns - a config naming a
+ * token absent from the vocab points at a broken checkpoint, and silence
+ * would leave the user with no hint why their config was ignored. */
+static void apply_one_override(tokenizer_t *tok, yyjson_val *v, int32_t *slot,
+                               const char *what) {
     yyjson_val *sv = yyjson_is_obj(v) ? yyjson_obj_get(v, "content") : v;
     if (!yyjson_is_str(sv)) return;
     const char *name = yyjson_get_str(sv);
-    uint32_t    nlen = (uint32_t)yyjson_get_len(sv);
-    if (nlen == 0) return;
-    uint32_t id;
-    if (str_u32_map_get(&tok->special_tokens, name, nlen, &id) ||
-        str_u32_map_get(&tok->vocab, name, nlen, &id))
-        *slot = (int32_t)id;
+    if (yyjson_get_len(sv) == 0) return;
+    int32_t id = resolve_token_name(tok, name);
+    if (id >= 0)
+        *slot = id;
+    else
+        log_warn("tokenizer: config %s \"%s\" not in vocab; keeping heuristic",
+                 what, name);
 }
 
 /* Apply {dir}/tokenizer_config.json bos_token/eos_token overrides: the
@@ -1628,8 +1645,10 @@ static void apply_config_overrides(tokenizer_t *tok, const char *dir_path) {
     if (!doc) return;
     yyjson_val *root = yyjson_doc_get_root(doc);
     if (yyjson_is_obj(root)) {
-        apply_one_override(tok, yyjson_obj_get(root, "bos_token"), &tok->bos_id);
-        apply_one_override(tok, yyjson_obj_get(root, "eos_token"), &tok->eos_id);
+        apply_one_override(tok, yyjson_obj_get(root, "bos_token"), &tok->bos_id,
+                           "bos_token");
+        apply_one_override(tok, yyjson_obj_get(root, "eos_token"), &tok->eos_id,
+                           "eos_token");
     }
     yyjson_doc_free(doc);
 }

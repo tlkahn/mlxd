@@ -155,7 +155,7 @@ static void test_wordpiece_custom_prefix(void) {
 
 /* --- E10: SentencePiece encode --------------------------------------------------- */
 
-/* No model.type and no ByteLevel pre_tokenizer: detected as SentencePiece.
+/* BPE model.type with no ByteLevel pre_tokenizer: classified as SentencePiece.
  * Spaces normalize to U+2581 (\xe2\x96\x81) and the whole string is merged
  * with NO pre-tokenization, so " hi" folds into one token but "hi" cannot
  * reach any "\xe2\x96\x81"-prefixed merge. */

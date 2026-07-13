@@ -974,12 +974,24 @@ static void test_bos_eos_config_absent_uses_heuristic(void) {
 
 /* Config naming tokens absent from the vocab: override skipped, heuristic
  * result kept, no crash. */
-static void test_bos_eos_config_unknown_token(void) {
+static void load_config_unknown(void) {
     tokenizer_t *tok = tokenizer_load_dir(MLXD_FIXTURES_DIR "/config_unknown");
     assert(tok != NULL);
     assert(tokenizer_bos_id(tok) == 1);
     assert(tokenizer_eos_id(tok) == 2);
     tokenizer_free(tok);
+}
+
+/* The silent skip is a usability gap: a config whose bos_token/eos_token
+ * names nothing in the vocab points at a broken checkpoint, and the user
+ * gets heuristic ids with no hint why the config was ignored. Each skipped
+ * override must warn, naming the unresolvable token. */
+static void test_bos_eos_config_unknown_token(void) {
+    log_set_level(LOG_WARN);
+    char *err = capture_stderr(load_config_unknown);
+    assert(strstr(err, "<not_in_vocab>") != NULL);
+    assert(strstr(err, "<also_missing>") != NULL);
+    free(err);
 }
 
 /* --- G2: parse_merge_pair dual on-disk formats -------------------------------- */

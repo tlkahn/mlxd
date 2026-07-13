@@ -122,6 +122,36 @@ static void test_wordpiece_decode_custom_prefix(void) {
     tokenizer_free(tok);
 }
 
+/* BERT-style checkpoints often carry [CLS]/[SEP] only in model.vocab (no
+ * added_tokens): encode wraps with them via the name-list heuristic, so
+ * decode must strip the resolved bos/eos ids too, not just added_special
+ * members - otherwise encode->decode round-trips grow "[CLS] ... [SEP]". */
+static void test_wordpiece_decode_strips_vocab_only_bos_eos(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":101,\"[SEP]\":102,"
+        "\"hello\":10}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    assert(tokenizer_bos_id(tok) == 101);
+    assert(tokenizer_eos_id(tok) == 102);
+    expect_decode(tok, (const int32_t[]){101, 10, 102}, 3, "hello");
+    tokenizer_free(tok);
+}
+
+/* An empty continuing_subword_prefix means "no continuation marker" (HF
+ * semantics): every token is a word start, so decode joins with spaces. The
+ * naive prefix test is vacuously true for plen == 0 and would glue
+ * everything. */
+static void test_wordpiece_decode_empty_prefix(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"continuing_subword_prefix\":\"\","
+        "\"vocab\":{\"hello\":1,\"world\":2}}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    expect_decode(tok, (const int32_t[]){1, 2}, 2, "hello world");
+    tokenizer_free(tok);
+}
+
 /* --- E11: SentencePiece decode -------------------------------------------------- */
 
 /* SP fixture shared by E11/E12: byte-fallback tokens, U+2581-prefixed and
@@ -198,7 +228,9 @@ int main(void) {
     test_byte_level_decode_unmapped_low_cp();
     test_wordpiece_decode();
     test_wordpiece_decode_keeps_non_special_added();
+    test_wordpiece_decode_strips_vocab_only_bos_eos();
     test_wordpiece_decode_custom_prefix();
+    test_wordpiece_decode_empty_prefix();
     test_sentencepiece_decode();
     test_sentencepiece_trailing_marker();
     test_gpt2_fixture_decode();
