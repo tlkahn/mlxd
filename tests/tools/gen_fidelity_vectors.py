@@ -29,6 +29,7 @@ BERT_INPUTS = [
     "unaffable tokenization",
     "hello, world!",
     "qwertzuiopasd flimflam",
+    "i'll see, he'd agree, don't stop",
 ]
 
 GEMMA_INPUTS = [

@@ -1239,6 +1239,8 @@ char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
         if (plen > 0 && tlen >= plen && memcmp(token, tok->wp_prefix, plen) == 0) {
             ok = sb_append(&out, token + plen, tlen - plen);
         } else {
+            /* Guard on out.len, not the loop index: a skipped leading
+             * special ([CLS]/bos) must not leave a leading space. */
             bool space = out.len > 0 && !wp_cleanup_drops_space(token, tlen);
             ok = (!space || sb_append(&out, " ", 1)) && sb_append(&out, token, tlen);
         }
