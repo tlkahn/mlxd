@@ -7,6 +7,7 @@
 /* ---- Stream -------------------------------------------------------------- */
 
 stream_t *stream_create(int capacity) {
+    if (capacity <= 0) return NULL;
     stream_t *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     s->buf = calloc((size_t)capacity, sizeof(chunk_t));
@@ -124,8 +125,11 @@ static void stream_finish_cancelled(stream_t *s) {
         s->buf[last] = (chunk_t){.tag = CHUNK_DONE, .done = FINISH_CANCELLED};
     }
     atomic_store(&s->cancelled, true);
+    void (*cb)(void *) = s->on_push;
+    void *ctx = s->on_push_ctx;
     pthread_cond_broadcast(&s->cond);
     pthread_mutex_unlock(&s->mtx);
+    if (cb) cb(ctx);
 }
 
 /* ---- Command helpers ----------------------------------------------------- */
@@ -151,19 +155,6 @@ static void cmd_cancel(engine_cmd_t *cmd) {
 
 /* ---- Mailbox ------------------------------------------------------------- */
 
-static void mailbox_enqueue(engine_t *eng, engine_cmd_t *cmd) {
-    cmd->next = NULL;
-    pthread_mutex_lock(&eng->mailbox_mtx);
-    if (eng->mailbox_tail) {
-        eng->mailbox_tail->next = cmd;
-    } else {
-        eng->mailbox_head = cmd;
-    }
-    eng->mailbox_tail = cmd;
-    pthread_cond_signal(&eng->mailbox_cond);
-    pthread_mutex_unlock(&eng->mailbox_mtx);
-}
-
 static engine_cmd_t *mailbox_dequeue(engine_t *eng) {
     pthread_mutex_lock(&eng->mailbox_mtx);
     while (!eng->mailbox_head && !atomic_load(&eng->shutdown)) {
@@ -184,46 +175,49 @@ static engine_cmd_t *mailbox_dequeue(engine_t *eng) {
 static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
     stream_t *s = cmd->generate.stream;
 
-    if (!eng->loaded_model) {
-        char *err = strdup("model not loaded");
-        stream_push(s, (chunk_t){.tag = CHUNK_ERROR, .error = err});
-        stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-        stream_release(s);
-        free(cmd->generate.token_ids);
-        free(cmd);
-        return;
-    }
-
     pthread_mutex_lock(&eng->mailbox_mtx);
     eng->inflight = s;
     pthread_mutex_unlock(&eng->mailbox_mtx);
 
-    int count = cmd->generate.token_count;
-    int max = cmd->generate.params.max_tokens;
-    int limit = count < max ? count : max;
-    bool truncated = limit < count;
-    bool aborted = false;
-
-    for (int i = 0; i < limit; i++) {
-        if (atomic_load(&eng->shutdown)) {
+    if (!eng->loaded_model) {
+        char *err = strdup("model not loaded");
+        bool ok = stream_push(s, (chunk_t){.tag = CHUNK_ERROR, .error = err});
+        if (ok)
+            ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
+        if (!ok && atomic_load(&eng->shutdown))
             stream_finish_cancelled(s);
-            aborted = true;
-            break;
-        }
-        chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = cmd->generate.token_ids[i], .logprob = 0}};
-        if (!stream_push(s, tok)) {
-            if (atomic_load(&eng->shutdown))
+        goto done;
+    }
+
+    {
+        int count = cmd->generate.token_count;
+        int max = cmd->generate.params.max_tokens;
+        int limit = count < max ? count : max;
+        bool truncated = limit < count;
+        bool aborted = false;
+
+        for (int i = 0; i < limit; i++) {
+            if (atomic_load(&eng->shutdown)) {
                 stream_finish_cancelled(s);
-            aborted = true;
-            break;
+                aborted = true;
+                break;
+            }
+            chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = cmd->generate.token_ids[i], .logprob = 0}};
+            if (!stream_push(s, tok)) {
+                if (atomic_load(&eng->shutdown))
+                    stream_finish_cancelled(s);
+                aborted = true;
+                break;
+            }
+        }
+
+        if (!aborted) {
+            finish_reason_t reason = truncated ? FINISH_LENGTH : FINISH_STOP;
+            stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = reason});
         }
     }
 
-    if (!aborted) {
-        finish_reason_t reason = truncated ? FINISH_LENGTH : FINISH_STOP;
-        stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = reason});
-    }
-
+done:
     pthread_mutex_lock(&eng->mailbox_mtx);
     eng->inflight = NULL;
     pthread_mutex_unlock(&eng->mailbox_mtx);
@@ -299,20 +293,19 @@ void engine_destroy(engine_t *eng) {
     pthread_cond_signal(&eng->mailbox_cond);
     pthread_mutex_unlock(&eng->mailbox_mtx);
 
-    engine_cmd_t *stop = calloc(1, sizeof(*stop));
-    stop->tag = CMD_STOP;
-    mailbox_enqueue(eng, stop);
-
     pthread_join(eng->thread, NULL);
 
+    pthread_mutex_lock(&eng->mailbox_mtx);
     engine_cmd_t *cmd = eng->mailbox_head;
+    eng->mailbox_head = NULL;
+    eng->mailbox_tail = NULL;
+    pthread_mutex_unlock(&eng->mailbox_mtx);
+
     while (cmd) {
         engine_cmd_t *next = cmd->next;
         cmd_cancel(cmd);
         cmd = next;
     }
-    eng->mailbox_head = NULL;
-    eng->mailbox_tail = NULL;
 
     free(eng->loaded_model);
     eng->loaded_model = NULL;
@@ -326,5 +319,19 @@ void engine_post(engine_t *eng, engine_cmd_t *cmd) {
         cmd_cancel(cmd);
         return;
     }
-    mailbox_enqueue(eng, cmd);
+    cmd->next = NULL;
+    pthread_mutex_lock(&eng->mailbox_mtx);
+    if (atomic_load(&eng->shutdown)) {
+        pthread_mutex_unlock(&eng->mailbox_mtx);
+        cmd_cancel(cmd);
+        return;
+    }
+    if (eng->mailbox_tail) {
+        eng->mailbox_tail->next = cmd;
+    } else {
+        eng->mailbox_head = cmd;
+    }
+    eng->mailbox_tail = cmd;
+    pthread_cond_signal(&eng->mailbox_cond);
+    pthread_mutex_unlock(&eng->mailbox_mtx);
 }

@@ -74,7 +74,14 @@ typedef struct {
 } engine_t;
 
 int  engine_init(engine_t *eng);
+
+/* Shut down: cancel in-flight work, join engine thread, drain pending.
+   Producers must be quiesced before this returns. */
 void engine_destroy(engine_t *eng);
+
+/* Post cmd for async processing. Concurrent posts during destroy are
+   safe (re-checked under lock). After destroy returns, posts are
+   rejected via atomic fast-path only - the mutex is already destroyed. */
 void engine_post(engine_t *eng, engine_cmd_t *cmd);
 
 #endif

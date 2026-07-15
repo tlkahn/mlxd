@@ -665,6 +665,175 @@ static void test_post_after_shutdown(void) {
     stream_release(s);
 }
 
+/* ---- F4: reject non-positive stream capacity ----------------------------- */
+
+static void test_stream_create_invalid_capacity(void) {
+    assert(stream_create(0) == NULL);
+    assert(stream_create(-1) == NULL);
+}
+
+/* ---- F3: cancel notify hook fires ---------------------------------------- */
+
+static void test_cancel_notify_hook(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    engine_destroy(&eng);
+
+    stream_t *s = stream_create(8);
+    stream_retain(s);
+    atomic_int counter = 0;
+    stream_set_notify(s, notify_counter, &counter);
+
+    int32_t *ids = malloc(sizeof(int32_t));
+    ids[0] = 1;
+    engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
+    cmd->tag = CMD_GENERATE;
+    cmd->generate.token_ids = ids;
+    cmd->generate.token_count = 1;
+    cmd->generate.params.max_tokens = 1;
+    cmd->generate.stream = s;
+    engine_post(&eng, cmd);
+
+    assert(atomic_load(&counter) == 1);
+
+    chunk_t out;
+    bool saw_done = false;
+    while (stream_next(s, &out, 0)) {
+        if (out.tag == CHUNK_DONE) {
+            assert(out.done == FINISH_CANCELLED);
+            saw_done = true;
+        }
+        if (out.tag == CHUNK_ERROR) free(out.error);
+    }
+    assert(saw_done);
+    assert(atomic_load(&s->refcount) == 1);
+    stream_release(s);
+}
+
+/* ---- F1: no-model backpressure shutdown ---------------------------------- */
+
+struct destroy_ctx {
+    engine_t    *eng;
+    atomic_bool  done;
+};
+
+static void *destroy_thread(void *arg) {
+    struct destroy_ctx *ctx = arg;
+    engine_destroy(ctx->eng);
+    atomic_store(&ctx->done, true);
+    return NULL;
+}
+
+static void test_no_model_backpressure_shutdown(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    stream_t *s = stream_create(1);
+    stream_retain(s);
+
+    int32_t *ids = malloc(3 * sizeof(int32_t));
+    ids[0] = 1; ids[1] = 2; ids[2] = 3;
+    engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
+    cmd->tag = CMD_GENERATE;
+    cmd->generate.token_ids = ids;
+    cmd->generate.token_count = 3;
+    cmd->generate.params.max_tokens = 3;
+    cmd->generate.stream = s;
+    engine_post(&eng, cmd);
+
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 20 * 1000000};
+    nanosleep(&ts, NULL);
+
+    struct destroy_ctx dctx = {.eng = &eng};
+    atomic_store(&dctx.done, false);
+    pthread_t tid;
+    pthread_create(&tid, NULL, destroy_thread, &dctx);
+
+    for (int i = 0; i < 200 && !atomic_load(&dctx.done); i++) {
+        struct timespec ws = {.tv_sec = 0, .tv_nsec = 10 * 1000000};
+        nanosleep(&ws, NULL);
+    }
+    assert(atomic_load(&dctx.done));
+    pthread_join(tid, NULL);
+
+    chunk_t out;
+    bool saw_done = false;
+    while (stream_next(s, &out, 0)) {
+        if (out.tag == CHUNK_DONE) saw_done = true;
+        if (out.tag == CHUNK_ERROR) free(out.error);
+    }
+    assert(saw_done);
+    assert(atomic_load(&s->refcount) == 1);
+    stream_release(s);
+}
+
+/* ---- F2: post during destroy stress -------------------------------------- */
+
+#define DESTROY_STRESS_PRODUCERS 4
+#define DESTROY_STRESS_ITERS     200
+
+struct destroy_stress_ctx {
+    engine_t *eng;
+};
+
+static void *destroy_stress_producer(void *arg) {
+    struct destroy_stress_ctx *ctx = arg;
+    for (int i = 0; i < DESTROY_STRESS_ITERS; i++) {
+        stream_t *s = stream_create(8);
+        stream_retain(s);
+
+        int32_t *ids = malloc(sizeof(int32_t));
+        ids[0] = i;
+        engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
+        cmd->tag = CMD_GENERATE;
+        cmd->generate.token_ids = ids;
+        cmd->generate.token_count = 1;
+        cmd->generate.params.max_tokens = 1;
+        cmd->generate.stream = s;
+        engine_post(ctx->eng, cmd);
+
+        chunk_t out;
+        while (stream_next(s, &out, 100)) {
+            if (out.tag == CHUNK_ERROR) free(out.error);
+            if (out.tag == CHUNK_DONE) break;
+        }
+
+        for (int w = 0; w < 200 && atomic_load(&s->refcount) > 1; w++) {
+            struct timespec ws = {.tv_sec = 0, .tv_nsec = 1000000};
+            nanosleep(&ws, NULL);
+        }
+        assert(atomic_load(&s->refcount) == 1);
+        stream_release(s);
+    }
+    return NULL;
+}
+
+static void test_post_during_destroy_stress(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup("/fake");
+    engine_post(&eng, load);
+
+    struct destroy_stress_ctx ctxs[DESTROY_STRESS_PRODUCERS];
+    pthread_t tids[DESTROY_STRESS_PRODUCERS];
+    for (int i = 0; i < DESTROY_STRESS_PRODUCERS; i++) {
+        ctxs[i] = (struct destroy_stress_ctx){.eng = &eng};
+        pthread_create(&tids[i], NULL, destroy_stress_producer, &ctxs[i]);
+    }
+
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000000};
+    nanosleep(&ts, NULL);
+
+    engine_destroy(&eng);
+
+    for (int i = 0; i < DESTROY_STRESS_PRODUCERS; i++) {
+        pthread_join(tids[i], NULL);
+    }
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(void) {
@@ -691,6 +860,10 @@ int main(void) {
     test_mpsc_stress();
     test_shutdown_ordering();
     test_post_after_shutdown();
+    test_stream_create_invalid_capacity();
+    test_cancel_notify_hook();
+    test_no_model_backpressure_shutdown();
+    test_post_during_destroy_stress();
     printf("test_engine: all passed\n");
     return 0;
 }
