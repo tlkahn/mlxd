@@ -20,11 +20,13 @@ LIBUV_CFLAGS  := $(shell pkg-config --cflags libuv 2>/dev/null)
 LIBUV_LIBS    := $(shell pkg-config --libs   libuv 2>/dev/null)
 LLHTTP_CFLAGS := $(shell pkg-config --cflags llhttp 2>/dev/null)
 LLHTTP_LIBS   := $(shell pkg-config --libs   llhttp 2>/dev/null)
+CURL_CFLAGS   := $(shell pkg-config --cflags libcurl 2>/dev/null)
+CURL_LIBS     := $(shell pkg-config --libs   libcurl 2>/dev/null)
 
 FRAMEWORKS := -framework Metal -framework Foundation -framework IOKit -framework CoreFoundation
 
-ALL_CFLAGS  := $(CFLAGS) $(MLX_C_CFLAGS) $(LIBUV_CFLAGS) $(LLHTTP_CFLAGS)
-ALL_LDFLAGS := $(LDFLAGS) $(MLX_C_LIBS) $(LIBUV_LIBS) $(LLHTTP_LIBS) $(FRAMEWORKS) -lc++
+ALL_CFLAGS  := $(CFLAGS) $(MLX_C_CFLAGS) $(LIBUV_CFLAGS) $(LLHTTP_CFLAGS) $(CURL_CFLAGS)
+ALL_LDFLAGS := $(LDFLAGS) $(MLX_C_LIBS) $(LIBUV_LIBS) $(LLHTTP_LIBS) $(CURL_LIBS) $(FRAMEWORKS) -lc++
 
 # --- Sources ------------------------------------------------------------------
 

@@ -20,8 +20,4 @@ int model_config_load(model_config_t *cfg, const char *model_dir);
 
 void model_config_free(model_config_t *cfg);
 
-/* Discover locally available models. Returns an array of directory paths.
- * Caller must free each string and the array itself. */
-char **model_discover(int *count);
-
 #endif

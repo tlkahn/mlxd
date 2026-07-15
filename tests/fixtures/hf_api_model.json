@@ -1,0 +1,19 @@
+{
+  "sha": "abc123def456789",
+  "siblings": [
+    {"rfilename": "config.json"},
+    {"rfilename": "tokenizer.json"},
+    {"rfilename": "tokenizer_config.json"},
+    {"rfilename": "generation_config.json"},
+    {"rfilename": "special_tokens_map.json"},
+    {"rfilename": "chat_template.jinja"},
+    {"rfilename": "model.safetensors"},
+    {"rfilename": "model.safetensors.index.json"},
+    {"rfilename": "README.md"},
+    {"rfilename": ".gitattributes"},
+    {"rfilename": "onnx/model.onnx"},
+    {"rfilename": "../evil"},
+    {"rfilename": "/etc/passwd"},
+    {"rfilename": "sub\\dir\\file.bin"}
+  ]
+}
