@@ -38,6 +38,7 @@ static void check_vector(const tokenizer_t *tok, const char *text, const int32_t
                          int n) {
     int32_t *ids   = NULL;
     int      count = tokenizer_encode_alloc(tok, text, strlen(text), true, &ids);
+    assert(count >= 0 && "tokenizer_encode_alloc failed");
     if (count != n || (n > 0 && memcmp(ids, expected, (size_t)n * sizeof(int32_t)) != 0)) {
         fprintf(stderr, "vector mismatch for %s\n  expected (%d):", text, n);
         for (int i = 0; i < n; i++) fprintf(stderr, " %d", expected[i]);
@@ -49,19 +50,26 @@ static void check_vector(const tokenizer_t *tok, const char *text, const int32_t
     free(ids);
 }
 
-/* Encode then decode and require the exact original bytes back. */
-static void check_roundtrip(const tokenizer_t *tok, const char *text) {
+/* decode(encode(text)) must equal the oracle's cleaned string (lowercased,
+ * punctuation re-spaced by HF decode cleanup, specials skipped). */
+static void check_decode_equals(const tokenizer_t *tok, const char *text, const char *expected) {
     int32_t *ids   = NULL;
     int      count = tokenizer_encode_alloc(tok, text, strlen(text), true, &ids);
     assert(count >= 0);
     char *decoded = tokenizer_decode(tok, ids, count);
     assert(decoded != NULL);
-    if (strcmp(decoded, text) != 0) {
-        fprintf(stderr, "roundtrip mismatch\n  in:  %s\n  out: %s\n", text, decoded);
-        assert(0 && "roundtrip not lossless");
+    if (strcmp(decoded, expected) != 0) {
+        fprintf(stderr, "decode mismatch for %s\n  expected: %s\n  got:      %s\n", text,
+                expected, decoded);
+        assert(0 && "decode(encode(text)) mismatch");
     }
     free(decoded);
     free(ids);
+}
+
+/* Encode then decode and require the exact original bytes back. */
+static void check_roundtrip(const tokenizer_t *tok, const char *text) {
+    check_decode_equals(tok, text, text);
 }
 
 /* --- Cycle 1: tokenizer_type accessor ------------------------------------ */
@@ -151,23 +159,6 @@ static void test_bert_known_vectors(void) {
     tokenizer_free(tok);
 }
 
-/* decode(encode(text)) must equal the oracle's cleaned string (lowercased,
- * punctuation re-spaced by HF decode cleanup, specials skipped). */
-static void check_decode_equals(const tokenizer_t *tok, const char *text, const char *expected) {
-    int32_t *ids   = NULL;
-    int      count = tokenizer_encode_alloc(tok, text, strlen(text), true, &ids);
-    assert(count >= 0);
-    char *decoded = tokenizer_decode(tok, ids, count);
-    assert(decoded != NULL);
-    if (strcmp(decoded, expected) != 0) {
-        fprintf(stderr, "decode mismatch for %s\n  expected: %s\n  got:      %s\n", text,
-                expected, decoded);
-        assert(0 && "decode(encode(text)) mismatch");
-    }
-    free(decoded);
-    free(ids);
-}
-
 /* --- Cycle 6 (H3): bert decode round-trip modulo lowercasing --------------- */
 
 static void test_bert_roundtrip(void) {
@@ -179,6 +170,23 @@ static void test_bert_roundtrip(void) {
     check_decode_equals(tok, "unaffable tokenization", "unaffable tokenization");
     check_decode_equals(tok, "hello, world!", "hello, world!");
     check_decode_equals(tok, "qwertzuiopasd flimflam", "qwertzuiopasd flimflam");
+
+    tokenizer_free(tok);
+}
+
+/* Contractions: BERT's basic tokenizer splits ' into its own token, so the
+ * HF per-token cleanup chain never sees a token starting with 'll or 'd, and
+ * HF itself decodes "i'll" as "i ' ll" (verified against the tokenizers
+ * oracle on this fixture). Pins the C decoder to that behavior. */
+static void test_bert_contractions(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/bert/tokenizer.json");
+    assert(tok != NULL);
+
+    static const int32_t contractions[] = {101,  1045, 1005, 2222, 2156, 1010, 2002, 1005,
+                                           1040, 5993, 1010, 2123, 1005, 1056, 2644, 102};
+    check_vector(tok, "i'll see, he'd agree, don't stop", contractions, 16);
+    check_decode_equals(tok, "i'll see, he'd agree, don't stop",
+                        "i ' ll see, he ' d agree, don ' t stop");
 
     tokenizer_free(tok);
 }
@@ -197,13 +205,13 @@ static void test_gemma(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     tokenizer_t *tok = tokenizer_load(path);
     clock_gettime(CLOCK_MONOTONIC, &t1);
+    assert(tok != NULL);
     double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
     printf("gemma4 tokenizer_load: %.1f ms\n", ms);
     /* Generous hard gate (ASAN/debug builds); the printed number is the
      * informal <1s signal on release builds. */
     assert(ms < 5000.0);
 
-    assert(tok != NULL);
     assert(tokenizer_type(tok) == TOKENIZER_SENTENCEPIECE_BPE);
     assert(tokenizer_vocab_size(tok) == 262144);
 
@@ -246,6 +254,7 @@ int main(void) {
     test_bert_load_sanity();
     test_bert_known_vectors();
     test_bert_roundtrip();
+    test_bert_contractions();
     test_gemma();
     printf("test_tokenizer_fidelity: all tests passed\n");
     return 0;

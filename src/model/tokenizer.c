@@ -1205,7 +1205,9 @@ char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
  * starts with one of these prefixes. Rules needing a space inside the token
  * (" ' ", " do not") can never fire and are omitted. The loader ignores the
  * decoder config, so cleanup is unconditional here (a cleanup:false
- * tokenizer.json would deviate). */
+ * tokenizer.json would deviate). The Rust chain deliberately has no " 'll"
+ * or " 'd" rule - HF decodes "i'll" as "i ' ll" - so they are omitted here
+ * too (pinned by test_bert_contractions). */
 static bool wp_cleanup_drops_space(const char *token, size_t len) {
     static const struct { const char *p; size_t n; } pre[] = {
         {".", 1}, {"?", 1}, {"!", 1}, {",", 1},
