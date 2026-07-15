@@ -1198,6 +1198,24 @@ char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
     return sb_finish(&out);
 }
 
+/* HF WordPiece decoder cleanup (decoder.cleanup, default true). The Rust
+ * reference runs its replace chain (" ."->".", " ,"->",", " n't"->"n't", ...)
+ * per token AFTER prepending the joining space; vocab tokens contain no
+ * spaces, so the chain reduces to: drop the prepended space when the token
+ * starts with one of these prefixes. Rules needing a space inside the token
+ * (" ' ", " do not") can never fire and are omitted. The loader ignores the
+ * decoder config, so cleanup is unconditional here (a cleanup:false
+ * tokenizer.json would deviate). */
+static bool wp_cleanup_drops_space(const char *token, size_t len) {
+    static const struct { const char *p; size_t n; } pre[] = {
+        {".", 1}, {"?", 1}, {"!", 1}, {",", 1},
+        {"n't", 3}, {"'m", 2}, {"'s", 2}, {"'ve", 3}, {"'re", 3},
+    };
+    for (size_t i = 0; i < sizeof pre / sizeof pre[0]; i++)
+        if (len >= pre[i].n && memcmp(token, pre[i].p, pre[i].n) == 0) return true;
+    return false;
+}
+
 char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
     strbuf out = {0};
     for (int i = 0; i < count; i++) {
@@ -1219,8 +1237,8 @@ char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
         if (plen > 0 && tlen >= plen && memcmp(token, tok->wp_prefix, plen) == 0) {
             ok = sb_append(&out, token + plen, tlen - plen);
         } else {
-            ok = (i == 0 || out.len == 0 || sb_append(&out, " ", 1)) &&
-                 sb_append(&out, token, tlen);
+            bool space = out.len > 0 && !wp_cleanup_drops_space(token, tlen);
+            ok = (!space || sb_append(&out, " ", 1)) && sb_append(&out, token, tlen);
         }
         if (!ok) {
             free(out.buf);
@@ -1678,6 +1696,10 @@ tokenizer_t *tokenizer_load_dir(const char *dir_path) {
     }
     if (tok) apply_config_overrides(tok, dir_path);
     return tok;
+}
+
+tokenizer_type_t tokenizer_type(const tokenizer_t *tok) {
+    return tok ? tok->type : TOKENIZER_BPE;
 }
 
 int tokenizer_vocab_size(const tokenizer_t *tok) { return tok ? tok->vocab_size : 0; }

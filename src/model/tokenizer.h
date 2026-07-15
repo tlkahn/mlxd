@@ -76,6 +76,10 @@ const char *tokenizer_decode_token(const tokenizer_t *tok, int32_t id);
 char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count);
 
 /* Accessors */
+/* Classified tokenizer kind (encode/decode dispatch family). NULL returns
+ * TOKENIZER_BPE, but every loader success yields a non-NULL tokenizer, so
+ * callers holding a loaded tokenizer never see the default. */
+tokenizer_type_t tokenizer_type(const tokenizer_t *tok);
 /* Number of vocab entries (HF get_vocab_size convention). For a sparse vocab
  * this can be less than max_id + 1; embedding/output sizing must come from
  * config.json, not from this. */
