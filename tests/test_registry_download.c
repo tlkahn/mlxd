@@ -2,7 +2,6 @@
 #include "registry/registry_internal.h"
 
 #include <assert.h>
-#include <curl/curl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,11 +34,13 @@ static char *read_file(const char *path, size_t *len) {
 
 static int progress_called;
 static uint64_t last_downloaded;
+static const char *seen_filename;
 
 static int test_progress_cb(const registry_progress_t *p, void *ud) {
     (void)ud;
     progress_called++;
     last_downloaded = p->file_downloaded;
+    seen_filename = p->filename;
     return 0;
 }
 
@@ -62,8 +63,13 @@ static void test_happy_path(void) {
 
     progress_called = 0;
     last_downloaded = 0;
-    int rc = reg_download_file(url, dest, NULL, test_progress_cb, NULL, 0, 1);
+    seen_filename = NULL;
+    int rc = reg_download_file(url, dest, NULL, "testfile.bin",
+                               test_progress_cb, NULL, 0, 1);
     assert(rc == 0);
+
+    assert(seen_filename != NULL);
+    assert(strcmp(seen_filename, "testfile.bin") == 0);
 
     size_t flen;
     char *content = read_file(dest, &flen);
@@ -76,6 +82,10 @@ static void test_happy_path(void) {
     char part[512];
     snprintf(part, sizeof(part), "%s.part", dest);
     assert(stat(part, &st) != 0);
+
+    mock_recorded_t rec;
+    mock_hub_get_recorded(&hub, &rec);
+    assert(strncmp(rec.ua, "mlxd/", 5) == 0);
 
     mock_hub_stop(&hub);
 }
@@ -94,7 +104,7 @@ static void test_auth_header(void) {
     char dest[512];
     snprintf(dest, sizeof(dest), "%s/auth.bin", tmpdir_buf);
 
-    int rc = reg_download_file(url, dest, "secret", NULL, NULL, 0, 1);
+    int rc = reg_download_file(url, dest, "secret", "auth.bin", NULL, NULL, 0, 1);
     assert(rc == 0);
 
     mock_recorded_t rec;
@@ -119,7 +129,7 @@ static void test_no_token_no_auth(void) {
     snprintf(dest, sizeof(dest), "%s/noauth.bin", tmpdir_buf);
 
     unsetenv("HF_TOKEN");
-    int rc = reg_download_file(url, dest, NULL, NULL, NULL, 0, 1);
+    int rc = reg_download_file(url, dest, NULL, "noauth.bin", NULL, NULL, 0, 1);
     assert(rc == 0);
 
     mock_recorded_t rec;
@@ -142,7 +152,7 @@ static void test_404_error(void) {
     char dest[512];
     snprintf(dest, sizeof(dest), "%s/missing.bin", tmpdir_buf);
 
-    int rc = reg_download_file(url, dest, NULL, NULL, NULL, 0, 1);
+    int rc = reg_download_file(url, dest, NULL, "missing.bin", NULL, NULL, 0, 1);
     assert(rc == -1);
 
     struct stat st;
@@ -167,7 +177,7 @@ static void test_401_error(void) {
     char dest[512];
     snprintf(dest, sizeof(dest), "%s/gated.bin", tmpdir_buf);
 
-    int rc = reg_download_file(url, dest, NULL, NULL, NULL, 0, 1);
+    int rc = reg_download_file(url, dest, NULL, "gated.bin", NULL, NULL, 0, 1);
     assert(rc == -1);
 
     mock_hub_stop(&hub);
@@ -201,7 +211,7 @@ static void test_resume_with_range(void) {
     mock_hub_base_url(&hub, url, sizeof(url));
     strcat(url, "/resumable");
 
-    int rc = reg_download_file(url, dest, NULL, NULL, NULL, 0, 1);
+    int rc = reg_download_file(url, dest, NULL, "resumed.bin", NULL, NULL, 0, 1);
     assert(rc == 0);
 
     mock_recorded_t rec;
@@ -239,7 +249,7 @@ static void test_resume_416_complete(void) {
     mock_hub_base_url(&hub, url, sizeof(url));
     strcat(url, "/done");
 
-    int rc = reg_download_file(url, dest, NULL, NULL, NULL, 0, 1);
+    int rc = reg_download_file(url, dest, NULL, "done.bin", NULL, NULL, 0, 1);
     assert(rc == 0);
 
     size_t flen;
@@ -253,7 +263,6 @@ static void test_resume_416_complete(void) {
 }
 
 int main(void) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
     test_happy_path();
     test_auth_header();
     test_no_token_no_auth();
@@ -261,7 +270,6 @@ int main(void) {
     test_401_error();
     test_resume_with_range();
     test_resume_416_complete();
-    curl_global_cleanup();
     printf("test_registry_download: all passed\n");
     return 0;
 }

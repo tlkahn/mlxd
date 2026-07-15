@@ -2,7 +2,6 @@
 #include "registry/registry.h"
 
 #include <assert.h>
-#include <curl/curl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,11 +47,17 @@ static const char *api_json =
 static int progress_count;
 static size_t last_file_count;
 static size_t seen_file_indices[16];
+static char seen_filenames[16][256];
 
 static int pull_progress_cb(const registry_progress_t *p, void *ud) {
     (void)ud;
-    if (progress_count < 16)
+    if (progress_count < 16) {
         seen_file_indices[progress_count] = p->file_index;
+        if (p->filename)
+            snprintf(seen_filenames[progress_count], 256, "%s", p->filename);
+        else
+            seen_filenames[progress_count][0] = '\0';
+    }
     last_file_count = p->file_count;
     progress_count++;
     return 0;
@@ -77,7 +82,9 @@ static void test_pull_happy(void) {
 
     progress_count = 0;
     last_file_count = 0;
+    memset(seen_filenames, 0, sizeof(seen_filenames));
     registry_pull_opts_t opts = {0};
+    (void)seen_file_indices;
     opts.progress = pull_progress_cb;
     char *dir = registry_pull("testorg/testmodel", &opts);
     assert(dir != NULL);
@@ -111,6 +118,17 @@ static void test_pull_happy(void) {
     free(meta_str);
 
     assert(last_file_count == 2);
+
+    assert(progress_count > 0);
+    for (int i = 0; i < progress_count && i < 16; i++) {
+        assert(seen_filenames[i][0] != '\0');
+        assert(strcmp(seen_filenames[i], "config.json") == 0 ||
+               strcmp(seen_filenames[i], "model.safetensors") == 0);
+    }
+
+    mock_recorded_t rec;
+    mock_hub_get_recorded(&hub, &rec);
+    assert(strncmp(rec.ua, "mlxd/", 5) == 0);
 
     free(dir);
     unsetenv("MLXD_CACHE_DIR");
@@ -233,14 +251,81 @@ static void test_pull_revision_override(void) {
     mock_hub_stop(&hub);
 }
 
+static void test_pull_revision_change_redownloads(void) {
+    make_tmpdir();
+    setenv("MLXD_CACHE_DIR", tmpdir_buf, 1);
+
+    static const char *api_v1 =
+        "{\"sha\":\"sha_v1\",\"siblings\":["
+        "{\"rfilename\":\"config.json\"},"
+        "{\"rfilename\":\"model.safetensors\"}"
+        "]}";
+    static const char *api_v2 =
+        "{\"sha\":\"sha_v2\",\"siblings\":["
+        "{\"rfilename\":\"config.json\"},"
+        "{\"rfilename\":\"model.safetensors\"}"
+        "]}";
+
+    mock_hub_t hub;
+    mock_hub_init(&hub);
+    mock_hub_add(&hub, "GET", "/api/models/org/revchange/revision/main", 200,
+                 api_v1, strlen(api_v1), 0);
+    mock_hub_add(&hub, "GET", "/org/revchange/resolve/main/config.json", 200,
+                 "{\"v\":1}", strlen("{\"v\":1}"), 0);
+    mock_hub_add(&hub, "GET", "/org/revchange/resolve/main/model.safetensors", 200,
+                 "data_v1", strlen("data_v1"), 0);
+    assert(mock_hub_start(&hub) == 0);
+
+    char base_url[128];
+    mock_hub_base_url(&hub, base_url, sizeof(base_url));
+    setenv("HF_ENDPOINT", base_url, 1);
+
+    char *dir1 = registry_pull("org/revchange", NULL);
+    assert(dir1 != NULL);
+
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/config.json", dir1);
+    char *c1 = read_file_str(config_path);
+    assert(c1 != NULL);
+    assert(strcmp(c1, "{\"v\":1}") == 0);
+    free(c1);
+
+    mock_hub_stop(&hub);
+
+    mock_hub_init(&hub);
+    mock_hub_add(&hub, "GET", "/api/models/org/revchange/revision/v2", 200,
+                 api_v2, strlen(api_v2), 0);
+    mock_hub_add(&hub, "GET", "/org/revchange/resolve/v2/config.json", 200,
+                 "{\"v\":2}", strlen("{\"v\":2}"), 0);
+    mock_hub_add(&hub, "GET", "/org/revchange/resolve/v2/model.safetensors", 200,
+                 "data_v2", strlen("data_v2"), 0);
+    assert(mock_hub_start(&hub) == 0);
+
+    mock_hub_base_url(&hub, base_url, sizeof(base_url));
+    setenv("HF_ENDPOINT", base_url, 1);
+
+    char *dir2 = registry_pull("org/revchange:v2", NULL);
+    assert(dir2 != NULL);
+
+    char *c2 = read_file_str(config_path);
+    assert(c2 != NULL);
+    assert(strcmp(c2, "{\"v\":2}") == 0);
+    free(c2);
+
+    free(dir1);
+    free(dir2);
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("HF_ENDPOINT");
+    mock_hub_stop(&hub);
+}
+
 int main(void) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
     test_pull_happy();
     test_pull_abort();
     test_pull_404();
     test_pull_repull_skips_existing();
     test_pull_revision_override();
-    curl_global_cleanup();
+    test_pull_revision_change_redownloads();
     printf("test_registry_pull: all passed\n");
     return 0;
 }

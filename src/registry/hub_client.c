@@ -3,20 +3,11 @@
 
 #include <curl/curl.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <yyjson/yyjson.h>
-
-static char *dup_str(const char *s) {
-    if (!s)
-        return NULL;
-    size_t n = strlen(s);
-    char  *p = malloc(n + 1);
-    if (p)
-        memcpy(p, s, n + 1);
-    return p;
-}
 
 int reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n) {
     *files = NULL;
@@ -58,7 +49,7 @@ int reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n) 
             continue;
         if (!reg_file_wanted(name))
             continue;
-        result[count] = dup_str(name);
+        result[count] = reg_dup_str(name);
         if (!result[count]) {
             reg_file_plan_free(result, count);
             yyjson_doc_free(doc);
@@ -87,13 +78,14 @@ void reg_file_plan_free(char **files, size_t n) {
     free(files);
 }
 
-static void curl_init_once(void) {
+static void curl_once_fn(void) {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    atexit(curl_global_cleanup);
+}
+
+void reg_curl_init_once(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
-    static int done = 0;
-    if (!done) {
-        pthread_once(&once, (void(*)(void))(void *)curl_global_init);
-        done = 1;
-    }
+    pthread_once(&once, curl_once_fn);
 }
 
 typedef struct {
@@ -102,8 +94,7 @@ typedef struct {
     void                *ud;
     size_t               idx;
     size_t               count;
-    uint64_t             downloaded;
-    uint64_t             total;
+    const char          *filename;
     int                  aborted;
 } dl_ctx_t;
 
@@ -111,7 +102,6 @@ static size_t dl_write_cb(void *data, size_t size, size_t nmemb, void *userdata)
     dl_ctx_t *ctx = (dl_ctx_t *)userdata;
     size_t total = size * nmemb;
     size_t written = fwrite(data, 1, total, ctx->fp);
-    ctx->downloaded += written;
     return written;
 }
 
@@ -123,6 +113,7 @@ static int dl_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
     if (!ctx->cb)
         return 0;
     registry_progress_t p = {0};
+    p.filename = ctx->filename;
     p.file_index = ctx->idx;
     p.file_count = ctx->count;
     p.file_downloaded = (uint64_t)dlnow;
@@ -135,8 +126,9 @@ static int dl_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
 }
 
 int reg_download_file(const char *url, const char *dest, const char *token,
+                      const char *filename,
                       registry_progress_cb cb, void *ud, size_t idx, size_t count) {
-    curl_init_once();
+    reg_curl_init_once();
 
     char part_path[4096];
     snprintf(part_path, sizeof(part_path), "%s.part", dest);
@@ -159,6 +151,7 @@ int reg_download_file(const char *url, const char *dest, const char *token,
     ctx.ud = ud;
     ctx.idx = idx;
     ctx.count = count;
+    ctx.filename = filename;
 
     CURL *c = curl_easy_init();
     if (!c) {
@@ -173,6 +166,7 @@ int reg_download_file(const char *url, const char *dest, const char *token,
     curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress_cb);
     curl_easy_setopt(c, CURLOPT_XFERINFODATA, &ctx);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, MLXD_USER_AGENT);
 
     if (resume_from > 0)
         curl_easy_setopt(c, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)resume_from);
@@ -191,33 +185,40 @@ int reg_download_file(const char *url, const char *dest, const char *token,
     long http_code = 0;
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(c);
-    if (hdrs) curl_slist_free_all(hdrs);
+    if (hdrs) {
+        curl_slist_free_all(hdrs);
+        hdrs = NULL;
+    }
 
     if (ctx.aborted) {
         return -1;
     }
 
-    if (res != CURLE_OK && res != CURLE_HTTP_RETURNED_ERROR) {
+    if (res != CURLE_OK) {
         log_error("download failed: %s", curl_easy_strerror(res));
         remove(part_path);
         return -1;
     }
 
     if (http_code == 200 && resume_from > 0) {
-        fclose(fopen(part_path, "wb"));
         fp = fopen(part_path, "wb");
         if (!fp) {
             remove(part_path);
             return -1;
         }
         ctx.fp = fp;
-        ctx.downloaded = 0;
 
         CURL *c2 = curl_easy_init();
+        if (!c2) {
+            fclose(fp);
+            remove(part_path);
+            return -1;
+        }
         curl_easy_setopt(c2, CURLOPT_URL, url);
         curl_easy_setopt(c2, CURLOPT_WRITEFUNCTION, dl_write_cb);
         curl_easy_setopt(c2, CURLOPT_WRITEDATA, &ctx);
         curl_easy_setopt(c2, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(c2, CURLOPT_USERAGENT, MLXD_USER_AGENT);
         if (token && token[0]) {
             char auth_hdr2[512];
             snprintf(auth_hdr2, sizeof(auth_hdr2), "Authorization: Bearer %s", token);
@@ -228,7 +229,16 @@ int reg_download_file(const char *url, const char *dest, const char *token,
         fclose(fp);
         curl_easy_getinfo(c2, CURLINFO_RESPONSE_CODE, &http_code);
         curl_easy_cleanup(c2);
-        if (hdrs) curl_slist_free_all(hdrs);
+        if (hdrs) {
+            curl_slist_free_all(hdrs);
+            hdrs = NULL;
+        }
+
+        if (res != CURLE_OK) {
+            log_error("retry download failed: %s", curl_easy_strerror(res));
+            remove(part_path);
+            return -1;
+        }
     }
 
     if (http_code == 416) {

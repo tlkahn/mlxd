@@ -4,12 +4,13 @@
 
 #include <curl/curl.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <yyjson/yyjson.h>
 
-static char *dup_str(const char *s) {
+char *reg_dup_str(const char *s) {
     if (!s)
         return NULL;
     size_t n = strlen(s);
@@ -19,7 +20,7 @@ static char *dup_str(const char *s) {
     return p;
 }
 
-static char *path_join(const char *dir, const char *name) {
+char *reg_path_join(const char *dir, const char *name) {
     size_t dlen = strlen(dir);
     size_t nlen = strlen(name);
     char  *p    = malloc(dlen + 1 + nlen + 1);
@@ -32,6 +33,16 @@ static char *path_join(const char *dir, const char *name) {
     return p;
 }
 
+int reg_dir_has_config_json(const char *dir) {
+    char *p = reg_path_join(dir, "config.json");
+    if (!p)
+        return 0;
+    struct stat st;
+    int ok = (stat(p, &st) == 0 && S_ISREG(st.st_mode));
+    free(p);
+    return ok;
+}
+
 int reg_spec_parse(const char *spec, reg_spec_t *out) {
     if (!spec || !out)
         return -1;
@@ -41,7 +52,7 @@ int reg_spec_parse(const char *spec, reg_spec_t *out) {
         return -1;
 
     if (spec[0] == '.' || spec[0] == '/' || spec[0] == '~') {
-        out->local_path = dup_str(spec);
+        out->local_path = reg_dup_str(spec);
         return out->local_path ? 0 : -1;
     }
 
@@ -64,7 +75,7 @@ int reg_spec_parse(const char *spec, reg_spec_t *out) {
         const char *rev = colon + 1;
         if (rev[0] == '\0')
             return -1;
-        out->revision = dup_str(rev);
+        out->revision = reg_dup_str(rev);
         if (!out->revision)
             return -1;
     } else {
@@ -109,7 +120,7 @@ void reg_spec_free(reg_spec_t *s) {
 char *reg_cache_root(void) {
     const char *env = getenv("MLXD_CACHE_DIR");
     if (env && env[0])
-        return dup_str(env);
+        return reg_dup_str(env);
     const char *home = getenv("HOME");
     if (!home)
         return NULL;
@@ -148,8 +159,8 @@ char *reg_model_cache_dir(const char *org, const char *model) {
 char *reg_endpoint(void) {
     const char *env = getenv("HF_ENDPOINT");
     if (env && env[0])
-        return dup_str(env);
-    return dup_str("https://huggingface.co");
+        return reg_dup_str(env);
+    return reg_dup_str("https://huggingface.co");
 }
 
 static const char *EXACT_FILES[] = {
@@ -242,7 +253,7 @@ static int write_meta_json(const char *dir, const char *revision, const char *co
     if (!json)
         return -1;
 
-    char *meta_path = path_join(dir, ".mlxd-meta.json");
+    char *meta_path = reg_path_join(dir, ".mlxd-meta.json");
     if (!meta_path) {
         free(json);
         return -1;
@@ -260,9 +271,50 @@ static int write_meta_json(const char *dir, const char *revision, const char *co
     return 0;
 }
 
+char *reg_meta_read_revision(const char *dir) {
+    char *meta_path = reg_path_join(dir, ".mlxd-meta.json");
+    if (!meta_path)
+        return NULL;
+
+    FILE *f = fopen(meta_path, "rb");
+    free(meta_path);
+    if (!f)
+        return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    fread(buf, 1, (size_t)sz, f);
+    buf[sz] = '\0';
+    fclose(f);
+
+    yyjson_doc *doc = yyjson_read(buf, (size_t)sz, 0);
+    free(buf);
+    if (!doc)
+        return NULL;
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    const char *rev = yyjson_get_str(yyjson_obj_get(root, "revision"));
+    char *result = rev ? reg_dup_str(rev) : NULL;
+    yyjson_doc_free(doc);
+    return result;
+}
+
 char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     if (!spec)
         return NULL;
+
+    reg_curl_init_once();
 
     reg_spec_t s = {0};
     if (reg_spec_parse(spec, &s) != 0)
@@ -319,6 +371,7 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, membuf_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &api_buf);
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, MLXD_USER_AGENT);
 
     struct curl_slist *hdrs = NULL;
     if (token) {
@@ -332,7 +385,10 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     long http_code = 0;
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(c);
-    if (hdrs) curl_slist_free_all(hdrs);
+    if (hdrs) {
+        curl_slist_free_all(hdrs);
+        hdrs = NULL;
+    }
 
     if (res != CURLE_OK || http_code < 200 || http_code >= 300) {
         log_error("failed to fetch model info: HTTP %ld", http_code);
@@ -371,25 +427,35 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
         return NULL;
     }
 
+    int force_redownload = 0;
+    char *cached_rev = reg_meta_read_revision(cache_dir);
+    if (cached_rev) {
+        if (strcmp(cached_rev, revision) != 0)
+            force_redownload = 1;
+        free(cached_rev);
+    }
+
     int ok = 1;
     for (size_t i = 0; i < nfiles && ok; i++) {
-        char *dest = path_join(cache_dir, files[i]);
+        char *dest = reg_path_join(cache_dir, files[i]);
         if (!dest) {
             ok = 0;
             break;
         }
 
-        struct stat fst;
-        if (stat(dest, &fst) == 0 && S_ISREG(fst.st_mode) && fst.st_size > 0) {
-            free(dest);
-            continue;
+        if (!force_redownload) {
+            struct stat fst;
+            if (stat(dest, &fst) == 0 && S_ISREG(fst.st_mode) && fst.st_size > 0) {
+                free(dest);
+                continue;
+            }
         }
 
         char file_url[2048];
         snprintf(file_url, sizeof(file_url), "%s/%s/%s/resolve/%s/%s",
                  endpoint, s.org, s.model, revision, files[i]);
 
-        int rc = reg_download_file(file_url, dest, token, cb, ud, i, nfiles);
+        int rc = reg_download_file(file_url, dest, token, files[i], cb, ud, i, nfiles);
         free(dest);
         if (rc != 0) {
             ok = 0;
@@ -416,16 +482,6 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     return cache_dir;
 }
 
-static int dir_has_config_json(const char *dir) {
-    char *p = path_join(dir, "config.json");
-    if (!p)
-        return 0;
-    struct stat st;
-    int ok = (stat(p, &st) == 0 && S_ISREG(st.st_mode));
-    free(p);
-    return ok;
-}
-
 char *registry_resolve(const char *specifier) {
     if (!specifier)
         return NULL;
@@ -436,13 +492,21 @@ char *registry_resolve(const char *specifier) {
 
     char *dir = NULL;
     if (s.local_path) {
-        if (dir_has_config_json(s.local_path))
-            dir = dup_str(s.local_path);
+        if (reg_dir_has_config_json(s.local_path))
+            dir = reg_dup_str(s.local_path);
     } else {
         dir = reg_model_cache_dir(s.org, s.model);
-        if (dir && !dir_has_config_json(dir)) {
+        if (dir && !reg_dir_has_config_json(dir)) {
             free(dir);
             dir = NULL;
+        }
+        if (dir && s.revision) {
+            char *cached_rev = reg_meta_read_revision(dir);
+            if (!cached_rev || strcmp(cached_rev, s.revision) != 0) {
+                free(dir);
+                dir = NULL;
+            }
+            free(cached_rev);
         }
     }
 

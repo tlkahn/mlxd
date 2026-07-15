@@ -6,39 +6,6 @@
 #include <string.h>
 #include <sys/stat.h>
 
-static char *dup_str(const char *s) {
-    if (!s)
-        return NULL;
-    size_t n = strlen(s);
-    char  *p = malloc(n + 1);
-    if (p)
-        memcpy(p, s, n + 1);
-    return p;
-}
-
-static char *path_join(const char *dir, const char *name) {
-    size_t dlen = strlen(dir);
-    size_t nlen = strlen(name);
-    char  *p    = malloc(dlen + 1 + nlen + 1);
-    if (!p)
-        return NULL;
-    memcpy(p, dir, dlen);
-    p[dlen] = '/';
-    memcpy(p + dlen + 1, name, nlen);
-    p[dlen + 1 + nlen] = '\0';
-    return p;
-}
-
-static int dir_has_config_json(const char *dir) {
-    char *p = path_join(dir, "config.json");
-    if (!p)
-        return 0;
-    struct stat st;
-    int ok = (stat(p, &st) == 0 && S_ISREG(st.st_mode));
-    free(p);
-    return ok;
-}
-
 static void scan_dir_stats(const char *dir, uint64_t *size_out, int64_t *mtime_out) {
     *size_out = 0;
     *mtime_out = 0;
@@ -49,7 +16,7 @@ static void scan_dir_stats(const char *dir, uint64_t *size_out, int64_t *mtime_o
     while ((ent = readdir(d))) {
         if (ent->d_name[0] == '.')
             continue;
-        char *full = path_join(dir, ent->d_name);
+        char *full = reg_path_join(dir, ent->d_name);
         if (!full)
             continue;
         struct stat st;
@@ -63,6 +30,7 @@ static void scan_dir_stats(const char *dir, uint64_t *size_out, int64_t *mtime_o
     closedir(d);
 }
 
+/* HF Hub forbids "--" in org/model names, so the first separator is unambiguous. */
 static char *id_from_dirname(const char *dirname) {
     const char *sep = strstr(dirname, "--");
     if (!sep || sep == dirname)
@@ -87,7 +55,7 @@ static registry_model_info_t *scan_mlxd_cache(int *count) {
     char *root = reg_cache_root();
     if (!root)
         return NULL;
-    char *models_dir = path_join(root, "models");
+    char *models_dir = reg_path_join(root, "models");
     free(root);
     if (!models_dir)
         return NULL;
@@ -110,11 +78,11 @@ static registry_model_info_t *scan_mlxd_cache(int *count) {
     while ((ent = readdir(d))) {
         if (ent->d_name[0] == '.')
             continue;
-        char *full = path_join(models_dir, ent->d_name);
+        char *full = reg_path_join(models_dir, ent->d_name);
         if (!full)
             continue;
 
-        if (!dir_has_config_json(full)) {
+        if (!reg_dir_has_config_json(full)) {
             free(full);
             continue;
         }
@@ -160,19 +128,19 @@ static registry_model_info_t *scan_mlxd_cache(int *count) {
 static char *hf_hub_dir(void) {
     const char *env = getenv("MLXD_HF_HUB_DIR");
     if (env && env[0])
-        return dup_str(env);
+        return reg_dup_str(env);
     const char *hf_home = getenv("HF_HOME");
     if (hf_home && hf_home[0])
-        return path_join(hf_home, "hub");
+        return reg_path_join(hf_home, "hub");
     const char *home = getenv("HOME");
     if (!home)
         return NULL;
-    char *cache = path_join(home, ".cache/huggingface/hub");
+    char *cache = reg_path_join(home, ".cache/huggingface/hub");
     return cache;
 }
 
 static char *find_latest_snapshot(const char *model_dir) {
-    char *snap_dir = path_join(model_dir, "snapshots");
+    char *snap_dir = reg_path_join(model_dir, "snapshots");
     if (!snap_dir)
         return NULL;
     DIR *d = opendir(snap_dir);
@@ -186,10 +154,10 @@ static char *find_latest_snapshot(const char *model_dir) {
     while ((ent = readdir(d))) {
         if (ent->d_name[0] == '.')
             continue;
-        char *full = path_join(snap_dir, ent->d_name);
+        char *full = reg_path_join(snap_dir, ent->d_name);
         if (!full)
             continue;
-        if (!dir_has_config_json(full)) {
+        if (!reg_dir_has_config_json(full)) {
             free(full);
             continue;
         }
@@ -264,7 +232,7 @@ static registry_model_info_t *scan_hub_cache(registry_model_info_t *arr, int *co
             free(id);
             continue;
         }
-        char *model_dir = path_join(hub, ent->d_name);
+        char *model_dir = reg_path_join(hub, ent->d_name);
         if (!model_dir) {
             free(id);
             continue;
@@ -312,10 +280,8 @@ static registry_model_info_t *scan_hub_cache(registry_model_info_t *arr, int *co
 }
 
 registry_model_info_t *model_discover(int *count) {
-    if (!count) {
-        static int dummy;
-        count = &dummy;
-    }
+    if (!count)
+        return NULL;
     int cap = 0;
     registry_model_info_t *arr = scan_mlxd_cache(count);
     if (arr)

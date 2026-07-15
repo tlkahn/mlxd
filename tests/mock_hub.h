@@ -30,6 +30,7 @@ typedef struct {
     char auth[256];
     char range[256];
     char path[1024];
+    char ua[256];
 } mock_recorded_t;
 
 typedef struct {
@@ -85,6 +86,7 @@ static void mock_hub_handle(mock_hub_t *h, int client_fd) {
 
     char auth[256] = {0};
     char range_hdr[256] = {0};
+    char ua[256] = {0};
     const char *p = buf;
     while ((p = strstr(p, "\r\n")) != NULL) {
         p += 2;
@@ -107,12 +109,22 @@ static void mock_hub_handle(mock_hub_t *h, int client_fd) {
             memcpy(range_hdr, v, vlen);
             range_hdr[vlen] = '\0';
         }
+        if (strncasecmp(p, "User-Agent:", 11) == 0) {
+            const char *v = p + 11;
+            while (*v == ' ') v++;
+            char *end = strstr(v, "\r\n");
+            size_t vlen = end ? (size_t)(end - v) : strlen(v);
+            if (vlen >= sizeof(ua)) vlen = sizeof(ua) - 1;
+            memcpy(ua, v, vlen);
+            ua[vlen] = '\0';
+        }
     }
 
     pthread_mutex_lock(&h->mu);
     snprintf(h->recorded.auth, sizeof(h->recorded.auth), "%s", auth);
     snprintf(h->recorded.range, sizeof(h->recorded.range), "%s", range_hdr);
     snprintf(h->recorded.path, sizeof(h->recorded.path), "%s", path);
+    snprintf(h->recorded.ua, sizeof(h->recorded.ua), "%s", ua);
     pthread_mutex_unlock(&h->mu);
 
     mock_route_t *match = NULL;

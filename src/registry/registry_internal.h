@@ -5,6 +5,8 @@
 
 #include <stddef.h>
 
+#define MLXD_USER_AGENT "mlxd/0.1.0"
+
 typedef struct {
     char *org;
     char *model;
@@ -26,6 +28,14 @@ int   reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n
 void  reg_file_plan_free(char **files, size_t n);
 
 int   reg_download_file(const char *url, const char *dest, const char *token,
+                        const char *filename,
                         registry_progress_cb cb, void *ud, size_t idx, size_t count);
+
+void  reg_curl_init_once(void);
+char *reg_meta_read_revision(const char *dir);
+
+char *reg_dup_str(const char *s);
+char *reg_path_join(const char *dir, const char *name);
+int   reg_dir_has_config_json(const char *dir);
 
 #endif

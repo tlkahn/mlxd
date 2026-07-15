@@ -109,6 +109,14 @@ static void test_free_null_safe(void) {
     registry_model_list_free(NULL, 5);
 }
 
+static void test_discover_null_count(void) {
+    setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
+    unsetenv("MLXD_HF_HUB_DIR");
+    registry_model_info_t *models = model_discover(NULL);
+    assert(models == NULL);
+    unsetenv("MLXD_CACHE_DIR");
+}
+
 int main(void) {
     test_discover_finds_models();
     test_discover_skips_no_config();
@@ -117,6 +125,7 @@ int main(void) {
     test_discover_hub_cache();
     test_discover_dedup_mlxd_wins();
     test_free_null_safe();
+    test_discover_null_count();
     printf("test_registry_discover: all passed\n");
     return 0;
 }
