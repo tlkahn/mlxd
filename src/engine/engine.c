@@ -199,7 +199,7 @@ static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
 
     {
         int count = cmd->generate.token_count;
-        int max = cmd->generate.params.max_tokens;
+        int max = cmd->generate.params.max_tokens; /* validated at HTTP boundary */
         int limit = count < max ? count : max;
         bool truncated = limit < count;
         bool aborted = false;
@@ -212,12 +212,7 @@ static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
             }
             chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = cmd->generate.token_ids[i], .logprob = 0}};
             if (!stream_push(s, tok)) {
-                /* Push failed: stream was cancelled. If shutdown caused it,
-                 * inject FINISH_CANCELLED (shutdown store is seq_cst before
-                 * stream_cancel, so it is visible here). If a consumer
-                 * cancelled directly, they already know - no marker needed. */
-                if (atomic_load(&eng->shutdown))
-                    stream_finish_cancelled(s);
+                stream_finish_cancelled(s);
                 aborted = true;
                 break;
             }

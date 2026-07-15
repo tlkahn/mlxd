@@ -447,9 +447,10 @@ static void test_reclaim(void) {
     cmd->reclaim.stream = s;
     engine_post(&eng, cmd);
 
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 50 * 1000000};
-    nanosleep(&ts, NULL);
-
+    for (int w = 0; w < 200 && atomic_load(&s->refcount) > 1; w++) {
+        struct timespec ws = {.tv_sec = 0, .tv_nsec = 1000000};
+        nanosleep(&ws, NULL);
+    }
     assert(atomic_load(&s->refcount) == 1);
     stream_release(s);
     engine_destroy(&eng);
@@ -834,6 +835,56 @@ static void test_post_during_destroy_stress(void) {
     }
 }
 
+/* ---- F5: user cancel emits FINISH_CANCELLED terminal -------------------- */
+
+static void test_user_cancel_emits_terminal(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup("/fake");
+    engine_post(&eng, load);
+
+    stream_t *s = stream_create(1);
+    stream_retain(s);
+
+    int32_t *ids = malloc(1000 * sizeof(int32_t));
+    for (int i = 0; i < 1000; i++) ids[i] = i;
+    engine_cmd_t *gen = calloc(1, sizeof(*gen));
+    gen->tag = CMD_GENERATE;
+    gen->generate.token_ids = ids;
+    gen->generate.token_count = 1000;
+    gen->generate.params.max_tokens = 1000;
+    gen->generate.stream = s;
+    engine_post(&eng, gen);
+
+    chunk_t out;
+    assert(stream_next(s, &out, -1));
+    assert(out.tag == CHUNK_TOKEN);
+
+    stream_cancel(s);
+
+    for (int w = 0; w < 200 && atomic_load(&s->refcount) > 1; w++) {
+        struct timespec ws = {.tv_sec = 0, .tv_nsec = 1000000};
+        nanosleep(&ws, NULL);
+    }
+    assert(atomic_load(&s->refcount) == 1);
+
+    bool saw_done = false;
+    while (stream_next(s, &out, 0)) {
+        if (out.tag == CHUNK_DONE) {
+            assert(out.done == FINISH_CANCELLED);
+            saw_done = true;
+        }
+        if (out.tag == CHUNK_ERROR) free(out.error);
+    }
+    assert(saw_done);
+
+    stream_release(s);
+    engine_destroy(&eng);
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(void) {
@@ -864,6 +915,7 @@ int main(void) {
     test_cancel_notify_hook();
     test_no_model_backpressure_shutdown();
     test_post_during_destroy_stress();
+    test_user_cancel_emits_terminal();
     printf("test_engine: all passed\n");
     return 0;
 }
