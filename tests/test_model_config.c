@@ -47,7 +47,13 @@ static void test_missing_config(void) {
     model_config_t cfg;
     assert(model_config_load(&cfg, MLXD_FIXTURES_DIR "/no_such_dir") == -1);
     assert(model_config_load(NULL, MLXD_FIXTURES_DIR "/model_config") == -1);
+
+    /* NULL model_dir must zero cfg so free-after-failure is safe */
+    memset(&cfg, 0xAB, sizeof(cfg));
     assert(model_config_load(&cfg, NULL) == -1);
+    assert(cfg.model_type == NULL);
+    assert(cfg.architectures == NULL);
+    model_config_free(&cfg);
 }
 
 /* --- Cycle I4: missing model_type ---------------------------------------- */
@@ -102,8 +108,9 @@ static void test_free_semantics(void) {
     /* NULL argument is a no-op */
     model_config_free(NULL);
 
-    /* free after failed load is safe */
+    /* free after failed load is safe (poison to catch missing zeroing) */
     model_config_t cfg2;
+    memset(&cfg2, 0xAB, sizeof(cfg2));
     assert(model_config_load(&cfg2, MLXD_FIXTURES_DIR "/no_such_dir") == -1);
     model_config_free(&cfg2);
 }

@@ -29,10 +29,11 @@ static char *path_join(const char *dir, const char *name) {
 }
 
 int model_config_load(model_config_t *cfg, const char *model_dir) {
-    if (!cfg || !model_dir)
+    if (!cfg)
         return -1;
-
     memset(cfg, 0, sizeof(*cfg));
+    if (!model_dir)
+        return -1;
 
     char *path = path_join(model_dir, "config.json");
     if (!path)
