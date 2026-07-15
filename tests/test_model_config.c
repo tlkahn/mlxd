@@ -95,6 +95,28 @@ static void test_model_type_not_string(void) {
     model_config_free(&cfg);
 }
 
+/* --- Cycle I9: reject malformed numeric fields --------------------------- */
+
+static void test_malformed_numerics(void) {
+    struct {
+        const char *fixture;
+        const char *label;
+    } cases[] = {
+        {MLXD_FIXTURES_DIR "/model_config_num_wrong_type", "wrong type"},
+        {MLXD_FIXTURES_DIR "/model_config_num_negative", "negative"},
+        {MLXD_FIXTURES_DIR "/model_config_num_zero", "zero"},
+        {MLXD_FIXTURES_DIR "/model_config_num_overflow", "overflow"},
+        {MLXD_FIXTURES_DIR "/model_config_kv_wrong_type", "kv wrong type"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        model_config_t cfg;
+        memset(&cfg, 0xAB, sizeof(cfg));
+        int rc = model_config_load(&cfg, cases[i].fixture);
+        assert(rc == -1);
+        model_config_free(&cfg);
+    }
+}
+
 /* --- Cycle I5: free semantics -------------------------------------------- */
 
 static void test_free_semantics(void) {
@@ -123,6 +145,7 @@ int main(void) {
     test_bad_json();
     test_root_not_object();
     test_model_type_not_string();
+    test_malformed_numerics();
     test_free_semantics();
     printf("test_model_config: all passed\n");
     return 0;

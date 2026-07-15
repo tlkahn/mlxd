@@ -1,5 +1,7 @@
 #include "model/model.h"
 
+#include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,6 +28,21 @@ static char *path_join(const char *dir, const char *name) {
     memcpy(p + dlen + 1, name, nlen);
     p[dlen + 1 + nlen] = '\0';
     return p;
+}
+
+static int get_dim_int(yyjson_val *root, const char *key, int *out, int def) {
+    yyjson_val *v = yyjson_obj_get(root, key);
+    if (!v) {
+        *out = def;
+        return 0;
+    }
+    if (!yyjson_is_int(v))
+        return -1;
+    int64_t n = yyjson_get_sint(v);
+    if (n < 1 || n > INT_MAX)
+        return -1;
+    *out = (int)n;
+    return 0;
 }
 
 int model_config_load(model_config_t *cfg, const char *model_dir) {
@@ -80,33 +97,19 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         }
     }
 
-    /* numeric fields - absent stays 0 */
-    yyjson_val *v;
-    v = yyjson_obj_get(root, "vocab_size");
-    if (yyjson_is_int(v))
-        cfg->vocab_size = (int)yyjson_get_int(v);
-
-    v = yyjson_obj_get(root, "hidden_size");
-    if (yyjson_is_int(v))
-        cfg->hidden_size = (int)yyjson_get_int(v);
-
-    v = yyjson_obj_get(root, "num_hidden_layers");
-    if (yyjson_is_int(v))
-        cfg->num_hidden_layers = (int)yyjson_get_int(v);
-
-    v = yyjson_obj_get(root, "num_attention_heads");
-    if (yyjson_is_int(v))
-        cfg->num_attention_heads = (int)yyjson_get_int(v);
-
-    v = yyjson_obj_get(root, "num_key_value_heads");
-    if (yyjson_is_int(v))
-        cfg->num_key_value_heads = (int)yyjson_get_int(v);
-    else
-        cfg->num_key_value_heads = cfg->num_attention_heads;
-
-    v = yyjson_obj_get(root, "max_position_embeddings");
-    if (yyjson_is_int(v))
-        cfg->max_position_embeddings = (int)yyjson_get_int(v);
+    if (get_dim_int(root, "vocab_size", &cfg->vocab_size, 0) ||
+        get_dim_int(root, "hidden_size", &cfg->hidden_size, 0) ||
+        get_dim_int(root, "num_hidden_layers", &cfg->num_hidden_layers, 0) ||
+        get_dim_int(root, "num_attention_heads", &cfg->num_attention_heads,
+                    0) ||
+        get_dim_int(root, "num_key_value_heads", &cfg->num_key_value_heads,
+                    cfg->num_attention_heads) ||
+        get_dim_int(root, "max_position_embeddings",
+                    &cfg->max_position_embeddings, 0)) {
+        model_config_free(cfg);
+        yyjson_doc_free(doc);
+        return -1;
+    }
 
     yyjson_doc_free(doc);
     return 0;
