@@ -27,6 +27,12 @@ void      stream_retain(stream_t *s);
 void      stream_release(stream_t *s);
 bool      stream_push(stream_t *s, chunk_t chunk);
 bool      stream_next(stream_t *s, chunk_t *out, int timeout_ms);
+/* Mark the stream as cancelled. Does NOT inject a DONE marker.
+ * Buffered chunks drain normally via stream_next, then it returns false.
+ * Engine shutdown paths inject DONE/FINISH_CANCELLED separately via
+ * stream_finish_cancelled (handle_generate abort, cmd_cancel, post-
+ * shutdown rejection). A consumer-initiated cancel needs no marker
+ * because the consumer already knows the stream ended. */
 void      stream_cancel(stream_t *s);
 void      stream_set_notify(stream_t *s, void (*cb)(void *), void *ctx);
 

@@ -112,6 +112,15 @@ void stream_set_notify(stream_t *s, void (*cb)(void *), void *ctx) {
 
 /* ---- Stream helpers (static) --------------------------------------------- */
 
+static bool stream_push_error(stream_t *s, const char *msg) {
+    /* strdup ownership transfers to stream_push (stored in ring buffer,
+     * or freed on cancel). Analyzer cannot track through computed index. */
+    char *dup = strdup(msg);
+    if (!dup) return false;
+    __attribute__((suppress))
+    return stream_push(s, (chunk_t){.tag = CHUNK_ERROR, .error = dup});
+}
+
 static void stream_finish_cancelled(stream_t *s) {
     pthread_mutex_lock(&s->mtx);
     if (s->len < s->cap) {
@@ -180,8 +189,7 @@ static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
     pthread_mutex_unlock(&eng->mailbox_mtx);
 
     if (!eng->loaded_model) {
-        char *err = strdup("model not loaded");
-        bool ok = stream_push(s, (chunk_t){.tag = CHUNK_ERROR, .error = err});
+        bool ok = stream_push_error(s, "model not loaded");
         if (ok)
             ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
         if (!ok && atomic_load(&eng->shutdown))
@@ -204,6 +212,10 @@ static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
             }
             chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = cmd->generate.token_ids[i], .logprob = 0}};
             if (!stream_push(s, tok)) {
+                /* Push failed: stream was cancelled. If shutdown caused it,
+                 * inject FINISH_CANCELLED (shutdown store is seq_cst before
+                 * stream_cancel, so it is visible here). If a consumer
+                 * cancelled directly, they already know - no marker needed. */
                 if (atomic_load(&eng->shutdown))
                     stream_finish_cancelled(s);
                 aborted = true;
