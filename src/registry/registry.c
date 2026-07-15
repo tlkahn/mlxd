@@ -51,7 +51,21 @@ int reg_spec_parse(const char *spec, reg_spec_t *out) {
     if (spec[0] == '\0')
         return -1;
 
-    if (spec[0] == '.' || spec[0] == '/' || spec[0] == '~') {
+    if (spec[0] == '~') {
+        if (spec[1] != '\0' && spec[1] != '/')
+            return -1;
+        const char *home = getenv("HOME");
+        if (!home || !home[0])
+            return -1;
+        if (spec[1] == '\0') {
+            out->local_path = reg_dup_str(home);
+        } else {
+            out->local_path = reg_path_join(home, spec + 2);
+        }
+        return out->local_path ? 0 : -1;
+    }
+
+    if (spec[0] == '.' || spec[0] == '/') {
         out->local_path = reg_dup_str(spec);
         return out->local_path ? 0 : -1;
     }
@@ -310,6 +324,45 @@ char *reg_meta_read_revision(const char *dir) {
     return result;
 }
 
+static char *meta_read_field(const char *dir, const char *field) {
+    char *meta_path = reg_path_join(dir, ".mlxd-meta.json");
+    if (!meta_path)
+        return NULL;
+
+    FILE *f = fopen(meta_path, "rb");
+    free(meta_path);
+    if (!f)
+        return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    fread(buf, 1, (size_t)sz, f);
+    buf[sz] = '\0';
+    fclose(f);
+
+    yyjson_doc *doc = yyjson_read(buf, (size_t)sz, 0);
+    free(buf);
+    if (!doc)
+        return NULL;
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    const char *val = yyjson_get_str(yyjson_obj_get(root, field));
+    char *result = val ? reg_dup_str(val) : NULL;
+    yyjson_doc_free(doc);
+    return result;
+}
+
 char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     if (!spec)
         return NULL;
@@ -428,9 +481,14 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     }
 
     int force_redownload = 0;
-    char *cached_rev = reg_meta_read_revision(cache_dir);
-    if (cached_rev) {
-        if (strcmp(cached_rev, revision) != 0)
+    if (commit_sha && commit_sha[0]) {
+        char *cached_commit = meta_read_field(cache_dir, "commit");
+        if (cached_commit && strcmp(cached_commit, commit_sha) != 0)
+            force_redownload = 1;
+        free(cached_commit);
+    } else {
+        char *cached_rev = reg_meta_read_revision(cache_dir);
+        if (cached_rev && strcmp(cached_rev, revision) != 0)
             force_redownload = 1;
         free(cached_rev);
     }
@@ -448,6 +506,20 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
             if (stat(dest, &fst) == 0 && S_ISREG(fst.st_mode) && fst.st_size > 0) {
                 free(dest);
                 continue;
+            }
+        }
+
+        if (strchr(files[i], '/')) {
+            char *last_slash = strrchr(dest, '/');
+            if (last_slash) {
+                *last_slash = '\0';
+                int mrc = mkdirs(dest);
+                *last_slash = '/';
+                if (mrc != 0) {
+                    free(dest);
+                    ok = 0;
+                    break;
+                }
             }
         }
 

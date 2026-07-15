@@ -319,6 +319,189 @@ static void test_pull_revision_change_redownloads(void) {
     mock_hub_stop(&hub);
 }
 
+static void test_pull_nested_rfilename(void) {
+    static const char *api_nested =
+        "{\"sha\":\"commit_nested\",\"siblings\":["
+        "{\"rfilename\":\"config.json\"},"
+        "{\"rfilename\":\"subdir/extra.safetensors\"}"
+        "]}";
+
+    mock_hub_t hub;
+    mock_hub_init(&hub);
+    mock_hub_add(&hub, "GET", "/api/models/org/nested", 200,
+                 api_nested, strlen(api_nested), 0);
+    mock_hub_add(&hub, "GET", "/org/nested/resolve/main/config.json", 200,
+                 "{\"model_type\":\"test\"}", 20, 0);
+    mock_hub_add(&hub, "GET", "/org/nested/resolve/main/subdir/extra.safetensors", 200,
+                 "nested_data", 11, 0);
+    assert(mock_hub_start(&hub) == 0);
+
+    make_tmpdir();
+    char base_url[128];
+    mock_hub_base_url(&hub, base_url, sizeof(base_url));
+    setenv("MLXD_CACHE_DIR", tmpdir_buf, 1);
+    setenv("HF_ENDPOINT", base_url, 1);
+
+    char *dir = registry_pull("org/nested", NULL);
+    assert(dir != NULL);
+
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/config.json", dir);
+    assert(file_exists(config_path));
+
+    char nested_path[512];
+    snprintf(nested_path, sizeof(nested_path), "%s/subdir/extra.safetensors", dir);
+    assert(file_exists(nested_path));
+
+    free(dir);
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("HF_ENDPOINT");
+    mock_hub_stop(&hub);
+}
+
+static void test_pull_sha_change_redownloads(void) {
+    make_tmpdir();
+    setenv("MLXD_CACHE_DIR", tmpdir_buf, 1);
+
+    static const char *api_sha1 =
+        "{\"sha\":\"sha_one\",\"siblings\":["
+        "{\"rfilename\":\"config.json\"},"
+        "{\"rfilename\":\"model.safetensors\"}"
+        "]}";
+    static const char *api_sha2 =
+        "{\"sha\":\"sha_two\",\"siblings\":["
+        "{\"rfilename\":\"config.json\"},"
+        "{\"rfilename\":\"model.safetensors\"}"
+        "]}";
+
+    mock_hub_t hub;
+    mock_hub_init(&hub);
+    mock_hub_add(&hub, "GET", "/api/models/org/shachange/revision/main", 200,
+                 api_sha1, strlen(api_sha1), 0);
+    mock_hub_add(&hub, "GET", "/org/shachange/resolve/main/config.json", 200,
+                 "{\"v\":1}", strlen("{\"v\":1}"), 0);
+    mock_hub_add(&hub, "GET", "/org/shachange/resolve/main/model.safetensors", 200,
+                 "data_A", strlen("data_A"), 0);
+    assert(mock_hub_start(&hub) == 0);
+
+    char base_url[128];
+    mock_hub_base_url(&hub, base_url, sizeof(base_url));
+    setenv("HF_ENDPOINT", base_url, 1);
+
+    char *dir1 = registry_pull("org/shachange", NULL);
+    assert(dir1 != NULL);
+
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/config.json", dir1);
+    char *c1 = read_file_str(config_path);
+    assert(c1 != NULL);
+    assert(strcmp(c1, "{\"v\":1}") == 0);
+    free(c1);
+
+    mock_hub_stop(&hub);
+
+    mock_hub_init(&hub);
+    mock_hub_add(&hub, "GET", "/api/models/org/shachange/revision/main", 200,
+                 api_sha2, strlen(api_sha2), 0);
+    mock_hub_add(&hub, "GET", "/org/shachange/resolve/main/config.json", 200,
+                 "{\"v\":2}", strlen("{\"v\":2}"), 0);
+    mock_hub_add(&hub, "GET", "/org/shachange/resolve/main/model.safetensors", 200,
+                 "data_B", strlen("data_B"), 0);
+    assert(mock_hub_start(&hub) == 0);
+
+    mock_hub_base_url(&hub, base_url, sizeof(base_url));
+    setenv("HF_ENDPOINT", base_url, 1);
+
+    char *dir2 = registry_pull("org/shachange", NULL);
+    assert(dir2 != NULL);
+
+    char *c2 = read_file_str(config_path);
+    assert(c2 != NULL);
+    assert(strcmp(c2, "{\"v\":2}") == 0);
+    free(c2);
+
+    char meta_path[512];
+    snprintf(meta_path, sizeof(meta_path), "%s/.mlxd-meta.json", dir2);
+    char *meta_str = read_file_str(meta_path);
+    assert(meta_str != NULL);
+    yyjson_doc *meta_doc = yyjson_read(meta_str, strlen(meta_str), 0);
+    assert(meta_doc != NULL);
+    yyjson_val *meta_root = yyjson_doc_get_root(meta_doc);
+    const char *sha = yyjson_get_str(yyjson_obj_get(meta_root, "commit"));
+    assert(sha != NULL && strcmp(sha, "sha_two") == 0);
+    yyjson_doc_free(meta_doc);
+    free(meta_str);
+
+    free(dir1);
+    free(dir2);
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("HF_ENDPOINT");
+    mock_hub_stop(&hub);
+}
+
+static void test_pull_same_sha_skips(void) {
+    make_tmpdir();
+    setenv("MLXD_CACHE_DIR", tmpdir_buf, 1);
+
+    static const char *api_same =
+        "{\"sha\":\"sha_same\",\"siblings\":["
+        "{\"rfilename\":\"config.json\"},"
+        "{\"rfilename\":\"model.safetensors\"}"
+        "]}";
+
+    mock_hub_t hub;
+    mock_hub_init(&hub);
+    mock_hub_add(&hub, "GET", "/api/models/org/samesha/revision/main", 200,
+                 api_same, strlen(api_same), 0);
+    mock_hub_add(&hub, "GET", "/org/samesha/resolve/main/config.json", 200,
+                 "{\"v\":1}", strlen("{\"v\":1}"), 0);
+    mock_hub_add(&hub, "GET", "/org/samesha/resolve/main/model.safetensors", 200,
+                 "data_X", strlen("data_X"), 0);
+    assert(mock_hub_start(&hub) == 0);
+
+    char base_url[128];
+    mock_hub_base_url(&hub, base_url, sizeof(base_url));
+    setenv("HF_ENDPOINT", base_url, 1);
+
+    char *dir1 = registry_pull("org/samesha", NULL);
+    assert(dir1 != NULL);
+
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/config.json", dir1);
+    char *c1 = read_file_str(config_path);
+    assert(c1 != NULL);
+    assert(strcmp(c1, "{\"v\":1}") == 0);
+    free(c1);
+
+    mock_hub_stop(&hub);
+
+    mock_hub_init(&hub);
+    mock_hub_add(&hub, "GET", "/api/models/org/samesha/revision/main", 200,
+                 api_same, strlen(api_same), 0);
+    mock_hub_add(&hub, "GET", "/org/samesha/resolve/main/config.json", 200,
+                 "{\"v\":99}", strlen("{\"v\":99}"), 0);
+    mock_hub_add(&hub, "GET", "/org/samesha/resolve/main/model.safetensors", 200,
+                 "data_Y", strlen("data_Y"), 0);
+    assert(mock_hub_start(&hub) == 0);
+
+    mock_hub_base_url(&hub, base_url, sizeof(base_url));
+    setenv("HF_ENDPOINT", base_url, 1);
+
+    char *dir2 = registry_pull("org/samesha", NULL);
+    assert(dir2 != NULL);
+
+    char *c2 = read_file_str(config_path);
+    assert(c2 != NULL);
+    assert(strcmp(c2, "{\"v\":1}") == 0);
+    free(c2);
+
+    free(dir1);
+    free(dir2);
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("HF_ENDPOINT");
+    mock_hub_stop(&hub);
+}
+
 int main(void) {
     test_pull_happy();
     test_pull_abort();
@@ -326,6 +509,9 @@ int main(void) {
     test_pull_repull_skips_existing();
     test_pull_revision_override();
     test_pull_revision_change_redownloads();
+    test_pull_nested_rfilename();
+    test_pull_sha_change_redownloads();
+    test_pull_same_sha_skips();
     printf("test_registry_pull: all passed\n");
     return 0;
 }

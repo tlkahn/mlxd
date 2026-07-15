@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void test_org_model(void) {
@@ -50,12 +51,51 @@ static void test_local_path_slash(void) {
     reg_spec_free(&s);
 }
 
+static char *save_home(void) {
+    const char *h = getenv("HOME");
+    return h ? strdup(h) : NULL;
+}
+
+static void restore_home(char *saved) {
+    if (saved) { setenv("HOME", saved, 1); free(saved); }
+    else unsetenv("HOME");
+}
+
 static void test_local_path_tilde(void) {
+    char *orig = save_home();
+    setenv("HOME", "/test/home", 1);
     reg_spec_t s = {0};
     int rc = reg_spec_parse("~/models/foo", &s);
     assert(rc == 0);
-    assert(strcmp(s.local_path, "~/models/foo") == 0);
+    assert(s.org == NULL);
+    assert(s.model == NULL);
+    assert(strcmp(s.local_path, "/test/home/models/foo") == 0);
     reg_spec_free(&s);
+    restore_home(orig);
+}
+
+static void test_tilde_bare(void) {
+    char *orig = save_home();
+    setenv("HOME", "/test/home", 1);
+    reg_spec_t s = {0};
+    int rc = reg_spec_parse("~", &s);
+    assert(rc == 0);
+    assert(strcmp(s.local_path, "/test/home") == 0);
+    reg_spec_free(&s);
+    restore_home(orig);
+}
+
+static void test_tilde_user_rejected(void) {
+    reg_spec_t s = {0};
+    assert(reg_spec_parse("~user/x", &s) == -1);
+}
+
+static void test_tilde_no_home(void) {
+    char *orig = save_home();
+    unsetenv("HOME");
+    reg_spec_t s = {0};
+    assert(reg_spec_parse("~/foo", &s) == -1);
+    restore_home(orig);
 }
 
 static void test_too_many_slashes(void) {
@@ -102,6 +142,9 @@ int main(void) {
     test_local_path_dot();
     test_local_path_slash();
     test_local_path_tilde();
+    test_tilde_bare();
+    test_tilde_user_rejected();
+    test_tilde_no_home();
     test_too_many_slashes();
     test_empty_string();
     test_null_input();

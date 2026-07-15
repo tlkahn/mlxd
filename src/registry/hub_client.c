@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <yyjson/yyjson.h>
 
@@ -96,13 +97,29 @@ typedef struct {
     size_t               count;
     const char          *filename;
     int                  aborted;
+    size_t               resume_base;
+    CURL                *curl;
+    const char          *part_path;
+    int                  response_checked;
+    long                 content_range_total;
 } dl_ctx_t;
 
 static size_t dl_write_cb(void *data, size_t size, size_t nmemb, void *userdata) {
     dl_ctx_t *ctx = (dl_ctx_t *)userdata;
     size_t total = size * nmemb;
-    size_t written = fwrite(data, 1, total, ctx->fp);
-    return written;
+    if (!ctx->response_checked && ctx->resume_base > 0) {
+        ctx->response_checked = 1;
+        long code = 0;
+        curl_easy_getinfo(ctx->curl, CURLINFO_RESPONSE_CODE, &code);
+        if (code == 200) {
+            FILE *nfp = freopen(ctx->part_path, "wb", ctx->fp);
+            if (!nfp)
+                return 0;
+            ctx->fp = nfp;
+            ctx->resume_base = 0;
+        }
+    }
+    return fwrite(data, 1, total, ctx->fp);
 }
 
 static int dl_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
@@ -116,13 +133,24 @@ static int dl_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
     p.filename = ctx->filename;
     p.file_index = ctx->idx;
     p.file_count = ctx->count;
-    p.file_downloaded = (uint64_t)dlnow;
-    p.file_total = dltotal > 0 ? (uint64_t)dltotal : 0;
+    p.file_downloaded = (uint64_t)((curl_off_t)ctx->resume_base + dlnow);
+    p.file_total = dltotal > 0 ? (uint64_t)((curl_off_t)ctx->resume_base + dltotal) : 0;
     if (ctx->cb(&p, ctx->ud) != 0) {
         ctx->aborted = 1;
         return 1;
     }
     return 0;
+}
+
+static size_t dl_header_cb(char *buf, size_t size, size_t nitems, void *userdata) {
+    dl_ctx_t *ctx = (dl_ctx_t *)userdata;
+    size_t total = size * nitems;
+    if (total > 16 && strncasecmp(buf, "Content-Range:", 14) == 0) {
+        long val = 0;
+        if (sscanf(buf + 14, " bytes */%ld", &val) == 1 && val > 0)
+            ctx->content_range_total = val;
+    }
+    return total;
 }
 
 int reg_download_file(const char *url, const char *dest, const char *token,
@@ -133,6 +161,8 @@ int reg_download_file(const char *url, const char *dest, const char *token,
     char part_path[4096];
     snprintf(part_path, sizeof(part_path), "%s.part", dest);
 
+    int attempt = 0;
+retry:;
     struct stat part_st;
     long resume_from = 0;
     int has_part = (stat(part_path, &part_st) == 0 && S_ISREG(part_st.st_mode));
@@ -152,12 +182,16 @@ int reg_download_file(const char *url, const char *dest, const char *token,
     ctx.idx = idx;
     ctx.count = count;
     ctx.filename = filename;
+    ctx.resume_base = (size_t)(resume_from > 0 ? resume_from : 0);
+    ctx.part_path = part_path;
+    ctx.content_range_total = -1;
 
     CURL *c = curl_easy_init();
     if (!c) {
         fclose(fp);
         return -1;
     }
+    ctx.curl = c;
 
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write_cb);
@@ -167,20 +201,26 @@ int reg_download_file(const char *url, const char *dest, const char *token,
     curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress_cb);
     curl_easy_setopt(c, CURLOPT_XFERINFODATA, &ctx);
     curl_easy_setopt(c, CURLOPT_USERAGENT, MLXD_USER_AGENT);
-
-    if (resume_from > 0)
-        curl_easy_setopt(c, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)resume_from);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, dl_header_cb);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &ctx);
 
     struct curl_slist *hdrs = NULL;
+    if (resume_from > 0) {
+        char range_hdr[128];
+        snprintf(range_hdr, sizeof(range_hdr), "Range: bytes=%ld-", resume_from);
+        hdrs = curl_slist_append(hdrs, range_hdr);
+    }
     if (token && token[0]) {
         char auth_hdr[512];
         snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", token);
         hdrs = curl_slist_append(hdrs, auth_hdr);
-        curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
     }
+    if (hdrs)
+        curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
 
     CURLcode res = curl_easy_perform(c);
-    fclose(fp);
+    if (ctx.fp)
+        fclose(ctx.fp);
 
     long http_code = 0;
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
@@ -190,60 +230,29 @@ int reg_download_file(const char *url, const char *dest, const char *token,
         hdrs = NULL;
     }
 
-    if (ctx.aborted) {
+    if (ctx.aborted)
         return -1;
-    }
 
     if (res != CURLE_OK) {
         log_error("download failed: %s", curl_easy_strerror(res));
-        remove(part_path);
         return -1;
     }
 
-    if (http_code == 200 && resume_from > 0) {
-        fp = fopen(part_path, "wb");
-        if (!fp) {
-            remove(part_path);
-            return -1;
-        }
-        ctx.fp = fp;
-
-        CURL *c2 = curl_easy_init();
-        if (!c2) {
-            fclose(fp);
-            remove(part_path);
-            return -1;
-        }
-        curl_easy_setopt(c2, CURLOPT_URL, url);
-        curl_easy_setopt(c2, CURLOPT_WRITEFUNCTION, dl_write_cb);
-        curl_easy_setopt(c2, CURLOPT_WRITEDATA, &ctx);
-        curl_easy_setopt(c2, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(c2, CURLOPT_USERAGENT, MLXD_USER_AGENT);
-        if (token && token[0]) {
-            char auth_hdr2[512];
-            snprintf(auth_hdr2, sizeof(auth_hdr2), "Authorization: Bearer %s", token);
-            hdrs = curl_slist_append(NULL, auth_hdr2);
-            curl_easy_setopt(c2, CURLOPT_HTTPHEADER, hdrs);
-        }
-        res = curl_easy_perform(c2);
-        fclose(fp);
-        curl_easy_getinfo(c2, CURLINFO_RESPONSE_CODE, &http_code);
-        curl_easy_cleanup(c2);
-        if (hdrs) {
-            curl_slist_free_all(hdrs);
-            hdrs = NULL;
-        }
-
-        if (res != CURLE_OK) {
-            log_error("retry download failed: %s", curl_easy_strerror(res));
-            remove(part_path);
-            return -1;
-        }
-    }
-
     if (http_code == 416) {
-        rename(part_path, dest);
-        return 0;
+        struct stat ps;
+        if (ctx.content_range_total > 0 &&
+            stat(part_path, &ps) == 0 &&
+            ps.st_size == ctx.content_range_total) {
+            rename(part_path, dest);
+            return 0;
+        }
+        remove(part_path);
+        if (attempt == 0) {
+            attempt = 1;
+            goto retry;
+        }
+        log_error("416 after retry");
+        return -1;
     }
 
     if (http_code < 200 || http_code >= 300) {

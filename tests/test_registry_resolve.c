@@ -143,6 +143,30 @@ static void test_resolve_no_revision_returns_dir(void) {
     unsetenv("MLXD_CACHE_DIR");
 }
 
+static void test_resolve_tilde_expansion(void) {
+    make_tmpdir();
+
+    char model_dir[512];
+    snprintf(model_dir, sizeof(model_dir), "%s/models/foo", tmpdir_buf);
+    assert(mkdirs(model_dir) == 0);
+
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/config.json", model_dir);
+    write_file(config_path, "{\"model_type\":\"test\"}");
+
+    const char *h = getenv("HOME");
+    char *orig_home = h ? strdup(h) : NULL;
+    setenv("HOME", tmpdir_buf, 1);
+
+    char *path = registry_resolve("~/models/foo");
+    assert(path != NULL);
+    assert(strcmp(path, model_dir) == 0);
+    free(path);
+
+    if (orig_home) { setenv("HOME", orig_home, 1); free(orig_home); }
+    else unsetenv("HOME");
+}
+
 static void test_resolve_revision_missing_meta(void) {
     make_tmpdir();
     setenv("MLXD_CACHE_DIR", tmpdir_buf, 1);
@@ -170,6 +194,7 @@ int main(void) {
     test_resolve_revision_match();
     test_resolve_revision_mismatch();
     test_resolve_no_revision_returns_dir();
+    test_resolve_tilde_expansion();
     test_resolve_revision_missing_meta();
     printf("test_registry_resolve: all passed\n");
     return 0;

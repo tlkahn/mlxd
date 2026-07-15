@@ -155,7 +155,9 @@ static void mock_hub_handle(mock_hub_t *h, int client_fd) {
                 char hdr[256];
                 int hlen = snprintf(hdr, sizeof(hdr),
                     "HTTP/1.1 416 Range Not Satisfiable\r\n"
-                    "Connection: close\r\nContent-Length: 0\r\n\r\n");
+                    "Content-Range: bytes */%zu\r\n"
+                    "Connection: close\r\nContent-Length: 0\r\n\r\n",
+                    match->body_len);
                 mock_hub_send_all(client_fd, hdr, (size_t)hlen);
                 close(client_fd);
                 return;
