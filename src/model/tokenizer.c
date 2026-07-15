@@ -44,6 +44,7 @@ struct tokenizer {
      * default "##"; borrowed from doc when overridden. */
     const char        *wp_prefix;
     uint32_t           wp_prefix_len;
+    bool               wp_cleanup;
     /* Per-byte fallback token id, resolved once at load (-1 = no vocab entry):
      * BPE maps bytes through the GPT-2 byte-to-unicode table, SentencePiece
      * through <0xNN> tokens, WordPiece has no byte fallback. */
@@ -281,6 +282,7 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     tok->unk_id        = -1;
     tok->wp_prefix     = "##";
     tok->wp_prefix_len = 2;
+    tok->wp_cleanup    = true;
     yyjson_val *cs_prefix = yyjson_obj_get(model, "continuing_subword_prefix");
     if (yyjson_is_str(cs_prefix)) {
         tok->wp_prefix     = yyjson_get_str(cs_prefix);
@@ -338,6 +340,16 @@ tokenizer_t *tokenizer_load_json(const char *json, size_t len) {
     if (norm_err) {
         tokenizer_free(tok);
         return NULL;
+    }
+
+    yyjson_val *decoder = yyjson_obj_get(root, "decoder");
+    if (yyjson_is_obj(decoder)) {
+        yyjson_val *dt = yyjson_obj_get(decoder, "type");
+        if (yyjson_is_str(dt) && strcmp(yyjson_get_str(dt), "WordPiece") == 0) {
+            yyjson_val *cl = yyjson_obj_get(decoder, "cleanup");
+            if (yyjson_is_bool(cl))
+                tok->wp_cleanup = yyjson_get_bool(cl);
+        }
     }
 
     /* Vocab: keys are NUL-terminated strings borrowed from the doc. */
@@ -1198,21 +1210,22 @@ char *decode_byte_level(const tokenizer_t *tok, const int32_t *ids, int count) {
     return sb_finish(&out);
 }
 
-/* HF WordPiece decoder cleanup (decoder.cleanup, default true). The Rust
- * reference runs its replace chain (" ."->".", " ,"->",", " n't"->"n't", ...)
- * per token AFTER prepending the joining space; vocab tokens contain no
- * spaces, so the chain reduces to: drop the prepended space when the token
- * starts with one of these prefixes. Rules needing a space inside the token
- * (" ' ", " do not") can never fire and are omitted. The loader ignores the
- * decoder config, so cleanup is unconditional here (a cleanup:false
- * tokenizer.json would deviate). The Rust chain deliberately has no " 'll"
- * or " 'd" rule - HF decodes "i'll" as "i ' ll" - so they are omitted here
- * too (pinned by test_bert_contractions). */
+/* HF WordPiece decoder cleanup (decoder.cleanup, parsed from decoder config
+ * with HF default true). The Rust reference runs its replace chain
+ * (" ."->".", " ,"->",", " n't"->"n't", ...) per token AFTER prepending the
+ * joining space; vocab tokens contain no spaces, so the chain reduces to:
+ * drop the prepended space when the token starts with one of these prefixes.
+ * Rules needing a space inside the token (" ' ", " do not") can never fire
+ * and are omitted. The Rust chain deliberately has no " 'll" or " 'd" rule -
+ * HF decodes "i'll" as "i ' ll" - so they are omitted here too (pinned by
+ * test_bert_contractions). */
 static bool wp_cleanup_drops_space(const char *token, size_t len) {
+#define WP_(s) {(s), sizeof(s) - 1}
     static const struct { const char *p; size_t n; } pre[] = {
-        {".", 1}, {"?", 1}, {"!", 1}, {",", 1},
-        {"n't", 3}, {"'m", 2}, {"'s", 2}, {"'ve", 3}, {"'re", 3},
+        WP_("."), WP_("?"), WP_("!"), WP_(","),
+        WP_("n't"), WP_("'m"), WP_("'s"), WP_("'ve"), WP_("'re"),
     };
+#undef WP_
     for (size_t i = 0; i < sizeof pre / sizeof pre[0]; i++)
         if (len >= pre[i].n && memcmp(token, pre[i].p, pre[i].n) == 0) return true;
     return false;
@@ -1241,7 +1254,7 @@ char *decode_wordpiece(const tokenizer_t *tok, const int32_t *ids, int count) {
         } else {
             /* Guard on out.len, not the loop index: a skipped leading
              * special ([CLS]/bos) must not leave a leading space. */
-            bool space = out.len > 0 && !wp_cleanup_drops_space(token, tlen);
+            bool space = out.len > 0 && !(tok->wp_cleanup && wp_cleanup_drops_space(token, tlen));
             ok = (!space || sb_append(&out, " ", 1)) && sb_append(&out, token, tlen);
         }
         if (!ok) {
@@ -1349,8 +1362,7 @@ static int encode_segment(const tokenizer_t *tok, encode_scratch *s, const char 
     case TOKENIZER_BPE:
         return encode_byte_level(tok, s, text, len, out);
     case TOKENIZER_WORDPIECE:
-        /* Handled by the entry-point early branch; reaching here would skip
-         * the [CLS]/[SEP] wrap, so fail instead. */
+    case TOKENIZER_UNKNOWN:
         return -1;
     case TOKENIZER_SENTENCEPIECE_BPE:
         return encode_sentencepiece(tok, s, text, len, out);
@@ -1505,9 +1517,9 @@ char *tokenizer_decode(const tokenizer_t *tok, const int32_t *ids, int count) {
     case TOKENIZER_WORDPIECE:
         return decode_wordpiece(tok, ids, count);
     case TOKENIZER_SENTENCEPIECE_BPE:
-        /* Leading-space stripping is a caller policy (chat template glue);
-         * the public entry point always preserves it. */
         return decode_sentencepiece(tok, ids, count, false);
+    case TOKENIZER_UNKNOWN:
+        return NULL;
     }
     return NULL;
 }
@@ -1703,7 +1715,7 @@ tokenizer_t *tokenizer_load_dir(const char *dir_path) {
 }
 
 tokenizer_type_t tokenizer_type(const tokenizer_t *tok) {
-    return tok ? tok->type : TOKENIZER_BPE;
+    return tok ? tok->type : TOKENIZER_UNKNOWN;
 }
 
 int tokenizer_vocab_size(const tokenizer_t *tok) { return tok ? tok->vocab_size : 0; }

@@ -39,6 +39,7 @@ static void check_vector(const tokenizer_t *tok, const char *text, const int32_t
     int32_t *ids   = NULL;
     int      count = tokenizer_encode_alloc(tok, text, strlen(text), true, &ids);
     assert(count >= 0 && "tokenizer_encode_alloc failed");
+    assert(count == 0 || ids != NULL); /* allocator contract */
     if (count != n || (n > 0 && memcmp(ids, expected, (size_t)n * sizeof(int32_t)) != 0)) {
         fprintf(stderr, "vector mismatch for %s\n  expected (%d):", text, n);
         for (int i = 0; i < n; i++) fprintf(stderr, " %d", expected[i]);

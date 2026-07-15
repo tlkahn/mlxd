@@ -1338,6 +1338,60 @@ static void test_bpe_sp_hexbyte(void) {
     tokenizer_free(tok);
 }
 
+static void test_type_null_returns_unknown(void) {
+    assert(tokenizer_type(NULL) == TOKENIZER_UNKNOWN);
+}
+
+static void test_wordpiece_decoder_cleanup_false(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":0,\"[SEP]\":1,"
+        "\"[UNK]\":2,\"hello\":3,\",\":4}},"
+        "\"added_tokens\":[{\"id\":0,\"content\":\"[CLS]\",\"special\":true},"
+        "{\"id\":1,\"content\":\"[SEP]\",\"special\":true}],"
+        "\"decoder\":{\"type\":\"WordPiece\",\"prefix\":\"##\",\"cleanup\":false}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    int32_t body[] = {3, 4};
+    char *decoded = tokenizer_decode(tok, body, 2);
+    assert(decoded != NULL);
+    assert(strcmp(decoded, "hello ,") == 0);
+    free(decoded);
+    tokenizer_free(tok);
+}
+
+static void test_wordpiece_decoder_cleanup_default_true(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":0,\"[SEP]\":1,"
+        "\"[UNK]\":2,\"hello\":3,\",\":4}},"
+        "\"added_tokens\":[{\"id\":0,\"content\":\"[CLS]\",\"special\":true},"
+        "{\"id\":1,\"content\":\"[SEP]\",\"special\":true}]}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    int32_t body[] = {3, 4};
+    char *decoded = tokenizer_decode(tok, body, 2);
+    assert(decoded != NULL);
+    assert(strcmp(decoded, "hello,") == 0);
+    free(decoded);
+    tokenizer_free(tok);
+}
+
+static void test_wordpiece_decoder_cleanup_absent_member(void) {
+    const char *json =
+        "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"[CLS]\":0,\"[SEP]\":1,"
+        "\"[UNK]\":2,\"hello\":3,\",\":4}},"
+        "\"added_tokens\":[{\"id\":0,\"content\":\"[CLS]\",\"special\":true},"
+        "{\"id\":1,\"content\":\"[SEP]\",\"special\":true}],"
+        "\"decoder\":{\"type\":\"WordPiece\"}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    int32_t body[] = {3, 4};
+    char *decoded = tokenizer_decode(tok, body, 2);
+    assert(decoded != NULL);
+    assert(strcmp(decoded, "hello,") == 0);
+    free(decoded);
+    tokenizer_free(tok);
+}
+
 /* SentencePiece without byte entries: unknown bytes fall back to <unk>. */
 static void test_bpe_sp_unk(void) {
     const char *json = "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":12,\"<unk>\":0},\"merges\":[]}}";
@@ -1439,6 +1493,10 @@ int main(void) {
     test_bpe_bytelevel_fallback_unk_on_vocab_miss();
     test_bpe_sp_hexbyte();
     test_bpe_sp_unk();
+    test_type_null_returns_unknown();
+    test_wordpiece_decoder_cleanup_false();
+    test_wordpiece_decoder_cleanup_default_true();
+    test_wordpiece_decoder_cleanup_absent_member();
     printf("All tokenizer tests passed.\n");
     return 0;
 }
