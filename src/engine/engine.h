@@ -18,13 +18,22 @@ typedef struct {
     pthread_cond_t  cond;
     atomic_bool     cancelled;
     atomic_int      refcount;
+    void          (*on_push)(void *);
+    void           *on_push_ctx;
 } stream_t;
 
 stream_t *stream_create(int capacity);
+void      stream_retain(stream_t *s);
 void      stream_release(stream_t *s);
 bool      stream_push(stream_t *s, chunk_t chunk);
 bool      stream_next(stream_t *s, chunk_t *out, int timeout_ms);
+/* Mark the stream as cancelled. Does NOT itself inject a DONE marker.
+ * Any in-flight generate ends with a DONE/FINISH_CANCELLED terminal
+ * injected by the engine (handle_generate abort, cmd_cancel, post-
+ * shutdown rejection). Buffered chunks drain normally via stream_next;
+ * after the last chunk it returns false. */
 void      stream_cancel(stream_t *s);
+void      stream_set_notify(stream_t *s, void (*cb)(void *), void *ctx);
 
 /* --- Engine commands ------------------------------------------------------ */
 
@@ -50,7 +59,7 @@ typedef struct engine_cmd {
             char *model_path;
         } load;
         struct {
-            stream_t *stream;
+            stream_t *stream; /* ownership: engine calls stream_release */
         } reclaim;
     };
     struct engine_cmd *next;
@@ -66,10 +75,18 @@ typedef struct {
     engine_cmd_t   *mailbox_tail;
     atomic_bool     shutdown;
     char           *loaded_model;
+    stream_t       *inflight;
 } engine_t;
 
 int  engine_init(engine_t *eng);
+
+/* Shut down: cancel in-flight work, join engine thread, drain pending.
+   Producers must be quiesced before this returns. */
 void engine_destroy(engine_t *eng);
+
+/* Post cmd for async processing. Concurrent posts during destroy are
+   safe (re-checked under lock). After destroy returns, posts are
+   rejected via atomic fast-path only - the mutex is already destroyed. */
 void engine_post(engine_t *eng, engine_cmd_t *cmd);
 
 #endif
