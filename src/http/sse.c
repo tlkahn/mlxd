@@ -4,15 +4,42 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* TODO(epic-c): embedded newlines produce invalid SSE framing; split into
- * multiple "data:" lines per the SSE spec. */
 char *sse_format(const char *data, size_t len) {
-    /* "data: " + data + "\n\n" + NUL */
-    size_t total = 6 + len + 2 + 1;
+    if (len == 0) {
+        char *buf = malloc(8 + 1);
+        if (!buf) return NULL;
+        memcpy(buf, "data: \n\n", 8);
+        buf[8] = '\0';
+        return buf;
+    }
+
+    size_t lines = 1;
+    for (size_t i = 0; i < len; i++)
+        if (data[i] == '\n') lines++;
+
+    /* Each line: "data: " (6) + segment + '\n' (1); plus final '\n' (1) + NUL (1) */
+    size_t total = lines * 7 + len + 2;
     char *buf = malloc(total);
-    if (!buf)
-        return NULL;
-    snprintf(buf, total, "data: %.*s\n\n", (int)len, data);
+    if (!buf) return NULL;
+
+    size_t off = 0;
+    const char *p = data;
+    const char *end = data + len;
+    for (;;) {
+        const char *nl = (p < end) ? memchr(p, '\n', (size_t)(end - p)) : NULL;
+        size_t seg = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        memcpy(buf + off, "data: ", 6);
+        off += 6;
+        if (seg > 0) {
+            memcpy(buf + off, p, seg);
+            off += seg;
+        }
+        buf[off++] = '\n';
+        if (!nl) break;
+        p = nl + 1;
+    }
+    buf[off++] = '\n';
+    buf[off] = '\0';
     return buf;
 }
 

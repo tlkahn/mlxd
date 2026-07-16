@@ -69,6 +69,13 @@ TEST_GPU_SRCS  := $(wildcard tests/test_*_gpu.c)
 TEST_GPU_BINS  := $(TEST_GPU_SRCS:.c=)
 LIB_OBJS       := $(filter-out src/main.o, $(ALL_OBJS))
 
+# test_http_gen_request includes gen_request.c directly with mock conn_io;
+# must NOT link server.o, gen_request.o, or handler.o.
+GENREQ_EXCL    := src/http/server.o src/http/gen_request.o src/http/handler.o
+GENREQ_OBJS    := $(filter-out $(GENREQ_EXCL), $(LIB_OBJS))
+tests/test_http_gen_request: tests/test_http_gen_request.c $(GENREQ_OBJS)
+	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(GENREQ_OBJS) $(ALL_LDFLAGS)
+
 tests/test_%: tests/test_%.c $(LIB_OBJS)
 	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(LIB_OBJS) $(ALL_LDFLAGS)
 
@@ -141,6 +148,11 @@ vendor/yyjson/yyjson.tsan.o: vendor/yyjson/yyjson.c
 vendor/jinja_cpp/%.tsan.o: vendor/jinja_cpp/%.cpp
 	$(CXX) $(CXXFLAGS) -g -O1 -fsanitize=thread -c -o $@ $<
 
+GENREQ_TSAN_EXCL := src/http/server.tsan.o src/http/gen_request.tsan.o src/http/handler.tsan.o
+GENREQ_TSAN_OBJS := $(filter-out $(GENREQ_TSAN_EXCL), $(TSAN_LIB_OBJS))
+$(TSAN_DIR)/test_http_gen_request: tests/test_http_gen_request.c $(GENREQ_TSAN_OBJS) | $(TSAN_DIR)
+	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(GENREQ_TSAN_OBJS) $(ALL_LDFLAGS) $(TSAN_LDFLAGS)
+
 $(TSAN_DIR)/test_%: tests/test_%.c $(TSAN_LIB_OBJS) | $(TSAN_DIR)
 	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(TSAN_LIB_OBJS) $(ALL_LDFLAGS) $(TSAN_LDFLAGS)
 
@@ -199,6 +211,11 @@ COV_LIB_OBJS := $(filter-out src/main.cov.o, $(COV_ALL_OBJS)) vendor/yyjson/yyjs
 
 COV_TEST_SRCS := $(wildcard tests/test_*.c)
 COV_TEST_BINS := $(COV_TEST_SRCS:tests/test_%.c=$(COV_DIR)/test_%)
+
+GENREQ_COV_EXCL := src/http/server.cov.o src/http/gen_request.cov.o src/http/handler.cov.o
+GENREQ_COV_OBJS := $(filter-out $(GENREQ_COV_EXCL), $(COV_LIB_OBJS))
+$(COV_DIR)/test_http_gen_request: tests/test_http_gen_request.c $(GENREQ_COV_OBJS) | $(COV_DIR)
+	$(CC) $(ALL_CFLAGS) $(COV_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(GENREQ_COV_OBJS) $(ALL_LDFLAGS) $(COV_LDFLAGS)
 
 $(COV_DIR)/test_%: tests/test_%.c $(COV_LIB_OBJS) | $(COV_DIR)
 	$(CC) $(ALL_CFLAGS) $(COV_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(COV_LIB_OBJS) $(ALL_LDFLAGS) $(COV_LDFLAGS)

@@ -304,6 +304,62 @@ static void test_chat_prompt_user_content_specials(void) {
     tokenizer_free(tok);
 }
 
+static void test_make_id_format(void) {
+    char *id1 = gen_make_id("chatcmpl-");
+    assert(id1 != NULL);
+    assert(strncmp(id1, "chatcmpl-", 9) == 0);
+    assert(strlen(id1) == 9 + 24);
+    for (int i = 9; i < 33; i++) {
+        char c = id1[i];
+        assert((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+    }
+
+    char *id2 = gen_make_id("cmpl-");
+    assert(id2 != NULL);
+    assert(strncmp(id2, "cmpl-", 5) == 0);
+    assert(strlen(id2) == 5 + 24);
+
+    assert(strcmp(id1, id2) != 0);
+
+    free(id1);
+    free(id2);
+}
+
+static void test_sse_completion_chunk_delta(void) {
+    char *sse = gen_sse_completion_chunk(&(gen_sse_completion_chunk_params_t){
+        .id = "cmpl-1", .model = "gpt2", .created = 1234,
+        .delta_text = "hello",
+    });
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(root, "object")), "text_completion") == 0);
+    yyjson_val *choices = yyjson_obj_get(root, "choices");
+    yyjson_val *c0 = yyjson_arr_get(choices, 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(c0, "text")), "hello") == 0);
+    assert(yyjson_get_sint(yyjson_obj_get(c0, "index")) == 0);
+    assert(yyjson_is_null(yyjson_obj_get(c0, "logprobs")));
+    assert(yyjson_is_null(yyjson_obj_get(c0, "finish_reason")));
+    yyjson_doc_free(doc);
+    free(sse);
+}
+
+static void test_sse_completion_chunk_final(void) {
+    char *sse = gen_sse_completion_chunk(&(gen_sse_completion_chunk_params_t){
+        .id = "cmpl-1", .model = "gpt2", .created = 1234,
+        .final = true, .reason = FINISH_LENGTH,
+    });
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *choices = yyjson_obj_get(root, "choices");
+    yyjson_val *c0 = yyjson_arr_get(choices, 0);
+    const char *fr = yyjson_get_str(yyjson_obj_get(c0, "finish_reason"));
+    assert(strcmp(fr, "length") == 0);
+    yyjson_doc_free(doc);
+    free(sse);
+}
+
 static void test_completion_response_roundtrip(void) {
     usage_t u = {.prompt_tokens = 4, .completion_tokens = 6, .total_tokens = 10};
     char *json = gen_build_completion_response("cmpl-1", "gpt2", 1234, "once upon",
@@ -320,6 +376,19 @@ static void test_completion_response_roundtrip(void) {
                  finish_reason_wire_str(FINISH_LENGTH)) == 0);
     yyjson_doc_free(doc);
     free(json);
+}
+
+static void test_sse_error_format(void) {
+    char *sse = gen_sse_error("something went wrong");
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err != NULL);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(err, "message")), "something went wrong") == 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(err, "type")), "server_error") == 0);
+    yyjson_doc_free(doc);
+    free(sse);
 }
 
 int main(void) {
@@ -339,7 +408,11 @@ int main(void) {
     test_chat_prompt_bad_template_nulls_ids();
     test_chat_prompt_special_tokens();
     test_chat_prompt_user_content_specials();
+    test_make_id_format();
+    test_sse_completion_chunk_delta();
+    test_sse_completion_chunk_final();
     test_completion_response_roundtrip();
+    test_sse_error_format();
     printf("test_http_gen: all passed\n");
     return 0;
 }

@@ -4,6 +4,8 @@
 #include "http/sse.h"
 #include "model/tokenizer.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -39,7 +41,7 @@ int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
     free(rendered);
     if (n < 0) {
         *err = "tokenizer encode failed";
-        return -1;
+        return -2;
     }
     return n;
 }
@@ -122,4 +124,61 @@ char *gen_build_completion_response(const char *id, const char *model, int64_t c
 
     yyjson_mut_val *root = completion_response_serialize(&resp, mdoc);
     return serialize_mut_root(mdoc, root);
+}
+
+char *gen_sse_error(const char *msg) {
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    if (!mdoc) return NULL;
+    yyjson_mut_val *root = error_envelope_serialize(msg, "server_error", NULL, mdoc);
+    char *json = serialize_mut_root(mdoc, root);
+    if (!json) return NULL;
+    char *sse = sse_format(json, strlen(json));
+    free(json);
+    return sse;
+}
+
+/* macOS/BSD libc; also glibc >= 2.36. Link-time dependency only. */
+extern void arc4random_buf(void *buf, size_t nbytes);
+
+char *gen_make_id(const char *prefix) {
+    size_t plen = prefix ? strlen(prefix) : 0;
+    char *id = malloc(plen + 24 + 1);
+    if (!id) return NULL;
+    if (plen > 0) memcpy(id, prefix, plen);
+    uint32_t r[3];
+    arc4random_buf(r, sizeof(r));
+    snprintf(id + plen, 25, "%08x%08x%08x", r[0], r[1], r[2]);
+    return id;
+}
+
+char *gen_sse_completion_chunk(const gen_sse_completion_chunk_params_t *p) {
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    if (!mdoc) return NULL;
+
+    yyjson_mut_val *root = yyjson_mut_obj(mdoc);
+    yyjson_mut_obj_add_strcpy(mdoc, root, "id", p->id);
+    yyjson_mut_obj_add_strcpy(mdoc, root, "object", "text_completion");
+    yyjson_mut_obj_add_int(mdoc, root, "created", p->created);
+    yyjson_mut_obj_add_strcpy(mdoc, root, "model", p->model);
+
+    yyjson_mut_val *choices = yyjson_mut_arr(mdoc);
+    yyjson_mut_obj_add_val(mdoc, root, "choices", choices);
+
+    yyjson_mut_val *c0 = yyjson_mut_obj(mdoc);
+    yyjson_mut_obj_add_strcpy(mdoc, c0, "text", p->delta_text ? p->delta_text : "");
+    yyjson_mut_obj_add_int(mdoc, c0, "index", 0);
+    yyjson_mut_obj_add_null(mdoc, c0, "logprobs");
+    if (p->final)
+        yyjson_mut_obj_add_strcpy(mdoc, c0, "finish_reason",
+                                  finish_reason_wire_str(p->reason));
+    else
+        yyjson_mut_obj_add_null(mdoc, c0, "finish_reason");
+    yyjson_mut_arr_add_val(choices, c0);
+
+    char *json = serialize_mut_root(mdoc, root);
+    if (!json) return NULL;
+
+    char *sse = sse_format(json, strlen(json));
+    free(json);
+    return sse;
 }

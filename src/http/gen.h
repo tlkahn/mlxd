@@ -54,4 +54,25 @@ char *gen_build_completion_response(const char *id, const char *model, int64_t c
                                     const char *text, finish_reason_t reason,
                                     const usage_t *u);
 
+/* Build an SSE-wrapped OpenAI error event JSON.
+ * Returns heap-allocated SSE string. Caller frees. */
+char *gen_sse_error(const char *msg);
+
+/* Generate a unique request ID: "<prefix><24 lowercase hex chars>".
+ * prefix is typically "chatcmpl-" or "cmpl-". Caller frees. */
+char *gen_make_id(const char *prefix);
+
+typedef struct {
+    const char *id;
+    const char *model;
+    int64_t created;
+    const char *delta_text;
+    bool final;
+    finish_reason_t reason;
+} gen_sse_completion_chunk_params_t;
+
+/* Build an SSE-wrapped text_completion chunk JSON (legacy completions streaming).
+ * Returns heap-allocated SSE string. Caller frees. */
+char *gen_sse_completion_chunk(const gen_sse_completion_chunk_params_t *p);
+
 #endif

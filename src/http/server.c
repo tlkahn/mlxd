@@ -1,5 +1,6 @@
 #include "http/server.h"
 #include "http/conn.h"
+#include "http/conn_io.h"
 #include "http/handler.h"
 #include "http/response.h"
 #include "http/router.h"
@@ -30,6 +31,9 @@ typedef struct conn {
     http_parser_ctx_t *parser;
     char               rbuf[65536];
     bool               closing;
+    bool               gen_owned;
+    void             (*on_gone)(void *);
+    void              *on_gone_ctx;
 } conn_t;
 
 typedef struct {
@@ -70,6 +74,7 @@ static char *build_error_wire(int status, const char *type, const char *code,
 /* --- Write helpers ------------------------------------------------------- */
 
 static void queue_write(conn_t *c, char *wire, size_t wire_len, bool close_after) {
+    if (c->closing) { free(wire); return; }
     write_req_t *wr = malloc(sizeof(*wr));
     if (!wr) {
         free(wire);
@@ -114,6 +119,13 @@ static void alloc_cb(uv_handle_t *handle, size_t suggested, uv_buf_t *buf) {
 static void close_conn(conn_t *c) {
     if (c->closing) return;
     c->closing = true;
+    if (c->on_gone) {
+        void (*cb)(void *) = c->on_gone;
+        void *ctx = c->on_gone_ctx;
+        c->on_gone = NULL;
+        c->on_gone_ctx = NULL;
+        cb(ctx);
+    }
     uv_close((uv_handle_t *)&c->handle, on_conn_close);
 }
 
@@ -159,6 +171,8 @@ static void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     }
     if (nread == 0) return;
 
+    if (c->gen_owned) return;
+
     size_t off = 0;
     while (off < (size_t)nread && !c->closing) {
         http_parsed_request_t pr = {0};
@@ -178,7 +192,7 @@ static void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
         case HTTP_PARSE_COMPLETE:
             off += http_parser_consumed(c->parser);
             dispatch(c, &pr);
-            if (!pr.keep_alive || c->closing) return;
+            if (!pr.keep_alive || c->closing || c->gen_owned) return;
             http_parser_reset(c->parser);
             break;
         }
@@ -214,7 +228,10 @@ static void dispatch(conn_t *c, http_parsed_request_t *pr) {
         http_response_t resp = {0};
         handler(&req, &resp, handler_ctx);
 
-        if (resp.deferred) return;
+        if (resp.deferred) {
+            c->gen_owned = true;
+            return;
+        }
 
         size_t wire_len = 0;
         char *wire = http_build_response(resp.status, resp.content_type,
@@ -256,6 +273,10 @@ static void walk_close_cb(uv_handle_t *handle, void *arg) {
     if (uv_is_closing(handle)) return;
     if (handle->type == UV_TCP && handle != (uv_handle_t *)&srv->listener)
         close_conn((conn_t *)handle);
+    else if (handle->type == UV_ASYNC || handle->type == UV_TIMER)
+        /* gen_request is the sole UV_ASYNC/UV_TIMER owner on this loop;
+         * handles self-close via begin_close after the stream drains. */
+        return;
     else
         uv_close(handle, NULL);
 }
@@ -353,4 +374,23 @@ void http_server_destroy(http_server_t *srv) {
 
 int http_server_port(const http_server_t *srv) {
     return srv ? srv->port : -1;
+}
+
+/* --- conn_io API (used by gen_request) ------------------------------------ */
+
+void http_conn_write(conn_t *c, char *wire, size_t len, bool close_after) {
+    queue_write(c, wire, len, close_after);
+}
+
+size_t http_conn_write_queue_size(conn_t *c) {
+    return uv_stream_get_write_queue_size((uv_stream_t *)&c->handle);
+}
+
+void http_conn_set_observer(conn_t *c, void (*on_gone)(void *), void *ctx) {
+    c->on_gone = on_gone;
+    c->on_gone_ctx = ctx;
+}
+
+void http_conn_close(conn_t *c) {
+    close_conn(c);
 }
