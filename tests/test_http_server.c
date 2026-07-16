@@ -138,6 +138,41 @@ static void test_models_list(void) {
     engine_destroy(&eng);
 }
 
+/* --- Stage 8 tests -------------------------------------------------------- */
+
+static void test_options_preflight(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    srv_fixture_t f = fixture_up(cfg);
+
+    http_client_response_t resp;
+    int rc = http_client_request("127.0.0.1", f.port,
+        "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        &resp);
+    assert(rc == 0);
+    assert(resp.status == 204);
+
+    char val[256];
+    assert(http_client_header(&resp, "Access-Control-Allow-Origin", val, sizeof(val)));
+    assert(strcmp(val, "*") == 0);
+
+    assert(http_client_header(&resp, "Access-Control-Allow-Methods", val, sizeof(val)));
+    assert(strstr(val, "GET") != NULL);
+    assert(strstr(val, "POST") != NULL);
+    assert(strstr(val, "OPTIONS") != NULL);
+
+    assert(http_client_header(&resp, "Access-Control-Allow-Headers", val, sizeof(val)));
+    assert(strstr(val, "Content-Type") != NULL);
+    assert(strstr(val, "Authorization") != NULL);
+
+    assert(resp.body_len == 0);
+
+    http_client_response_free(&resp);
+    fixture_down(&f);
+    engine_destroy(&eng);
+}
+
 /* --- main ----------------------------------------------------------------- */
 
 int main(void) {
@@ -148,6 +183,7 @@ int main(void) {
     test_unknown_route_404();
     test_start_stop_clean();
     test_models_list();
+    test_options_preflight();
     printf("test_http_server: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");
