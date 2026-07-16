@@ -124,7 +124,3 @@ void model_config_free(model_config_t *cfg) {
     cfg->architectures = NULL;
 }
 
-char **model_discover(int *count) {
-    *count = 0;
-    return NULL;
-}

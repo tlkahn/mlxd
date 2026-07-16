@@ -16,7 +16,7 @@ make clean
 make install      # -> /usr/local/bin/mlxd
 ```
 
-Requires: macOS (Apple Silicon), Homebrew mlx-c >= 0.6.0 + mlx >= 0.31.2 + libuv + llhttp, clang with C11 support.
+Requires: macOS (Apple Silicon), Homebrew mlx-c >= 0.6.0 + mlx >= 0.31.2 + libuv + llhttp + libcurl, clang with C11 support.
 
 ## Module graph
 
