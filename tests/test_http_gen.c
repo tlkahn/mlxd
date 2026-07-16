@@ -304,6 +304,27 @@ static void test_chat_prompt_user_content_specials(void) {
     tokenizer_free(tok);
 }
 
+static void test_make_id_format(void) {
+    char *id1 = gen_make_id("chatcmpl-");
+    assert(id1 != NULL);
+    assert(strncmp(id1, "chatcmpl-", 9) == 0);
+    assert(strlen(id1) == 9 + 24);
+    for (int i = 9; i < 33; i++) {
+        char c = id1[i];
+        assert((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+    }
+
+    char *id2 = gen_make_id("cmpl-");
+    assert(id2 != NULL);
+    assert(strncmp(id2, "cmpl-", 5) == 0);
+    assert(strlen(id2) == 5 + 24);
+
+    assert(strcmp(id1, id2) != 0);
+
+    free(id1);
+    free(id2);
+}
+
 static void test_completion_response_roundtrip(void) {
     usage_t u = {.prompt_tokens = 4, .completion_tokens = 6, .total_tokens = 10};
     char *json = gen_build_completion_response("cmpl-1", "gpt2", 1234, "once upon",
@@ -339,6 +360,7 @@ int main(void) {
     test_chat_prompt_bad_template_nulls_ids();
     test_chat_prompt_special_tokens();
     test_chat_prompt_user_content_specials();
+    test_make_id_format();
     test_completion_response_roundtrip();
     printf("test_http_gen: all passed\n");
     return 0;

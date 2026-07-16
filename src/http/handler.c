@@ -1,7 +1,9 @@
 #include "http/handler.h"
+#include "http/gen_request.h"
 #include "core/openai.h"
 #include "registry/registry.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <yyjson/yyjson.h>
@@ -100,9 +102,142 @@ static void handle_embeddings(const http_request_t *req, http_response_t *resp,
                        "Embeddings are not yet implemented");
 }
 
+/* --- POST /v1/chat/completions ------------------------------------------- */
+
+static void handle_chat_completions(const http_request_t *req,
+                                    http_response_t *resp, void *ctx) {
+    serve_ctx_t *sctx = ctx;
+
+    if (!sctx->tokenizer) {
+        respond_json_error(resp, 503, "service_unavailable", "model_not_loaded",
+                           "No model loaded");
+        return;
+    }
+    if (!sctx->chat_template) {
+        respond_json_error(resp, 400, "invalid_request_error", NULL,
+                           "Chat template not configured");
+        return;
+    }
+
+    yyjson_doc *doc = yyjson_read(req->body, req->body_len, 0);
+    if (!doc) {
+        respond_json_error(resp, 400, "invalid_request_error", NULL,
+                           "Invalid JSON in request body");
+        return;
+    }
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    chat_completion_request_t creq = {0};
+    const char *parse_err = NULL;
+    if (chat_completion_request_parse(&creq, root, &parse_err) < 0) {
+        respond_json_error(resp, 400, "invalid_request_error", NULL,
+                           parse_err ? parse_err : "Invalid chat completion request");
+        yyjson_doc_free(doc);
+        return;
+    }
+
+    char *messages_json = yyjson_val_write(yyjson_obj_get(root, "messages"), 0, NULL);
+    yyjson_val *tools_val = yyjson_obj_get(root, "tools");
+    char *tools_json = tools_val ? yyjson_val_write(tools_val, 0, NULL) : NULL;
+
+    gen_params_t params = creq.params;
+    if (params.max_tokens <= 0)
+        params.max_tokens = INT_MAX;
+
+    gen_request_start_params_t p = {
+        .ctx = sctx,
+        .conn = req->ctx,
+        .chat = true,
+        .stream = params.stream,
+        .include_usage = creq.include_usage,
+        .model_id = sctx->model_id,
+        .params = params,
+        .messages_json = messages_json,
+        .tools_json = tools_json,
+    };
+
+    const char *err = NULL;
+    int rc = gen_request_start(&p, &err);
+    if (rc != 0) {
+        respond_json_error(resp, rc, "server_error", NULL,
+                           err ? err : "generation failed");
+        free(messages_json);
+        free(tools_json);
+        chat_completion_request_free(&creq);
+        yyjson_doc_free(doc);
+        return;
+    }
+
+    resp->deferred = true;
+    free(messages_json);
+    free(tools_json);
+    chat_completion_request_free(&creq);
+    yyjson_doc_free(doc);
+}
+
+/* --- POST /v1/completions ------------------------------------------------ */
+
+static void handle_completions(const http_request_t *req,
+                               http_response_t *resp, void *ctx) {
+    serve_ctx_t *sctx = ctx;
+
+    if (!sctx->tokenizer) {
+        respond_json_error(resp, 503, "service_unavailable", "model_not_loaded",
+                           "No model loaded");
+        return;
+    }
+
+    yyjson_doc *doc = yyjson_read(req->body, req->body_len, 0);
+    if (!doc) {
+        respond_json_error(resp, 400, "invalid_request_error", NULL,
+                           "Invalid JSON in request body");
+        return;
+    }
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    completion_request_t creq = {0};
+    const char *parse_err = NULL;
+    if (completion_request_parse(&creq, root, &parse_err) < 0) {
+        respond_json_error(resp, 400, "invalid_request_error", NULL,
+                           parse_err ? parse_err : "Invalid completion request");
+        yyjson_doc_free(doc);
+        return;
+    }
+
+    gen_params_t params = creq.params;
+    if (params.max_tokens <= 0)
+        params.max_tokens = 16;
+
+    gen_request_start_params_t p = {
+        .ctx = sctx,
+        .conn = req->ctx,
+        .chat = false,
+        .stream = params.stream,
+        .model_id = sctx->model_id,
+        .params = params,
+        .prompt = creq.prompt,
+    };
+
+    const char *err = NULL;
+    int rc = gen_request_start(&p, &err);
+    if (rc != 0) {
+        respond_json_error(resp, rc, "server_error", NULL,
+                           err ? err : "generation failed");
+        completion_request_free(&creq);
+        yyjson_doc_free(doc);
+        return;
+    }
+
+    resp->deferred = true;
+    completion_request_free(&creq);
+    yyjson_doc_free(doc);
+}
+
 /* --- Registration -------------------------------------------------------- */
 
 void handler_register_all(http_router_t *router, serve_ctx_t *ctx) {
     http_router_add(router, "GET", "/v1/models", handle_models, ctx);
     http_router_add(router, "POST", "/v1/embeddings", handle_embeddings, ctx);
+    http_router_add(router, "POST", "/v1/chat/completions", handle_chat_completions, ctx);
+    http_router_add(router, "POST", "/v1/completions", handle_completions, ctx);
 }

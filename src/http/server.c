@@ -1,5 +1,6 @@
 #include "http/server.h"
 #include "http/conn.h"
+#include "http/conn_io.h"
 #include "http/handler.h"
 #include "http/response.h"
 #include "http/router.h"
@@ -30,6 +31,8 @@ typedef struct conn {
     http_parser_ctx_t *parser;
     char               rbuf[65536];
     bool               closing;
+    void             (*on_gone)(void *);
+    void              *on_gone_ctx;
 } conn_t;
 
 typedef struct {
@@ -114,6 +117,13 @@ static void alloc_cb(uv_handle_t *handle, size_t suggested, uv_buf_t *buf) {
 static void close_conn(conn_t *c) {
     if (c->closing) return;
     c->closing = true;
+    if (c->on_gone) {
+        void (*cb)(void *) = c->on_gone;
+        void *ctx = c->on_gone_ctx;
+        c->on_gone = NULL;
+        c->on_gone_ctx = NULL;
+        cb(ctx);
+    }
     uv_close((uv_handle_t *)&c->handle, on_conn_close);
 }
 
@@ -256,6 +266,8 @@ static void walk_close_cb(uv_handle_t *handle, void *arg) {
     if (uv_is_closing(handle)) return;
     if (handle->type == UV_TCP && handle != (uv_handle_t *)&srv->listener)
         close_conn((conn_t *)handle);
+    else if (handle->type == UV_ASYNC || handle->type == UV_TIMER)
+        return; /* gen_request-owned; self-closing after drain */
     else
         uv_close(handle, NULL);
 }
@@ -353,4 +365,19 @@ void http_server_destroy(http_server_t *srv) {
 
 int http_server_port(const http_server_t *srv) {
     return srv ? srv->port : -1;
+}
+
+/* --- conn_io API (used by gen_request) ------------------------------------ */
+
+void http_conn_write(conn_t *c, char *wire, size_t len, bool close_after) {
+    queue_write(c, wire, len, close_after);
+}
+
+size_t http_conn_write_queue_size(conn_t *c) {
+    return uv_stream_get_write_queue_size((uv_stream_t *)&c->handle);
+}
+
+void http_conn_set_observer(conn_t *c, void (*on_gone)(void *), void *ctx) {
+    c->on_gone = on_gone;
+    c->on_gone_ctx = ctx;
 }
