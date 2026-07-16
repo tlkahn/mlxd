@@ -28,7 +28,12 @@ static srv_fixture_t fixture_up(http_server_config_t cfg) {
     assert(f.port > 0);
     int rc = pthread_create(&f.th, NULL, server_thread, f.srv);
     assert(rc == 0);
-    usleep(20000);
+    for (int i = 0; i < 500; i++) {
+        int fd = http_client_connect("127.0.0.1", f.port);
+        if (fd >= 0) { close(fd); break; }
+        usleep(1000);
+        assert(i < 499);
+    }
     return f;
 }
 
@@ -504,6 +509,44 @@ static void test_stop_with_open_connections(void) {
     engine_destroy(&eng);
 }
 
+/* --- C3: EBUSY warning on destroy ----------------------------------------- */
+
+static void test_destroy_ebusy_warns(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    http_server_t *srv = http_server_create(&cfg);
+    assert(srv != NULL);
+
+    char tmppath[] = "/tmp/mlxd_test_ebusy_XXXXXX";
+    int tmpfd = mkstemp(tmppath);
+    assert(tmpfd >= 0);
+
+    int saved_stderr = dup(STDERR_FILENO);
+    assert(saved_stderr >= 0);
+    fflush(stderr);
+    dup2(tmpfd, STDERR_FILENO);
+    close(tmpfd);
+
+    http_server_destroy(srv);
+
+    fflush(stderr);
+    dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stderr);
+
+    FILE *f = fopen(tmppath, "r");
+    assert(f != NULL);
+    char buf[1024] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    unlink(tmppath);
+
+    assert(n > 0);
+    assert(strstr(buf, "EBUSY") != NULL);
+
+    engine_destroy(&eng);
+}
+
 /* --- main ----------------------------------------------------------------- */
 
 int main(void) {
@@ -525,6 +568,7 @@ int main(void) {
     test_connection_close();
     test_options_preflight_close();
     test_stop_with_open_connections();
+    test_destroy_ebusy_warns();
     printf("test_http_server: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

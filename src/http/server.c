@@ -4,6 +4,7 @@
 #include "http/response.h"
 #include "http/router.h"
 #include "http/serve_ctx.h"
+#include "core/log.h"
 #include "core/openai.h"
 
 #include <stdlib.h>
@@ -101,6 +102,8 @@ static void write_error(conn_t *c, int status, const char *type, const char *cod
 
 /* --- Connection lifecycle ------------------------------------------------ */
 
+/* Returns the connection's static rbuf. All bytes MUST be consumed
+ * synchronously within on_read before returning to the loop. */
 static void alloc_cb(uv_handle_t *handle, size_t suggested, uv_buf_t *buf) {
     (void)suggested;
     conn_t *c = (conn_t *)handle;
@@ -340,6 +343,7 @@ void http_server_destroy(http_server_t *srv) {
     if (!srv) return;
     int rc = uv_loop_close(&srv->loop);
     if (rc == UV_EBUSY) {
+        log_warn("http_server_destroy: uv_loop_close returned EBUSY, retrying (a handle may have leaked)");
         uv_run(&srv->loop, UV_RUN_NOWAIT);
         uv_loop_close(&srv->loop);
     }

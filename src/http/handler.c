@@ -11,6 +11,7 @@
 static void respond_json_error(http_response_t *resp, int status,
                                const char *type, const char *code,
                                const char *msg) {
+    resp->content_type = "application/json";
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     if (!doc) { resp->status = 500; return; }
     yyjson_mut_val *root = error_envelope_serialize(msg, type, code, doc);
@@ -20,7 +21,6 @@ static void respond_json_error(http_response_t *resp, int status,
     if (!resp->body) { resp->status = 500; return; }
     resp->body_len = strlen(resp->body);
     resp->status = status;
-    resp->content_type = "application/json";
 }
 
 /* --- GET /v1/models ------------------------------------------------------ */
@@ -29,6 +29,7 @@ static void handle_models(const http_request_t *req, http_response_t *resp,
                           void *ctx) {
     (void)req;
     (void)ctx;
+    resp->content_type = "application/json";
 
     int count = 0;
     registry_model_info_t *rl = registry_discover(&count);
@@ -66,7 +67,6 @@ static void handle_models(const http_request_t *req, http_response_t *resp,
     if (!resp->body) { resp->status = 500; return; }
     resp->body_len = strlen(resp->body);
     resp->status = 200;
-    resp->content_type = "application/json";
 }
 
 /* --- POST /v1/embeddings (501 stub) -------------------------------------- */

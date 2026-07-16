@@ -107,7 +107,7 @@ unicode-tables:
 
 clean:
 	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d
-	find src -name '*.tsan.o' -delete
+	find src vendor -name '*.tsan.o' -delete
 	rm -rf build/tsan
 
 install: mlxd
@@ -128,11 +128,18 @@ TSAN_CFLAGS   := -g -O1 -fsanitize=thread
 TSAN_LDFLAGS  := -fsanitize=thread
 TSAN_DIR      := build/tsan
 TSAN_ALL_OBJS := $(SRCS:.c=.tsan.o)
-TSAN_LIB_OBJS := $(filter-out src/main.tsan.o,$(TSAN_ALL_OBJS)) vendor/yyjson/yyjson.o $(JINJA_OBJS)
+JINJA_TSAN_OBJS := $(JINJA_SRCS:.cpp=.tsan.o)
+TSAN_LIB_OBJS := $(filter-out src/main.tsan.o,$(TSAN_ALL_OBJS)) vendor/yyjson/yyjson.tsan.o $(JINJA_TSAN_OBJS)
 
 .PRECIOUS: %.tsan.o
 %.tsan.o: %.c
 	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -c -o $@ $<
+
+vendor/yyjson/yyjson.tsan.o: vendor/yyjson/yyjson.c
+	$(CC) -std=c11 -g -O1 -DNDEBUG -fsanitize=thread -c -o $@ $<
+
+vendor/jinja_cpp/%.tsan.o: vendor/jinja_cpp/%.cpp
+	$(CXX) $(CXXFLAGS) -g -O1 -fsanitize=thread -c -o $@ $<
 
 $(TSAN_DIR)/test_%: tests/test_%.c $(TSAN_LIB_OBJS) | $(TSAN_DIR)
 	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(TSAN_LIB_OBJS) $(ALL_LDFLAGS) $(TSAN_LDFLAGS)
