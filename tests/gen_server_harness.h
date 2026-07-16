@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <pthread.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>
 
 #ifndef MLXD_FIXTURES_DIR
@@ -83,6 +84,24 @@ static uint64_t now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+}
+
+/* Wait until pending unread bytes on fd are positive and stable across
+   consecutive polls, meaning the server's write path is saturated. */
+static void wait_for_socket_saturation(int fd) {
+    int prev = -1, stable = 0;
+    for (int i = 0; i < 500; i++) {
+        int avail = 0;
+        assert(ioctl(fd, FIONREAD, &avail) == 0);
+        if (avail > 0 && avail == prev) {
+            if (++stable >= 5) return;
+        } else {
+            stable = 0;
+        }
+        prev = avail;
+        usleep(10000);
+    }
+    assert(!"socket never saturated");
 }
 
 static int sse_connect_and_post(int port, const char *path, const char *body,

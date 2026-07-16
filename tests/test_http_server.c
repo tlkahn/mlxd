@@ -630,7 +630,7 @@ static void test_stop_drain_deadline_bounded(void) {
     assert(hrc > 0);
     assert(strstr(hdrbuf, "200 OK") != NULL);
 
-    usleep(500000);
+    wait_for_socket_saturation(fd);
 
     uint64_t t0 = now_ms();
     http_server_stop(f.srv);
