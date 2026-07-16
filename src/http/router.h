@@ -29,8 +29,10 @@ typedef void (*http_handler_fn)(const http_request_t *req, http_response_t *resp
 typedef struct http_router http_router_t;
 
 http_router_t *http_router_create(void);
-void http_router_add(http_router_t *r, const char *method, const char *path, http_handler_fn fn,
-                     void *ctx);
+/* Add a route. method/path are borrowed and must outlive the router (string
+ * literals expected). Returns 0 on success, -1 on NULL router or OOM. */
+int http_router_add(http_router_t *r, const char *method, const char *path, http_handler_fn fn,
+                    void *ctx);
 http_handler_fn http_router_match(const http_router_t *r, const char *method, const char *path,
                                   void **ctx);
 bool http_router_path_exists(const http_router_t *r, const char *path);

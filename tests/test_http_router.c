@@ -63,6 +63,19 @@ static void test_multiple_routes(void) {
     http_router_destroy(r);
 }
 
+static void test_add_returns_zero_on_success(void) {
+    http_router_t *r = http_router_create();
+    assert(r != NULL);
+    int rc = http_router_add(r, "GET", "/a", h1, NULL);
+    assert(rc == 0);
+    http_router_destroy(r);
+}
+
+static void test_add_returns_negative_on_null(void) {
+    int rc = http_router_add(NULL, "GET", "/a", h1, NULL);
+    assert(rc == -1);
+}
+
 static void test_destroy_empty(void) {
     http_router_t *r = http_router_create();
     assert(r != NULL);
@@ -74,6 +87,8 @@ int main(void) {
     test_unknown_path();
     test_known_path_wrong_method();
     test_multiple_routes();
+    test_add_returns_zero_on_success();
+    test_add_returns_negative_on_null();
     test_destroy_empty();
     printf("test_http_router: all passed\n");
     return 0;
