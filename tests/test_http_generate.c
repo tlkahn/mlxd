@@ -587,6 +587,7 @@ static void test_server_stop_during_stream(void) {
      * and doesn't cause EBUSY on uv_loop_close. */
     fixture_down(&f);
 
+    /* Server side is already gone; close() only releases the local fd. */
     close(fd);
 }
 

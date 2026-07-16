@@ -137,6 +137,7 @@ char *gen_sse_error(const char *msg) {
     return sse;
 }
 
+/* macOS/BSD libc; also glibc >= 2.36. Link-time dependency only. */
 extern void arc4random_buf(void *buf, size_t nbytes);
 
 char *gen_make_id(const char *prefix) {

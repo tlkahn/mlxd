@@ -178,6 +178,7 @@ static void http_client_response_free(http_client_response_t *r) {
     r->body_len = 0;
 }
 
+/* Byte-by-byte to stop exactly at \r\n\r\n without swallowing body bytes. */
 static int http_client_recv_headers(int fd, char *out, size_t cap) {
     size_t total = 0;
     while (total < cap - 1) {

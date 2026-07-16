@@ -96,7 +96,8 @@ int gen_request_start(const gen_request_start_params_t *p, const char **err) {
     int32_t *ids = NULL;
     int n_ids;
 
-    /* Phase (a): prechecks + prompt build */
+    /* Defense-in-depth: handler.c gates these with richer error codes;
+     * these catch direct calls that bypass the handler (e.g. tests). */
     if (!p->ctx->tokenizer) {
         *err = "model not loaded";
         return 503;
@@ -269,6 +270,14 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
         return;
     }
 
+    if (!gr->sse && flush_out && flush_len > 0) {
+        if (accum_append(gr, flush_out, flush_len) != 0) {
+            free(flush_out);
+            finish_error(gr, strdup("out of memory"));
+            return;
+        }
+    }
+
     conn_t *conn = detach_conn(gr);
     if (conn) {
         if (gr->suppress_writes) {
@@ -340,9 +349,6 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
             else
                 http_conn_close(conn);
         } else {
-            if (flush_out && flush_len > 0)
-                accum_append(gr, flush_out, flush_len);
-
             usage_t u = {
                 .prompt_tokens = gr->prompt_tokens,
                 .completion_tokens = gr->completion_tokens,
@@ -444,8 +450,13 @@ static void gen_on_async(uv_async_t *handle) {
                     stream_cancel(gr->stream);
                 }
             } else {
-                if (piece && piece_len > 0)
-                    accum_append(gr, piece, piece_len);
+                if (piece && piece_len > 0 &&
+                    accum_append(gr, piece, piece_len) != 0) {
+                    free(piece);
+                    stream_cancel(gr->stream);
+                    finish_error(gr, strdup("out of memory"));
+                    return;
+                }
             }
             free(piece);
             break;
@@ -482,7 +493,7 @@ static void try_teardown(gen_request_t *gr) {
         gr->timer_inited = true;
         uv_timer_init(gr->async.loop, &gr->timer);
         gr->timer.data = gr;
-        uv_timer_start(&gr->timer, on_timer, 1, 1);
+        uv_timer_start(&gr->timer, on_timer, 20, 20);
     }
 }
 
