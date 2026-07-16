@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 #include <yyjson/yyjson.h>
 
 #ifndef MLXD_FIXTURES_DIR
@@ -691,6 +692,166 @@ static void test_disconnect_no_model(void) {
     fixture_down(&f);
 }
 
+/* --- 14a: pipelined gen requests produce single response ----------------- */
+
+static void test_pipelined_gen_requests_single_response(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    int fd = http_client_connect("127.0.0.1", f.port);
+    assert(fd >= 0);
+
+    struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    const char *body = "{\"model\":\"gpt2\",\"messages\":"
+                       "[{\"role\":\"user\",\"content\":\"hello\"}]}";
+    size_t blen = strlen(body);
+    char raw[8192];
+    snprintf(raw, sizeof(raw),
+        "POST /v1/chat/completions HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n"
+        "%s"
+        "POST /v1/chat/completions HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n"
+        "%s",
+        blen, body, blen, body);
+
+    assert(http_client_send_all(fd, raw, strlen(raw)) == 0);
+
+    char resp[65536];
+    size_t total = 0;
+    while (total < sizeof(resp) - 1) {
+        ssize_t n = read(fd, resp + total, sizeof(resp) - 1 - total);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    resp[total] = '\0';
+    close(fd);
+
+    int count = 0;
+    const char *p = resp;
+    while ((p = strstr(p, "HTTP/1.1")) != NULL) {
+        count++;
+        p += 8;
+    }
+    assert(count == 1);
+    assert(strstr(resp, "HTTP/1.1 200") != NULL);
+    assert(strstr(resp, "Connection: close") != NULL);
+
+    fixture_down(&f);
+}
+
+/* --- 14b: chat empty generation -> content:"" not null ------------------- */
+
+static void test_chat_empty_generation_content_empty_string(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"\"}]}");
+    assert(resp.status == 200);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+
+    yyjson_val *choices = yyjson_obj_get(root, "choices");
+    assert(yyjson_arr_size(choices) == 1);
+    yyjson_val *c0 = yyjson_arr_get(choices, 0);
+    yyjson_val *msg = yyjson_obj_get(c0, "message");
+    yyjson_val *content_val = yyjson_obj_get(msg, "content");
+    assert(content_val != NULL);
+    assert(yyjson_is_str(content_val));
+    assert(strcmp(yyjson_get_str(content_val), "") == 0);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    fixture_down(&f);
+}
+
+/* --- 14c: completion empty generation -> text:"" not missing ------------- */
+
+static void test_completion_empty_generation_text_field(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    http_client_response_t resp = post_json(f.port, "/v1/completions",
+        "{\"model\":\"gpt2\",\"prompt\":\"\"}");
+    assert(resp.status == 200);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+
+    yyjson_val *choices = yyjson_obj_get(root, "choices");
+    assert(yyjson_arr_size(choices) == 1);
+    yyjson_val *c0 = yyjson_arr_get(choices, 0);
+    yyjson_val *text_val = yyjson_obj_get(c0, "text");
+    assert(text_val != NULL);
+    assert(yyjson_is_str(text_val));
+    assert(strcmp(yyjson_get_str(text_val), "") == 0);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    fixture_down(&f);
+}
+
+/* --- 14d: SSE chat zero-token -> role chunk emitted ---------------------- */
+
+static void test_chat_sse_zero_token_role_chunk(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"\"}],"
+        "\"stream\":true}",
+        hdrbuf, sizeof(hdrbuf));
+
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    char evbuf[4096];
+    bool got_role = false;
+    bool got_finish = false;
+    bool got_done = false;
+
+    while (!got_done) {
+        int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+        assert(n > 0);
+
+        if (strncmp(evbuf, "data: [DONE]", 12) == 0) {
+            got_done = true;
+            break;
+        }
+
+        yyjson_doc *doc = parse_sse_json(evbuf);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        yyjson_val *choices = yyjson_obj_get(root, "choices");
+        if (yyjson_arr_size(choices) > 0) {
+            yyjson_val *c0 = yyjson_arr_get(choices, 0);
+            yyjson_val *delta = yyjson_obj_get(c0, "delta");
+            const char *role = yyjson_get_str(yyjson_obj_get(delta, "role"));
+            if (role && strcmp(role, "assistant") == 0)
+                got_role = true;
+            yyjson_val *fr = yyjson_obj_get(c0, "finish_reason");
+            if (fr && !yyjson_is_null(fr))
+                got_finish = true;
+        }
+        yyjson_doc_free(doc);
+    }
+
+    assert(got_role);
+    assert(got_finish);
+    assert(got_done);
+
+    close(fd);
+    fixture_down(&f);
+}
+
 /* --- main ---------------------------------------------------------------- */
 
 int main(void) {
@@ -715,6 +876,10 @@ int main(void) {
     test_client_disconnect_cancels();
     test_server_stop_during_stream();
     test_disconnect_no_model();
+    test_pipelined_gen_requests_single_response();
+    test_chat_empty_generation_content_empty_string();
+    test_completion_empty_generation_text_field();
+    test_chat_sse_zero_token_role_chunk();
     printf("test_http_generate: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

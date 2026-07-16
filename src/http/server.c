@@ -31,6 +31,7 @@ typedef struct conn {
     http_parser_ctx_t *parser;
     char               rbuf[65536];
     bool               closing;
+    bool               gen_owned;
     void             (*on_gone)(void *);
     void              *on_gone_ctx;
 } conn_t;
@@ -170,6 +171,8 @@ static void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     }
     if (nread == 0) return;
 
+    if (c->gen_owned) return;
+
     size_t off = 0;
     while (off < (size_t)nread && !c->closing) {
         http_parsed_request_t pr = {0};
@@ -189,7 +192,7 @@ static void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
         case HTTP_PARSE_COMPLETE:
             off += http_parser_consumed(c->parser);
             dispatch(c, &pr);
-            if (!pr.keep_alive || c->closing) return;
+            if (!pr.keep_alive || c->closing || c->gen_owned) return;
             http_parser_reset(c->parser);
             break;
         }
@@ -225,7 +228,10 @@ static void dispatch(conn_t *c, http_parsed_request_t *pr) {
         http_response_t resp = {0};
         handler(&req, &resp, handler_ctx);
 
-        if (resp.deferred) return;
+        if (resp.deferred) {
+            c->gen_owned = true;
+            return;
+        }
 
         size_t wire_len = 0;
         char *wire = http_build_response(resp.status, resp.content_type,

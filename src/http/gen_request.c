@@ -278,10 +278,13 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
                 if (gr->chat) {
                     char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
                         .id = gr->id, .model = gr->model_id, .created = gr->created,
+                        .role_first = !gr->role_sent,
                         .delta_text = flush_out,
                     });
-                    if (sse)
+                    if (sse) {
                         http_conn_write(conn, sse, strlen(sse), false);
+                        gr->role_sent = true;
+                    }
                 } else {
                     char *sse = gen_sse_completion_chunk(&(gen_sse_completion_chunk_params_t){
                         .id = gr->id, .model = gr->model_id, .created = gr->created,
@@ -293,6 +296,15 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
             }
 
             if (gr->chat) {
+                if (!gr->role_sent) {
+                    char *role_sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+                        .id = gr->id, .model = gr->model_id, .created = gr->created,
+                        .role_first = true,
+                    });
+                    if (role_sse)
+                        http_conn_write(conn, role_sse, strlen(role_sse), false);
+                }
+
                 char *final_sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
                     .id = gr->id, .model = gr->model_id, .created = gr->created,
                     .final = true, .reason = reason,
@@ -336,13 +348,14 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
                 .completion_tokens = gr->completion_tokens,
                 .total_tokens = gr->prompt_tokens + gr->completion_tokens,
             };
+            const char *text = gr->accum ? gr->accum : "";
             char *json;
             if (gr->chat) {
                 json = gen_build_chat_response(gr->id, gr->model_id, gr->created,
-                                               gr->accum, reason, &u);
+                                               text, reason, &u);
             } else {
                 json = gen_build_completion_response(gr->id, gr->model_id, gr->created,
-                                                     gr->accum, reason, &u);
+                                                     text, reason, &u);
             }
             if (json) {
                 size_t wire_len;
