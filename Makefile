@@ -117,7 +117,10 @@ install: mlxd
 compile_commands.json: Makefile
 	bear -- $(MAKE) clean mlxd
 
-.PHONY: test test-gpu test-tsan clean install analyze coverage clean-coverage unicode-tables
+test-leaks: tests/test_http_server
+	leaks --atExit -- ./tests/test_http_server
+
+.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage clean-coverage unicode-tables
 
 # --- Thread Sanitizer tests ---------------------------------------------------
 

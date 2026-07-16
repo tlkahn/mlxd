@@ -436,6 +436,41 @@ static void test_connection_close(void) {
     engine_destroy(&eng);
 }
 
+static void test_stop_with_open_connections(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    srv_fixture_t f = fixture_up(cfg);
+
+    int fd1 = http_client_connect("127.0.0.1", f.port);
+    assert(fd1 >= 0);
+    int fd2 = http_client_connect("127.0.0.1", f.port);
+    assert(fd2 >= 0);
+
+    const char *req =
+        "GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    assert(http_client_send_all(fd1, req, strlen(req)) == 0);
+    assert(http_client_send_all(fd2, req, strlen(req)) == 0);
+
+    http_client_response_t resp1, resp2;
+    assert(http_client_recv_response(fd1, &resp1) == 0);
+    assert(resp1.status == 200);
+    assert(http_client_recv_response(fd2, &resp2) == 0);
+    assert(resp2.status == 200);
+
+    fixture_down(&f);
+
+    char buf[1];
+    assert(read(fd1, buf, 1) <= 0);
+    assert(read(fd2, buf, 1) <= 0);
+
+    http_client_response_free(&resp1);
+    http_client_response_free(&resp2);
+    close(fd1);
+    close(fd2);
+    engine_destroy(&eng);
+}
+
 /* --- main ----------------------------------------------------------------- */
 
 int main(void) {
@@ -455,6 +490,7 @@ int main(void) {
     test_malformed_http_400();
     test_keep_alive_two_requests();
     test_connection_close();
+    test_stop_with_open_connections();
     printf("test_http_server: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

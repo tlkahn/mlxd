@@ -250,21 +250,19 @@ static void on_write(uv_write_t *req, int status) {
 /* --- Stop (walk + close) ------------------------------------------------- */
 
 static void walk_close_cb(uv_handle_t *handle, void *arg) {
-    (void)arg;
-    if (!uv_is_closing(handle)) {
-        if (handle->type == UV_TCP && handle->data == NULL) {
-            uv_close(handle, on_conn_close);
-        } else {
-            uv_close(handle, NULL);
-        }
-    }
+    http_server_t *srv = (http_server_t *)arg;
+    if (uv_is_closing(handle)) return;
+    if (handle->type == UV_TCP && handle != (uv_handle_t *)&srv->listener)
+        close_conn((conn_t *)handle);
+    else
+        uv_close(handle, NULL);
 }
 
 static void on_stop_async(uv_async_t *handle) {
     http_server_t *srv = (http_server_t *)handle->data;
     uv_close((uv_handle_t *)&srv->listener, NULL);
     uv_close((uv_handle_t *)&srv->stop_async, NULL);
-    uv_walk(&srv->loop, walk_close_cb, NULL);
+    uv_walk(&srv->loop, walk_close_cb, srv);
 }
 
 /* --- Public API ---------------------------------------------------------- */
