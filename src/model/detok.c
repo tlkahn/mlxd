@@ -43,6 +43,8 @@ static int emit(detok_t *d, size_t boundary, char **out, size_t *out_len) {
 }
 
 detok_t *detok_create(const tokenizer_t *tok) {
+    if (!tok || tokenizer_type(tok) == TOKENIZER_WORDPIECE)
+        return NULL;
     detok_t *d = calloc(1, sizeof(*d));
     if (!d) return NULL;
     d->tok = tok;

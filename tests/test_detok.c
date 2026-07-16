@@ -220,12 +220,24 @@ static void test_detok_empty_and_free(void) {
     tokenizer_free(tok);
 }
 
+static void test_wordpiece_rejected(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/bert/tokenizer.json");
+    assert(tok != NULL);
+    assert(tokenizer_type(tok) == TOKENIZER_WORDPIECE);
+
+    detok_t *d = detok_create(tok);
+    assert(d == NULL);
+
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_detok_ascii_roundtrip();
     test_detok_matches_full_decode();
     test_detok_holds_incomplete_utf8();
     test_detok_flush_emits_trailing();
     test_detok_empty_and_free();
+    test_wordpiece_rejected();
     printf("test_detok: all passed\n");
     return 0;
 }

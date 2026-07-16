@@ -7,6 +7,9 @@
 typedef struct tokenizer tokenizer_t;
 typedef struct detok detok_t;
 
+/* Create a streaming detokenizer. Supported for byte-level BPE and
+ * SentencePiece only; returns NULL for WordPiece (per-token decode cannot
+ * reproduce WordPiece sequence-state spacing) and for NULL tok. */
 detok_t *detok_create(const tokenizer_t *tok);
 
 /* Feed one token id. *out is a heap-allocated buffer of newly completed UTF-8
