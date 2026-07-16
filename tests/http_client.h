@@ -185,7 +185,7 @@ static int http_client_recv_sse_event(int fd, char *out, size_t cap) {
         if (n <= 0) return -1;
         total += 1;
         out[total] = '\0';
-        if (total >= 4 && memcmp(out + total - 4, "\n\n", 2) == 0)
+        if (total >= 2 && memcmp(out + total - 2, "\n\n", 2) == 0)
             return (int)total;
     }
     return -1;
