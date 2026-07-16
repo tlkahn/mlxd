@@ -41,7 +41,7 @@ int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
     free(rendered);
     if (n < 0) {
         *err = "tokenizer encode failed";
-        return -1;
+        return -2;
     }
     return n;
 }
@@ -124,6 +124,19 @@ char *gen_build_completion_response(const char *id, const char *model, int64_t c
 
     yyjson_mut_val *root = completion_response_serialize(&resp, mdoc);
     return serialize_mut_root(mdoc, root);
+}
+
+char *gen_sse_error(const char *msg) {
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    if (!mdoc) return NULL;
+    yyjson_mut_val *root = error_envelope_serialize(msg, "server_error", NULL, mdoc);
+    yyjson_mut_doc_set_root(mdoc, root);
+    char *json = yyjson_mut_write(mdoc, 0, NULL);
+    yyjson_mut_doc_free(mdoc);
+    if (!json) return NULL;
+    char *sse = sse_format(json, strlen(json));
+    free(json);
+    return sse;
 }
 
 extern uint32_t arc4random(void);

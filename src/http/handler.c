@@ -3,7 +3,6 @@
 #include "core/openai.h"
 #include "registry/registry.h"
 
-#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <yyjson/yyjson.h>
@@ -102,6 +101,14 @@ static void handle_embeddings(const http_request_t *req, http_response_t *resp,
                        "Embeddings are not yet implemented");
 }
 
+static const char *error_type_for_status(int status) {
+    switch (status) {
+    case 400: return "invalid_request_error";
+    case 503: return "service_unavailable";
+    default:  return "server_error";
+    }
+}
+
 /* --- POST /v1/chat/completions ------------------------------------------- */
 
 static void handle_chat_completions(const http_request_t *req,
@@ -136,22 +143,25 @@ static void handle_chat_completions(const http_request_t *req,
         return;
     }
 
+    if (!sampling_params_validate(&creq.params.sampling, &parse_err)) {
+        respond_json_error(resp, 400, "invalid_request_error", NULL, parse_err);
+        chat_completion_request_free(&creq);
+        yyjson_doc_free(doc);
+        return;
+    }
+
     char *messages_json = yyjson_val_write(yyjson_obj_get(root, "messages"), 0, NULL);
     yyjson_val *tools_val = yyjson_obj_get(root, "tools");
     char *tools_json = tools_val ? yyjson_val_write(tools_val, 0, NULL) : NULL;
-
-    gen_params_t params = creq.params;
-    if (params.max_tokens <= 0)
-        params.max_tokens = INT_MAX;
 
     gen_request_start_params_t p = {
         .ctx = sctx,
         .conn = req->ctx,
         .chat = true,
-        .stream = params.stream,
+        .stream = creq.params.stream,
         .include_usage = creq.include_usage,
         .model_id = sctx->model_id,
-        .params = params,
+        .params = creq.params,
         .messages_json = messages_json,
         .tools_json = tools_json,
     };
@@ -159,7 +169,7 @@ static void handle_chat_completions(const http_request_t *req,
     const char *err = NULL;
     int rc = gen_request_start(&p, &err);
     if (rc != 0) {
-        respond_json_error(resp, rc, "server_error", NULL,
+        respond_json_error(resp, rc, error_type_for_status(rc), NULL,
                            err ? err : "generation failed");
         free(messages_json);
         free(tools_json);
@@ -204,24 +214,27 @@ static void handle_completions(const http_request_t *req,
         return;
     }
 
-    gen_params_t params = creq.params;
-    if (params.max_tokens <= 0)
-        params.max_tokens = 16;
+    if (!sampling_params_validate(&creq.params.sampling, &parse_err)) {
+        respond_json_error(resp, 400, "invalid_request_error", NULL, parse_err);
+        completion_request_free(&creq);
+        yyjson_doc_free(doc);
+        return;
+    }
 
     gen_request_start_params_t p = {
         .ctx = sctx,
         .conn = req->ctx,
         .chat = false,
-        .stream = params.stream,
+        .stream = creq.params.stream,
         .model_id = sctx->model_id,
-        .params = params,
+        .params = creq.params,
         .prompt = creq.prompt,
     };
 
     const char *err = NULL;
     int rc = gen_request_start(&p, &err);
     if (rc != 0) {
-        respond_json_error(resp, rc, "server_error", NULL,
+        respond_json_error(resp, rc, error_type_for_status(rc), NULL,
                            err ? err : "generation failed");
         completion_request_free(&creq);
         yyjson_doc_free(doc);

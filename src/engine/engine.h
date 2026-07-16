@@ -34,6 +34,7 @@ bool      stream_next(stream_t *s, chunk_t *out, int timeout_ms);
  * after the last chunk it returns false. */
 void      stream_cancel(stream_t *s);
 void      stream_set_notify(stream_t *s, void (*cb)(void *), void *ctx);
+bool      stream_sole_owner(const stream_t *s);
 
 /* --- Engine commands ------------------------------------------------------ */
 

@@ -73,6 +73,7 @@ static char *build_error_wire(int status, const char *type, const char *code,
 /* --- Write helpers ------------------------------------------------------- */
 
 static void queue_write(conn_t *c, char *wire, size_t wire_len, bool close_after) {
+    if (c->closing) { free(wire); return; }
     write_req_t *wr = malloc(sizeof(*wr));
     if (!wr) {
         free(wire);
@@ -267,7 +268,9 @@ static void walk_close_cb(uv_handle_t *handle, void *arg) {
     if (handle->type == UV_TCP && handle != (uv_handle_t *)&srv->listener)
         close_conn((conn_t *)handle);
     else if (handle->type == UV_ASYNC || handle->type == UV_TIMER)
-        return; /* gen_request-owned; self-closing after drain */
+        /* gen_request is the sole UV_ASYNC/UV_TIMER owner on this loop;
+         * handles self-close via begin_close after the stream drains. */
+        return;
     else
         uv_close(handle, NULL);
 }
@@ -380,4 +383,8 @@ size_t http_conn_write_queue_size(conn_t *c) {
 void http_conn_set_observer(conn_t *c, void (*on_gone)(void *), void *ctx) {
     c->on_gone = on_gone;
     c->on_gone_ctx = ctx;
+}
+
+void http_conn_close(conn_t *c) {
+    close_conn(c);
 }

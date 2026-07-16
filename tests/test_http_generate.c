@@ -589,6 +589,87 @@ static void test_server_stop_during_stream(void) {
     close(fd);
 }
 
+/* --- 11a: negative temperature -> 400 (#10) ------------------------------ */
+
+static void test_bad_temperature_400(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":-1}");
+    assert(resp.status == 400);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err);
+    const char *type = yyjson_get_str(yyjson_obj_get(err, "type"));
+    assert(type && strcmp(type, "invalid_request_error") == 0);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    fixture_down(&f);
+}
+
+/* --- 11b: bad top_p on completions -> 400 (#10) -------------------------- */
+
+static void test_bad_top_p_completions_400(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    http_client_response_t resp = post_json(f.port, "/v1/completions",
+        "{\"model\":\"gpt2\",\"prompt\":\"hello\",\"top_p\":2.0}");
+    assert(resp.status == 400);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    fixture_down(&f);
+}
+
+/* --- 11c: n/logprobs/stop silently ignored (#10 policy pin) -------------- */
+
+static void test_ignored_params_succeed(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"n\":3,\"logprobs\":true,\"stop\":[\"x\"]}");
+    assert(resp.status == 200);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc);
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    fixture_down(&f);
+}
+
+/* --- 11d: error type maps from status (#9) ------------------------------- */
+
+static void test_no_model_error_type(void) {
+    gen_fixture_t f = fixture_up(false, true, TRIVIAL_TMPL);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+    assert(resp.status == 500);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err);
+    const char *type = yyjson_get_str(yyjson_obj_get(err, "type"));
+    assert(type && strcmp(type, "server_error") == 0);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    fixture_down(&f);
+}
+
 /* --- 13c: disconnect on no-model path ------------------------------------ */
 
 static void test_disconnect_no_model(void) {
@@ -627,6 +708,10 @@ int main(void) {
     test_chat_sse_sequence();
     test_chat_sse_include_usage();
     test_completion_sse_sequence();
+    test_bad_temperature_400();
+    test_bad_top_p_completions_400();
+    test_ignored_params_succeed();
+    test_no_model_error_type();
     test_client_disconnect_cancels();
     test_server_stop_during_stream();
     test_disconnect_no_model();

@@ -110,6 +110,10 @@ void stream_set_notify(stream_t *s, void (*cb)(void *), void *ctx) {
     pthread_mutex_unlock(&s->mtx);
 }
 
+bool stream_sole_owner(const stream_t *s) {
+    return atomic_load(&s->refcount) == 1;
+}
+
 /* ---- Stream helpers (static) --------------------------------------------- */
 
 static bool stream_push_error(stream_t *s, const char *msg) {

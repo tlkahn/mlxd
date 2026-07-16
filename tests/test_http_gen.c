@@ -378,6 +378,19 @@ static void test_completion_response_roundtrip(void) {
     free(json);
 }
 
+static void test_sse_error_format(void) {
+    char *sse = gen_sse_error("something went wrong");
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err != NULL);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(err, "message")), "something went wrong") == 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(err, "type")), "server_error") == 0);
+    yyjson_doc_free(doc);
+    free(sse);
+}
+
 int main(void) {
     test_chat_prompt_matches_direct();
     test_completion_prompt();
@@ -399,6 +412,7 @@ int main(void) {
     test_sse_completion_chunk_delta();
     test_sse_completion_chunk_final();
     test_completion_response_roundtrip();
+    test_sse_error_format();
     printf("test_http_gen: all passed\n");
     return 0;
 }

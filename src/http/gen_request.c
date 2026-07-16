@@ -29,6 +29,7 @@ typedef struct gen_request {
     detok_t     *detok;
     gr_state_t   state;
     bool         conn_gone;
+    bool         suppress_writes;
     conn_t      *conn;
 
     bool         chat;
@@ -79,12 +80,23 @@ static int accum_append(gen_request_t *gr, const char *s, size_t len) {
     return 0;
 }
 
+/* --- Detach connection ---------------------------------------------------- */
+
+static conn_t *detach_conn(gen_request_t *gr) {
+    if (!gr->conn) return NULL;
+    http_conn_set_observer(gr->conn, NULL, NULL);
+    conn_t *c = gr->conn;
+    gr->conn = NULL;
+    return c;
+}
+
 /* --- Start ---------------------------------------------------------------- */
 
 int gen_request_start(const gen_request_start_params_t *p, const char **err) {
     int32_t *ids = NULL;
     int n_ids;
 
+    /* Phase (a): prechecks + prompt build */
     if (!p->ctx->tokenizer) {
         *err = "model not loaded";
         return 503;
@@ -101,37 +113,52 @@ int gen_request_start(const gen_request_start_params_t *p, const char **err) {
     } else {
         n_ids = gen_build_completion_prompt(p->ctx->tokenizer, p->prompt, &ids, err);
     }
-    if (n_ids < 0) return 500;
+    if (n_ids < 0) {
+        if (n_ids == -1 && p->chat)
+            return 400;
+        return 500;
+    }
+
+    /* Phase (b): all fallible allocations - single goto unwind, no uv handles */
+    engine_cmd_t *cmd = NULL;
+    char *sse_head = NULL;
+    size_t sse_head_len = 0;
+    detok_t *dt = NULL;
 
     stream_t *s = stream_create(64);
-    if (!s) {
-        free(ids);
-        *err = "out of memory";
-        return 500;
-    }
+    if (!s) { *err = "out of memory"; goto fail_pre_gr; }
     stream_retain(s);
 
-    detok_t *dt = detok_create(p->ctx->tokenizer);
-    if (!dt) {
-        stream_release(s);
-        stream_release(s);
-        free(ids);
-        *err = "detokenizer init failed";
-        return 500;
-    }
+    dt = detok_create(p->ctx->tokenizer);
+    if (!dt) { *err = "detokenizer init failed"; goto fail_pre_gr; }
 
     gen_request_t *gr = calloc(1, sizeof(*gr));
-    if (!gr) {
-        detok_free(dt);
-        stream_release(s);
-        stream_release(s);
-        free(ids);
-        *err = "out of memory";
-        return 500;
-    }
+    if (!gr) { *err = "out of memory"; goto fail_pre_gr; }
 
     gr->stream = s;
     gr->detok = dt;
+    s = NULL;
+    dt = NULL;
+
+    gr->id = gen_make_id(p->chat ? "chatcmpl-" : "cmpl-");
+    if (!gr->id) { *err = "out of memory"; goto fail_gr; }
+
+    gr->model_id = strdup(p->model_id ? p->model_id : "unknown");
+    if (!gr->model_id) { *err = "out of memory"; goto fail_gr; }
+
+    gen_params_t params = p->params;
+    if (params.max_tokens <= 0)
+        params.max_tokens = p->chat ? INT_MAX : 16;
+
+    cmd = calloc(1, sizeof(*cmd));
+    if (!cmd) { *err = "out of memory"; goto fail_gr; }
+
+    if (p->stream) {
+        sse_head = http_build_sse_head(&sse_head_len);
+        if (!sse_head) { *err = "out of memory"; goto fail_gr; }
+    }
+
+    /* Phase (c): uv_async_init - after this, handle must self-close */
     gr->state = GR_RUNNING;
     gr->conn = p->conn;
     gr->chat = p->chat;
@@ -139,48 +166,51 @@ int gen_request_start(const gen_request_start_params_t *p, const char **err) {
     gr->include_usage = p->include_usage;
     gr->prompt_tokens = n_ids;
     gr->created = time(NULL);
-    gr->id = gen_make_id(p->chat ? "chatcmpl-" : "cmpl-");
-    gr->model_id = strdup(p->model_id ? p->model_id : "unknown");
 
-    uv_async_init(p->ctx->loop, &gr->async, gen_on_async);
+    if (uv_async_init(p->ctx->loop, &gr->async, gen_on_async) != 0) {
+        *err = "uv_async_init failed";
+        goto fail_gr;
+    }
     gr->async.data = gr;
 
-    gen_params_t params = p->params;
-    if (params.max_tokens <= 0) {
-        params.max_tokens = p->chat ? INT_MAX : 16;
-    }
-
-    stream_set_notify(s, notify_cb, gr);
-
-    engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
-    if (!cmd) {
-        detok_free(dt);
-        stream_release(s);
-        stream_release(s);
-        free(gr->id);
-        free(gr->model_id);
-        free(gr);
-        free(ids);
-        *err = "out of memory";
-        return 500;
-    }
+    /* Phase (d): wire up and post - past point of no return */
     cmd->tag = CMD_GENERATE;
     cmd->generate.params = params;
+    cmd->generate.params.stop = NULL;
+    cmd->generate.params.stop_count = 0;
     cmd->generate.token_ids = ids;
     cmd->generate.token_count = n_ids;
-    cmd->generate.stream = s;
+    cmd->generate.stream = gr->stream;
 
+    stream_set_notify(gr->stream, notify_cb, gr);
     http_conn_set_observer(p->conn, on_conn_gone, gr);
     engine_post(p->ctx->engine, cmd);
 
-    if (gr->sse) {
-        size_t hlen;
-        char *head = http_build_sse_head(&hlen);
-        if (head)
-            http_conn_write(p->conn, head, hlen, false);
-    }
+    if (sse_head)
+        http_conn_write(p->conn, sse_head, sse_head_len, false);
 
     return 0;
+
+fail_gr:
+    free(sse_head);
+    free(cmd);
+    free(gr->id);
+    free(gr->model_id);
+    detok_free(gr->detok);
+    if (gr->stream) {
+        stream_release(gr->stream);
+        stream_release(gr->stream);
+    }
+    free(gr);
+    goto done;
+
+fail_pre_gr:
+    if (dt) detok_free(dt);
+    if (s) { stream_release(s); stream_release(s); }
+
+done:
+    free(ids);
+    return 500;
 }
 
 /* --- Notify callback (engine thread -> loop thread) ----------------------- */
@@ -193,10 +223,9 @@ static void notify_cb(void *ctx) {
 /* --- Async drain (loop thread) -------------------------------------------- */
 
 static void emit_sse_chunk(gen_request_t *gr, const char *text, size_t len) {
-    if (gr->conn_gone) return;
+    if (gr->conn_gone || !gr->conn || gr->suppress_writes) return;
     if (gr->chat) {
         if (!gr->role_sent) {
-            gr->role_sent = true;
             char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
                 .id = gr->id, .model = gr->model_id, .created = gr->created,
                 .role_first = true,
@@ -204,8 +233,10 @@ static void emit_sse_chunk(gen_request_t *gr, const char *text, size_t len) {
             });
             if (sse) {
                 http_conn_write(gr->conn, sse, strlen(sse), false);
+                gr->role_sent = true;
                 return;
             }
+            return;
         }
         if (len > 0) {
             char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
@@ -227,15 +258,39 @@ static void emit_sse_chunk(gen_request_t *gr, const char *text, size_t len) {
     }
 }
 
+static void finish_error(gen_request_t *gr, char *msg);
+
 static void finish_response(gen_request_t *gr, finish_reason_t reason) {
     char *flush_out = NULL;
     size_t flush_len = 0;
-    detok_flush(gr->detok, &flush_out, &flush_len);
+    if (detok_flush(gr->detok, &flush_out, &flush_len) != 0) {
+        free(flush_out);
+        finish_error(gr, strdup("detokenizer flush error"));
+        return;
+    }
 
-    if (!gr->conn_gone) {
-        if (gr->sse) {
-            if (flush_out && flush_len > 0)
-                emit_sse_chunk(gr, flush_out, flush_len);
+    conn_t *conn = detach_conn(gr);
+    if (conn) {
+        if (gr->suppress_writes) {
+            http_conn_close(conn);
+        } else if (gr->sse) {
+            if (flush_out && flush_len > 0) {
+                if (gr->chat) {
+                    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+                        .id = gr->id, .model = gr->model_id, .created = gr->created,
+                        .delta_text = flush_out,
+                    });
+                    if (sse)
+                        http_conn_write(conn, sse, strlen(sse), false);
+                } else {
+                    char *sse = gen_sse_completion_chunk(&(gen_sse_completion_chunk_params_t){
+                        .id = gr->id, .model = gr->model_id, .created = gr->created,
+                        .delta_text = flush_out,
+                    });
+                    if (sse)
+                        http_conn_write(conn, sse, strlen(sse), false);
+                }
+            }
 
             if (gr->chat) {
                 char *final_sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
@@ -243,7 +298,7 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
                     .final = true, .reason = reason,
                 });
                 if (final_sse)
-                    http_conn_write(gr->conn, final_sse, strlen(final_sse), false);
+                    http_conn_write(conn, final_sse, strlen(final_sse), false);
 
                 if (gr->include_usage) {
                     usage_t u = {
@@ -256,7 +311,7 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
                         .include_usage = true, .usage = &u,
                     });
                     if (usage_sse)
-                        http_conn_write(gr->conn, usage_sse, strlen(usage_sse), false);
+                        http_conn_write(conn, usage_sse, strlen(usage_sse), false);
                 }
             } else {
                 char *final_sse = gen_sse_completion_chunk(&(gen_sse_completion_chunk_params_t){
@@ -264,14 +319,14 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
                     .final = true, .reason = reason,
                 });
                 if (final_sse)
-                    http_conn_write(gr->conn, final_sse, strlen(final_sse), false);
+                    http_conn_write(conn, final_sse, strlen(final_sse), false);
             }
 
             char *done = sse_done();
-            if (done) {
-                http_conn_set_observer(gr->conn, NULL, NULL);
-                http_conn_write(gr->conn, done, strlen(done), true);
-            }
+            if (done)
+                http_conn_write(conn, done, strlen(done), true);
+            else
+                http_conn_close(conn);
         } else {
             if (flush_out && flush_len > 0)
                 accum_append(gr, flush_out, flush_len);
@@ -294,29 +349,33 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
                 char *wire = http_build_response(200, "application/json", json,
                                                  strlen(json), false, &wire_len);
                 free(json);
-                if (wire) {
-                    http_conn_set_observer(gr->conn, NULL, NULL);
-                    http_conn_write(gr->conn, wire, wire_len, true);
-                }
+                if (wire)
+                    http_conn_write(conn, wire, wire_len, true);
+                else
+                    http_conn_close(conn);
+            } else {
+                http_conn_close(conn);
             }
         }
     }
     free(flush_out);
-    gr->conn = NULL;
     try_teardown(gr);
 }
 
 static void finish_error(gen_request_t *gr, char *msg) {
-    if (!gr->conn_gone) {
-        if (gr->sse) {
-            char *sse_msg = sse_format(msg, strlen(msg));
-            if (sse_msg)
-                http_conn_write(gr->conn, sse_msg, strlen(sse_msg), false);
+    conn_t *conn = detach_conn(gr);
+    if (conn) {
+        if (gr->suppress_writes) {
+            http_conn_close(conn);
+        } else if (gr->sse) {
+            char *sse_err = gen_sse_error(msg);
+            if (sse_err)
+                http_conn_write(conn, sse_err, strlen(sse_err), false);
             char *done = sse_done();
-            if (done) {
-                http_conn_set_observer(gr->conn, NULL, NULL);
-                http_conn_write(gr->conn, done, strlen(done), true);
-            }
+            if (done)
+                http_conn_write(conn, done, strlen(done), true);
+            else
+                http_conn_close(conn);
         } else {
             yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
             if (doc) {
@@ -330,16 +389,19 @@ static void finish_error(gen_request_t *gr, char *msg) {
                     char *wire = http_build_response(500, "application/json", json,
                                                      strlen(json), false, &wire_len);
                     free(json);
-                    if (wire) {
-                        http_conn_set_observer(gr->conn, NULL, NULL);
-                        http_conn_write(gr->conn, wire, wire_len, true);
-                    }
+                    if (wire)
+                        http_conn_write(conn, wire, wire_len, true);
+                    else
+                        http_conn_close(conn);
+                } else {
+                    http_conn_close(conn);
                 }
+            } else {
+                http_conn_close(conn);
             }
         }
     }
     free(msg);
-    gr->conn = NULL;
     try_teardown(gr);
 }
 
@@ -354,12 +416,18 @@ static void gen_on_async(uv_async_t *handle) {
             gr->completion_tokens++;
             char *piece = NULL;
             size_t piece_len = 0;
-            detok_feed(gr->detok, c.token.id, &piece, &piece_len);
+            if (detok_feed(gr->detok, c.token.id, &piece, &piece_len) != 0) {
+                free(piece);
+                stream_cancel(gr->stream);
+                finish_error(gr, strdup("detokenizer error"));
+                return;
+            }
             if (gr->sse) {
                 if (piece && piece_len > 0)
                     emit_sse_chunk(gr, piece, piece_len);
-                if (!gr->conn_gone &&
+                if (!gr->conn_gone && !gr->suppress_writes && gr->conn &&
                     http_conn_write_queue_size(gr->conn) > BACKPRESSURE_HWM) {
+                    gr->suppress_writes = true;
                     stream_cancel(gr->stream);
                 }
             } else {
@@ -393,7 +461,7 @@ static void on_conn_gone(void *ctx) {
 
 static void try_teardown(gen_request_t *gr) {
     if (gr->state == GR_CLOSING) return;
-    if (atomic_load(&gr->stream->refcount) == 1) {
+    if (stream_sole_owner(gr->stream)) {
         begin_close(gr);
         return;
     }
@@ -408,7 +476,7 @@ static void try_teardown(gen_request_t *gr) {
 static void on_timer(uv_timer_t *handle) {
     gen_request_t *gr = handle->data;
     if (gr->state == GR_CLOSING) return;
-    if (atomic_load(&gr->stream->refcount) == 1) {
+    if (stream_sole_owner(gr->stream)) {
         uv_timer_stop(&gr->timer);
         begin_close(gr);
     }
@@ -416,6 +484,7 @@ static void on_timer(uv_timer_t *handle) {
 
 static void begin_close(gen_request_t *gr) {
     gr->state = GR_CLOSING;
+    stream_set_notify(gr->stream, NULL, NULL);
     stream_release(gr->stream);
     gr->stream = NULL;
     detok_free(gr->detok);
