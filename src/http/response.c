@@ -21,6 +21,10 @@ const char *http_status_reason(int status) {
 
 char *http_build_response(int status, const char *content_type, const char *body,
                           size_t body_len, bool keep_alive, size_t *out_len) {
+    if (!content_type) return NULL;
+    for (const char *p = content_type; *p; p++)
+        if (*p == '\r' || *p == '\n') return NULL;
+
     const char *reason = http_status_reason(status);
     const char *conn = keep_alive ? "keep-alive" : "close";
 

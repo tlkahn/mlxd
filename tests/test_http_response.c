@@ -63,6 +63,19 @@ static void test_unknown_status(void) {
     free(r);
 }
 
+static void test_header_injection_rejected(void) {
+    size_t out_len = 0;
+    char *r = http_build_response(200, "text/plain\r\nX-Injected: yes", "ok", 2,
+                                   true, &out_len);
+    assert(r == NULL);
+}
+
+static void test_null_content_type_rejected(void) {
+    size_t out_len = 0;
+    char *r = http_build_response(200, NULL, "ok", 2, true, &out_len);
+    assert(r == NULL);
+}
+
 static void test_null_body(void) {
     size_t out_len = 0;
     char *r = http_build_response(204, "text/plain", NULL, 0, true, &out_len);
@@ -77,6 +90,8 @@ int main(void) {
     test_connection_close();
     test_sse_head();
     test_unknown_status();
+    test_header_injection_rejected();
+    test_null_content_type_rejected();
     test_null_body();
     printf("test_http_response: all passed\n");
     return 0;
