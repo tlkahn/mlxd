@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* TODO(epic-c): embedded newlines produce invalid SSE framing; split into
+ * multiple "data:" lines per the SSE spec. */
 char *sse_format(const char *data, size_t len) {
     /* "data: " + data + "\n\n" + NUL */
     size_t total = 6 + len + 2 + 1;
