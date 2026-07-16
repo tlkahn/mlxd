@@ -33,6 +33,7 @@ void http_router_add(http_router_t *r, const char *method, const char *path, htt
                      void *ctx);
 http_handler_fn http_router_match(const http_router_t *r, const char *method, const char *path,
                                   void **ctx);
+bool http_router_path_exists(const http_router_t *r, const char *path);
 void http_router_destroy(http_router_t *r);
 
 #endif
