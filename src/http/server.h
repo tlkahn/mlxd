@@ -13,7 +13,7 @@ typedef struct {
     tokenizer_t *tokenizer;
     const char  *chat_template;
     const char  *model_id;
-    size_t       max_body_bytes;
+    size_t       max_body_bytes; /* 0 = default (1 MiB) */
 } http_server_config_t;
 
 http_server_t *http_server_create(const http_server_config_t *config);
