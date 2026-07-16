@@ -129,7 +129,6 @@ static void on_new_connection(uv_stream_t *server, int status) {
 
     c->server = srv;
     uv_tcp_init(&srv->loop, &c->handle);
-    c->handle.data = srv;
 
     if (uv_accept(server, (uv_stream_t *)&c->handle) != 0) {
         uv_close((uv_handle_t *)&c->handle, on_conn_close);
