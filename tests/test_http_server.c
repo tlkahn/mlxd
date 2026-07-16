@@ -1,10 +1,12 @@
 #include "http/server.h"
+#include "model/tokenizer.h"
 #include "http_client.h"
 
 #include <assert.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 #include <yyjson/yyjson.h>
 
 /* --- Test harness --------------------------------------------------------- */
@@ -547,6 +549,231 @@ static void test_destroy_ebusy_warns(void) {
     engine_destroy(&eng);
 }
 
+/* --- Gen-capable fixture (Stage 15 drain tests) --------------------------- */
+
+#define TRIVIAL_TMPL "{{ messages[0].content }}"
+
+typedef struct {
+    engine_t       eng;
+    tokenizer_t   *tok;
+    http_server_t *srv;
+    pthread_t      th;
+    int            port;
+} gen_srv_fixture_t;
+
+static gen_srv_fixture_t gen_fixture_up(uint64_t drain_deadline_ms) {
+    gen_srv_fixture_t f = {0};
+    engine_init(&f.eng);
+
+    engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
+    assert(cmd != NULL);
+    cmd->tag = CMD_LOAD;
+    cmd->load.model_path = strdup("gpt2");
+    engine_post(&f.eng, cmd);
+    usleep(10000);
+
+    f.tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(f.tok != NULL);
+
+    http_server_config_t cfg = {
+        .port = 0,
+        .engine = &f.eng,
+        .tokenizer = f.tok,
+        .chat_template = TRIVIAL_TMPL,
+        .model_id = "gpt2",
+        .drain_deadline_ms = drain_deadline_ms,
+    };
+    f.srv = http_server_create(&cfg);
+    assert(f.srv != NULL);
+    f.port = http_server_port(f.srv);
+    assert(f.port > 0);
+    int rc = pthread_create(&f.th, NULL, server_thread, f.srv);
+    assert(rc == 0);
+    for (int i = 0; i < 500; i++) {
+        int fd = http_client_connect("127.0.0.1", f.port);
+        if (fd >= 0) { close(fd); break; }
+        usleep(1000);
+        assert(i < 499);
+    }
+    return f;
+}
+
+static void gen_fixture_down(gen_srv_fixture_t *f) {
+    http_server_stop(f->srv);
+    pthread_join(f->th, NULL);
+    http_server_destroy(f->srv);
+    engine_destroy(&f->eng);
+    tokenizer_free(f->tok);
+}
+
+static int sse_connect_and_post(int port, const char *path, const char *body,
+                                char *hdrbuf, size_t hdrcap) {
+    int fd = http_client_connect("127.0.0.1", port);
+    assert(fd >= 0);
+
+    char raw[4096];
+    snprintf(raw, sizeof(raw),
+        "POST %s HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n%s", path, strlen(body), body);
+    assert(http_client_send_all(fd, raw, strlen(raw)) == 0);
+
+    int rc = http_client_recv_headers(fd, hdrbuf, hdrcap);
+    assert(rc > 0);
+    return fd;
+}
+
+static uint64_t now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+}
+
+/* --- Stage 15 Cycle A: stop mid-stream delivers data: [DONE] -------------- */
+
+static void test_stop_mid_stream_delivers_done(void) {
+    gen_srv_fixture_t f = gen_fixture_up(5000);
+
+    char long_content[4096];
+    memset(long_content, 0, sizeof(long_content));
+    int off = 0;
+    for (int i = 0; i < 200 && off < 3800; i++)
+        off += snprintf(long_content + off, sizeof(long_content) - (size_t)off,
+                        "word%d ", i);
+
+    char body[8192];
+    snprintf(body, sizeof(body),
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],\"stream\":true}",
+        long_content);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions", body,
+                                  hdrbuf, sizeof(hdrbuf));
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    char evbuf[4096];
+    int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+    assert(n > 0);
+
+    struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    http_server_stop(f.srv);
+
+    bool got_done = false;
+    while (!got_done) {
+        n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+        if (n <= 0) break;
+        if (strncmp(evbuf, "data: [DONE]", 12) == 0)
+            got_done = true;
+    }
+    assert(got_done);
+
+    pthread_join(f.th, NULL);
+    http_server_destroy(f.srv);
+    engine_destroy(&f.eng);
+    tokenizer_free(f.tok);
+    close(fd);
+}
+
+/* --- Stage 15 Cycle B: bounded drain deadline ----------------------------- */
+
+static void test_stop_drain_deadline_bounded(void) {
+    gen_srv_fixture_t f = gen_fixture_up(150);
+
+    char *long_content = malloc(16384);
+    assert(long_content);
+    int off = 0;
+    for (int i = 0; i < 2000 && off < 15000; i++)
+        off += snprintf(long_content + off, 16384 - (size_t)off, "word%d ", i);
+    long_content[off] = '\0';
+
+    size_t bodycap = (size_t)off + 256;
+    char *body = malloc(bodycap);
+    assert(body);
+    snprintf(body, bodycap,
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],\"stream\":true}",
+        long_content);
+    free(long_content);
+
+    int fd = http_client_connect("127.0.0.1", f.port);
+    assert(fd >= 0);
+
+    int rcvbuf = 1;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+    size_t blen = strlen(body);
+    size_t rawcap = blen + 512;
+    char *raw = malloc(rawcap);
+    assert(raw);
+    int rawlen = snprintf(raw, rawcap,
+        "POST /v1/chat/completions HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n%s", blen, body);
+    assert(http_client_send_all(fd, raw, (size_t)rawlen) == 0);
+    free(raw);
+    free(body);
+
+    char hdrbuf[4096];
+    int hrc = http_client_recv_headers(fd, hdrbuf, sizeof(hdrbuf));
+    assert(hrc > 0);
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    usleep(500000);
+
+    uint64_t t0 = now_ms();
+    http_server_stop(f.srv);
+    pthread_join(f.th, NULL);
+    uint64_t elapsed = now_ms() - t0;
+
+    assert(elapsed < 3000);
+
+    http_server_destroy(f.srv);
+    engine_destroy(&f.eng);
+    tokenizer_free(f.tok);
+    close(fd);
+}
+
+/* --- Stage 15 Cycle C: idle stop is prompt -------------------------------- */
+
+static void test_stop_idle_is_prompt(void) {
+    gen_srv_fixture_t f = gen_fixture_up(5000);
+
+    int fd1 = http_client_connect("127.0.0.1", f.port);
+    assert(fd1 >= 0);
+    int fd2 = http_client_connect("127.0.0.1", f.port);
+    assert(fd2 >= 0);
+
+    const char *req = "GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    assert(http_client_send_all(fd1, req, strlen(req)) == 0);
+    assert(http_client_send_all(fd2, req, strlen(req)) == 0);
+
+    http_client_response_t resp1, resp2;
+    assert(http_client_recv_response(fd1, &resp1) == 0);
+    assert(resp1.status == 200);
+    assert(http_client_recv_response(fd2, &resp2) == 0);
+    assert(resp2.status == 200);
+
+    uint64_t t0 = now_ms();
+    gen_fixture_down(&f);
+    uint64_t elapsed = now_ms() - t0;
+
+    assert(elapsed < 1000);
+
+    char buf[1];
+    assert(read(fd1, buf, 1) <= 0);
+    assert(read(fd2, buf, 1) <= 0);
+
+    http_client_response_free(&resp1);
+    http_client_response_free(&resp2);
+    close(fd1);
+    close(fd2);
+}
+
 /* --- main ----------------------------------------------------------------- */
 
 int main(void) {
@@ -569,6 +796,9 @@ int main(void) {
     test_options_preflight_close();
     test_stop_with_open_connections();
     test_destroy_ebusy_warns();
+    test_stop_mid_stream_delivers_done();
+    test_stop_drain_deadline_bounded();
+    test_stop_idle_is_prompt();
     printf("test_http_server: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

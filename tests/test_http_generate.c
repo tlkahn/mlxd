@@ -556,7 +556,7 @@ static void test_client_disconnect_cancels(void) {
     fixture_down(&f);
 }
 
-/* --- 13b: server stop during stream -------------------------------------- */
+/* --- 13b: server stop during stream - drain delivers [DONE] -------------- */
 
 static void test_server_stop_during_stream(void) {
     gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
@@ -578,16 +578,25 @@ static void test_server_stop_during_stream(void) {
                                   hdrbuf, sizeof(hdrbuf));
     assert(strstr(hdrbuf, "200 OK") != NULL);
 
-    /* Read a few events */
     char evbuf[4096];
     http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
 
-    /* Stop the server while the client is still connected and streaming.
-     * This tests that walk_close_cb correctly handles gen-owned handles
-     * and doesn't cause EBUSY on uv_loop_close. */
+    struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Graceful drain: server cancels the stream, engine injects DONE,
+     * gen_request flushes data: [DONE] before closing the conn. */
     fixture_down(&f);
 
-    /* Server side is already gone; close() only releases the local fd. */
+    bool got_done = false;
+    while (!got_done) {
+        int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+        if (n <= 0) break;
+        if (strncmp(evbuf, "data: [DONE]", 12) == 0)
+            got_done = true;
+    }
+    assert(got_done);
+
     close(fd);
 }
 

@@ -1,6 +1,7 @@
 #include "http/server.h"
 #include "http/conn.h"
 #include "http/conn_io.h"
+#include "http/gen_request.h"
 #include "http/handler.h"
 #include "http/response.h"
 #include "http/router.h"
@@ -19,10 +20,14 @@ struct http_server {
     uv_loop_t      loop;
     uv_tcp_t       listener;
     uv_async_t     stop_async;
+    uv_timer_t     drain_timer;
     http_router_t *router;
     serve_ctx_t    serve_ctx;
     int            port;
     size_t         max_body_bytes;
+    uint64_t       drain_deadline_ms;
+    bool           draining;
+    bool           drain_timer_active;
 };
 
 typedef struct conn {
@@ -50,6 +55,8 @@ static void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf);
 static void on_write(uv_write_t *req, int status);
 static void on_conn_close(uv_handle_t *handle);
 static void on_stop_async(uv_async_t *handle);
+static void on_drain_timeout(uv_timer_t *handle);
+static void drain_check(http_server_t *srv);
 static void close_conn(conn_t *c);
 static void dispatch(conn_t *c, http_parsed_request_t *pr);
 
@@ -127,6 +134,7 @@ static void close_conn(conn_t *c) {
         cb(ctx);
     }
     uv_close((uv_handle_t *)&c->handle, on_conn_close);
+    drain_check(c->server);
 }
 
 static void on_conn_close(uv_handle_t *handle) {
@@ -266,26 +274,91 @@ static void on_write(uv_write_t *req, int status) {
         close_conn(c);
 }
 
-/* --- Stop (walk + close) ------------------------------------------------- */
+/* --- Stop + drain -------------------------------------------------------- */
 
-static void walk_close_cb(uv_handle_t *handle, void *arg) {
+typedef struct {
+    http_server_t *srv;
+    int            gen_count;
+} drain_walk_ctx_t;
+
+static void walk_count_tcp_cb(uv_handle_t *handle, void *arg) {
+    drain_walk_ctx_t *ctx = (drain_walk_ctx_t *)arg;
+    if (uv_is_closing(handle)) return;
+    if (handle->type == UV_TCP && handle != (uv_handle_t *)&ctx->srv->listener)
+        ctx->gen_count++;
+}
+
+static int count_open_tcp(http_server_t *srv) {
+    drain_walk_ctx_t ctx = {.srv = srv, .gen_count = 0};
+    uv_walk(&srv->loop, walk_count_tcp_cb, &ctx);
+    return ctx.gen_count;
+}
+
+static void drain_check(http_server_t *srv) {
+    if (!srv->draining || !srv->drain_timer_active) return;
+    if (count_open_tcp(srv) == 0) {
+        srv->drain_timer_active = false;
+        uv_timer_stop(&srv->drain_timer);
+        uv_close((uv_handle_t *)&srv->drain_timer, NULL);
+    }
+}
+
+static void walk_force_close_tcp_cb(uv_handle_t *handle, void *arg) {
     http_server_t *srv = (http_server_t *)arg;
     if (uv_is_closing(handle)) return;
     if (handle->type == UV_TCP && handle != (uv_handle_t *)&srv->listener)
         close_conn((conn_t *)handle);
-    else if (handle->type == UV_ASYNC || handle->type == UV_TIMER)
-        /* gen_request is the sole UV_ASYNC/UV_TIMER owner on this loop;
-         * handles self-close via begin_close after the stream drains. */
+}
+
+static void on_drain_timeout(uv_timer_t *handle) {
+    http_server_t *srv = (http_server_t *)handle->data;
+    srv->drain_timer_active = false;
+    uv_walk(&srv->loop, walk_force_close_tcp_cb, srv);
+    uv_close((uv_handle_t *)&srv->drain_timer, NULL);
+}
+
+static void walk_drain_cb(uv_handle_t *handle, void *arg) {
+    drain_walk_ctx_t *ctx = (drain_walk_ctx_t *)arg;
+    http_server_t *srv = ctx->srv;
+    if (uv_is_closing(handle)) return;
+
+    if (handle->type == UV_TCP && handle != (uv_handle_t *)&srv->listener) {
+        conn_t *c = (conn_t *)handle;
+        if (c->gen_owned) {
+            ctx->gen_count++;
+            if (c->on_gone_ctx)
+                gen_request_drain(c->on_gone_ctx);
+        } else {
+            close_conn(c);
+        }
+    } else if (handle->type == UV_ASYNC || handle->type == UV_TIMER) {
+        /* gen_request UV_ASYNC/UV_TIMER handles self-close via begin_close
+         * after the stream drains. srv->drain_timer is server-owned but not
+         * yet initialized at walk time (started after the walk if needed). */
         return;
-    else
+    } else {
         uv_close(handle, NULL);
+    }
 }
 
 static void on_stop_async(uv_async_t *handle) {
     http_server_t *srv = (http_server_t *)handle->data;
+    if (srv->draining) return;
+    srv->draining = true;
+
     uv_close((uv_handle_t *)&srv->listener, NULL);
     uv_close((uv_handle_t *)&srv->stop_async, NULL);
-    uv_walk(&srv->loop, walk_close_cb, srv);
+
+    drain_walk_ctx_t ctx = {.srv = srv, .gen_count = 0};
+    uv_walk(&srv->loop, walk_drain_cb, &ctx);
+
+    if (ctx.gen_count > 0) {
+        uint64_t deadline = srv->drain_deadline_ms ? srv->drain_deadline_ms : 5000;
+        uv_timer_init(&srv->loop, &srv->drain_timer);
+        srv->drain_timer.data = srv;
+        uv_timer_start(&srv->drain_timer, on_drain_timeout, deadline, 0);
+        srv->drain_timer_active = true;
+    }
 }
 
 /* --- Public API ---------------------------------------------------------- */
@@ -322,6 +395,7 @@ http_server_t *http_server_create(const http_server_config_t *config) {
     srv->stop_async.data = srv;
 
     srv->max_body_bytes = config->max_body_bytes;
+    srv->drain_deadline_ms = config->drain_deadline_ms;
 
     srv->serve_ctx = (serve_ctx_t){
         .engine        = config->engine,

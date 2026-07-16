@@ -28,4 +28,11 @@ typedef struct {
  * static literal for respond_json_error). */
 int gen_request_start(const gen_request_start_params_t *p, const char **err);
 
+/* Initiate graceful drain: cancel the stream so the engine injects
+ * DONE/FINISH_CANCELLED, then finish_response flushes data: [DONE]
+ * and closes the connection. Does NOT tear down the gen_request
+ * or detach the conn - the normal finish path handles that.
+ * ctx is a gen_request_t* (void* because server.c has no visibility). */
+void gen_request_drain(void *ctx);
+
 #endif
