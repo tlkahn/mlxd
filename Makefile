@@ -107,6 +107,8 @@ unicode-tables:
 
 clean:
 	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d
+	find src -name '*.tsan.o' -delete
+	rm -rf build/tsan
 
 install: mlxd
 	install -d $(PREFIX)/bin
@@ -115,7 +117,28 @@ install: mlxd
 compile_commands.json: Makefile
 	bear -- $(MAKE) clean mlxd
 
-.PHONY: test test-gpu clean install analyze coverage clean-coverage unicode-tables
+.PHONY: test test-gpu test-tsan clean install analyze coverage clean-coverage unicode-tables
+
+# --- Thread Sanitizer tests ---------------------------------------------------
+
+TSAN_CFLAGS   := -g -O1 -fsanitize=thread
+TSAN_LDFLAGS  := -fsanitize=thread
+TSAN_DIR      := build/tsan
+TSAN_ALL_OBJS := $(SRCS:.c=.tsan.o)
+TSAN_LIB_OBJS := $(filter-out src/main.tsan.o,$(TSAN_ALL_OBJS)) vendor/yyjson/yyjson.o $(JINJA_OBJS)
+
+.PRECIOUS: %.tsan.o
+%.tsan.o: %.c
+	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_DIR)/test_%: tests/test_%.c $(TSAN_LIB_OBJS) | $(TSAN_DIR)
+	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(TSAN_LIB_OBJS) $(ALL_LDFLAGS) $(TSAN_LDFLAGS)
+
+$(TSAN_DIR):
+	mkdir -p $@
+
+test-tsan: $(TSAN_DIR)/test_http_server
+	$(TSAN_DIR)/test_http_server
 
 # --- Debug/Release shortcuts --------------------------------------------------
 

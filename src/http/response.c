@@ -54,6 +54,23 @@ char *http_build_response(int status, const char *content_type, const char *body
     return buf;
 }
 
+char *http_build_preflight(size_t *out_len) {
+    const char *resp =
+        "HTTP/1.1 204 No Content\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n";
+    size_t len = strlen(resp);
+    char *buf = malloc(len + 1);
+    if (!buf) return NULL;
+    memcpy(buf, resp, len + 1);
+    if (out_len) *out_len = len;
+    return buf;
+}
+
 char *http_build_sse_head(size_t *out_len) {
     const char *head =
         "HTTP/1.1 200 OK\r\n"
