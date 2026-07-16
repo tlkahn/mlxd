@@ -317,6 +317,202 @@ static void test_null_template_completion_ok(void) {
     fixture_down(&f);
 }
 
+/* --- SSE helpers --------------------------------------------------------- */
+
+static int sse_connect_and_post(int port, const char *path, const char *body,
+                                char *hdrbuf, size_t hdrcap) {
+    int fd = http_client_connect("127.0.0.1", port);
+    assert(fd >= 0);
+
+    char raw[4096];
+    snprintf(raw, sizeof(raw),
+        "POST %s HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n%s", path, strlen(body), body);
+    assert(http_client_send_all(fd, raw, strlen(raw)) == 0);
+
+    int rc = http_client_recv_headers(fd, hdrbuf, hdrcap);
+    assert(rc > 0);
+    return fd;
+}
+
+static yyjson_doc *parse_sse_json(const char *event) {
+    assert(strncmp(event, "data: ", 6) == 0);
+    const char *json_start = event + 6;
+    const char *end = strstr(json_start, "\n\n");
+    assert(end != NULL);
+    size_t json_len = (size_t)(end - json_start);
+    return yyjson_read(json_start, json_len, 0);
+}
+
+/* --- 10a: chat SSE sequence ---------------------------------------------- */
+
+static void test_chat_sse_sequence(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}],\"stream\":true}",
+        hdrbuf, sizeof(hdrbuf));
+
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+    assert(strstr(hdrbuf, "text/event-stream") != NULL);
+    assert(strstr(hdrbuf, "Connection: close") != NULL);
+
+    char evbuf[4096];
+    char concat[4096] = {0};
+    size_t concat_len = 0;
+    bool got_role = false;
+    bool got_finish = false;
+    bool got_done = false;
+
+    while (!got_done) {
+        int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+        assert(n > 0);
+
+        if (strncmp(evbuf, "data: [DONE]", 12) == 0) {
+            got_done = true;
+            break;
+        }
+
+        yyjson_doc *doc = parse_sse_json(evbuf);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        yyjson_val *choices = yyjson_obj_get(root, "choices");
+
+        if (yyjson_arr_size(choices) > 0) {
+            yyjson_val *c0 = yyjson_arr_get(choices, 0);
+            yyjson_val *delta = yyjson_obj_get(c0, "delta");
+            const char *role = yyjson_get_str(yyjson_obj_get(delta, "role"));
+            if (role && strcmp(role, "assistant") == 0)
+                got_role = true;
+            const char *content = yyjson_get_str(yyjson_obj_get(delta, "content"));
+            if (content) {
+                size_t clen = strlen(content);
+                assert(concat_len + clen < sizeof(concat));
+                memcpy(concat + concat_len, content, clen);
+                concat_len += clen;
+                concat[concat_len] = '\0';
+            }
+            yyjson_val *fr = yyjson_obj_get(c0, "finish_reason");
+            if (fr && !yyjson_is_null(fr))
+                got_finish = true;
+        }
+        yyjson_doc_free(doc);
+    }
+
+    assert(got_role);
+    assert(got_finish);
+    assert(got_done);
+    assert(strcmp(concat, "hello world") == 0);
+
+    close(fd);
+    fixture_down(&f);
+}
+
+/* --- 10b: chat SSE include_usage ----------------------------------------- */
+
+static void test_chat_sse_include_usage(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}],"
+        "\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+        hdrbuf, sizeof(hdrbuf));
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    char evbuf[4096];
+    bool got_usage = false;
+    int usage_pt = 0, usage_ct = 0, usage_tt = 0;
+    bool got_done = false;
+
+    while (!got_done) {
+        int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+        assert(n > 0);
+        if (strncmp(evbuf, "data: [DONE]", 12) == 0) {
+            got_done = true;
+            break;
+        }
+        yyjson_doc *doc = parse_sse_json(evbuf);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        yyjson_val *usage = yyjson_obj_get(root, "usage");
+        if (usage && yyjson_is_obj(usage)) {
+            got_usage = true;
+            usage_pt = (int)yyjson_get_sint(yyjson_obj_get(usage, "prompt_tokens"));
+            usage_ct = (int)yyjson_get_sint(yyjson_obj_get(usage, "completion_tokens"));
+            usage_tt = (int)yyjson_get_sint(yyjson_obj_get(usage, "total_tokens"));
+            yyjson_val *choices = yyjson_obj_get(root, "choices");
+            assert(yyjson_arr_size(choices) == 0);
+        }
+        yyjson_doc_free(doc);
+    }
+
+    assert(got_usage);
+    assert(usage_pt > 0);
+    assert(usage_ct > 0);
+    assert(usage_tt == usage_pt + usage_ct);
+    assert(got_done);
+
+    close(fd);
+    fixture_down(&f);
+}
+
+/* --- 10c: completion SSE sequence ---------------------------------------- */
+
+static void test_completion_sse_sequence(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/completions",
+        "{\"model\":\"gpt2\",\"prompt\":\"hello world\",\"stream\":true,\"max_tokens\":100}",
+        hdrbuf, sizeof(hdrbuf));
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    char evbuf[4096];
+    char concat[4096] = {0};
+    size_t concat_len = 0;
+    bool got_finish = false;
+    bool got_done = false;
+
+    while (!got_done) {
+        int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+        assert(n > 0);
+        if (strncmp(evbuf, "data: [DONE]", 12) == 0) {
+            got_done = true;
+            break;
+        }
+        yyjson_doc *doc = parse_sse_json(evbuf);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(root, "object")), "text_completion") == 0);
+        yyjson_val *choices = yyjson_obj_get(root, "choices");
+        yyjson_val *c0 = yyjson_arr_get(choices, 0);
+        const char *text = yyjson_get_str(yyjson_obj_get(c0, "text"));
+        if (text && strlen(text) > 0) {
+            size_t tlen = strlen(text);
+            assert(concat_len + tlen < sizeof(concat));
+            memcpy(concat + concat_len, text, tlen);
+            concat_len += tlen;
+            concat[concat_len] = '\0';
+        }
+        yyjson_val *fr = yyjson_obj_get(c0, "finish_reason");
+        if (fr && !yyjson_is_null(fr))
+            got_finish = true;
+        yyjson_doc_free(doc);
+    }
+
+    assert(got_finish);
+    assert(got_done);
+    assert(strcmp(concat, "hello world") == 0);
+
+    close(fd);
+    fixture_down(&f);
+}
+
 /* --- main ---------------------------------------------------------------- */
 
 int main(void) {
@@ -331,6 +527,9 @@ int main(void) {
     test_null_tokenizer_503();
     test_null_template_400_chat();
     test_null_template_completion_ok();
+    test_chat_sse_sequence();
+    test_chat_sse_include_usage();
+    test_completion_sse_sequence();
     printf("test_http_generate: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

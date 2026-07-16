@@ -178,6 +178,19 @@ static void http_client_response_free(http_client_response_t *r) {
     r->body_len = 0;
 }
 
+static int http_client_recv_headers(int fd, char *out, size_t cap) {
+    size_t total = 0;
+    while (total < cap - 1) {
+        ssize_t n = read(fd, out + total, 1);
+        if (n <= 0) return -1;
+        total += 1;
+        out[total] = '\0';
+        if (total >= 4 && memcmp(out + total - 4, "\r\n\r\n", 4) == 0)
+            return (int)total;
+    }
+    return -1;
+}
+
 static int http_client_recv_sse_event(int fd, char *out, size_t cap) {
     size_t total = 0;
     while (total < cap - 1) {
