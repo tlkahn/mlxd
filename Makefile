@@ -18,8 +18,9 @@ MLX_C_LIBS    := -L$(BREW_PREFIX)/lib -lmlxc
 # libuv and llhttp via pkg-config
 LIBUV_CFLAGS  := $(shell pkg-config --cflags libuv 2>/dev/null)
 LIBUV_LIBS    := $(shell pkg-config --libs   libuv 2>/dev/null)
-LLHTTP_CFLAGS := $(shell pkg-config --cflags llhttp 2>/dev/null)
-LLHTTP_LIBS   := $(shell pkg-config --libs   llhttp 2>/dev/null)
+LLHTTP_PC     := $(shell pkg-config --exists llhttp && echo llhttp || echo libllhttp)
+LLHTTP_CFLAGS := $(shell pkg-config --cflags $(LLHTTP_PC) 2>/dev/null)
+LLHTTP_LIBS   := $(shell pkg-config --libs   $(LLHTTP_PC) 2>/dev/null)
 CURL_CFLAGS   := $(shell pkg-config --cflags libcurl 2>/dev/null)
 CURL_LIBS     := $(shell pkg-config --libs   libcurl 2>/dev/null)
 
