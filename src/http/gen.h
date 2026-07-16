@@ -9,6 +9,11 @@
 typedef struct tokenizer tokenizer_t;
 
 /* Build a token-id prompt from a chat template + messages JSON.
+ * The rendered template is encoded with parse_special=true so that
+ * template-owned control tokens (e.g. <|endoftext|>, <|im_start|>) are
+ * atomized to their canonical ids (HF apply_chat_template parity).
+ * Caveat: special-token literals inside user message content are also
+ * atomized; this matches HF/vLLM behavior and is pinned by test.
  * Returns id count (>= 0) on success, -1 on error (*err set to a static
  * literal - caller does NOT free *err). *out_ids is malloc'd; caller frees. */
 int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,

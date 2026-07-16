@@ -271,6 +271,39 @@ static void test_chat_response_null_content(void) {
     free(json);
 }
 
+static void test_chat_prompt_special_tokens(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *tmpl = "<|endoftext|>{{ messages[0].content }}";
+    const char *msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    int32_t *ids = NULL;
+    const char *err = NULL;
+    int n = gen_build_chat_prompt(tok, tmpl, msgs, NULL, &ids, &err);
+    assert(n > 0);
+    assert(err == NULL);
+    assert(ids[0] == 50256);
+
+    free(ids);
+    tokenizer_free(tok);
+}
+
+static void test_chat_prompt_user_content_specials(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *msgs = "[{\"role\":\"user\",\"content\":\"<|endoftext|>\"}]";
+    int32_t *ids = NULL;
+    const char *err = NULL;
+    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL, &ids, &err);
+    assert(n > 0);
+    assert(err == NULL);
+    assert(ids[0] == 50256);
+
+    free(ids);
+    tokenizer_free(tok);
+}
+
 static void test_completion_response_roundtrip(void) {
     usage_t u = {.prompt_tokens = 4, .completion_tokens = 6, .total_tokens = 10};
     char *json = gen_build_completion_response("cmpl-1", "gpt2", 1234, "once upon",
@@ -304,6 +337,8 @@ int main(void) {
     test_sse_chunk_null_usage_omits();
     test_chat_response_null_content();
     test_chat_prompt_bad_template_nulls_ids();
+    test_chat_prompt_special_tokens();
+    test_chat_prompt_user_content_specials();
     test_completion_response_roundtrip();
     printf("test_http_gen: all passed\n");
     return 0;

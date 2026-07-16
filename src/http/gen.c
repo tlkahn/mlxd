@@ -35,7 +35,7 @@ int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
     }
     chat_diagnostics_free(&diag);
 
-    int n = tokenizer_encode_alloc(tok, rendered, strlen(rendered), false, out_ids);
+    int n = tokenizer_encode_alloc(tok, rendered, strlen(rendered), true, out_ids);
     free(rendered);
     if (n < 0) {
         *err = "tokenizer encode failed";
