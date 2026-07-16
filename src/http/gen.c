@@ -54,25 +54,23 @@ int gen_build_completion_prompt(const tokenizer_t *tok, const char *prompt,
     return n;
 }
 
-char *gen_sse_chunk(const char *id, const char *model, int64_t created,
-                    bool role_first, const char *delta_text, bool final,
-                    finish_reason_t reason, bool include_usage, const usage_t *usage) {
-    bool has_choice = role_first || delta_text || final;
+char *gen_sse_chunk(const gen_sse_chunk_params_t *p) {
+    bool has_choice = p->role_first || p->delta_text || p->final;
 
     chat_completion_chunk_t chunk = {
-        .id = (char *)id,
-        .model = (char *)model,
-        .created = created,
+        .id = (char *)p->id,
+        .model = (char *)p->model,
+        .created = p->created,
         .has_choice = has_choice,
-        .has_role = role_first,
+        .has_role = p->role_first,
         .role = ROLE_ASSISTANT,
-        .delta_content = (char *)delta_text,
-        .has_finish_reason = final,
-        .finish_reason = reason,
-        .has_usage = include_usage && usage,
+        .delta_content = (char *)p->delta_text,
+        .has_finish_reason = p->final,
+        .finish_reason = p->reason,
+        .has_usage = p->include_usage && p->usage,
     };
     if (chunk.has_usage)
-        chunk.usage = *usage;
+        chunk.usage = *p->usage;
 
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
     if (!mdoc) return NULL;

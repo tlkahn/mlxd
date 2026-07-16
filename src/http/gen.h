@@ -20,15 +20,22 @@ int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
 int gen_build_completion_prompt(const tokenizer_t *tok, const char *prompt,
                                 int32_t **out_ids, const char **err);
 
+typedef struct {
+    const char *id;
+    const char *model;
+    int64_t created;
+    bool role_first;
+    const char *delta_text;
+    bool final;
+    finish_reason_t reason;
+    bool include_usage;
+    const usage_t *usage;
+} gen_sse_chunk_params_t;
+
 /* Build an SSE-wrapped chat.completion.chunk JSON.
- * role_first: emit delta.role = "assistant".
- * delta_text: emit delta.content (NULL omits the key).
- * final: emit finish_reason.
- * include_usage: emit usage object.
+ * Fields default to zero/false/NULL via compound-literal designated init.
  * Returns heap-allocated SSE string ("data: ...\n\n"). Caller frees. */
-char *gen_sse_chunk(const char *id, const char *model, int64_t created,
-                    bool role_first, const char *delta_text, bool final,
-                    finish_reason_t reason, bool include_usage, const usage_t *usage);
+char *gen_sse_chunk(const gen_sse_chunk_params_t *p);
 
 /* Build a complete chat completion response JSON. u may be NULL (zeroed usage).
  * Caller frees. */

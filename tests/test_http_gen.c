@@ -85,8 +85,10 @@ static yyjson_doc *parse_sse_payload(const char *sse) {
 
 static void test_sse_chunk_role_first(void) {
     usage_t u = {.prompt_tokens = 5, .completion_tokens = 0, .total_tokens = 5};
-    char *sse = gen_sse_chunk("id-1", "gpt2", 1234, true, NULL, false,
-                              FINISH_STOP, false, &u);
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-1", .model = "gpt2", .created = 1234,
+        .role_first = true, .usage = &u,
+    });
     assert(sse != NULL);
     yyjson_doc *doc = parse_sse_payload(sse);
     yyjson_val *root = yyjson_doc_get_root(doc);
@@ -100,9 +102,10 @@ static void test_sse_chunk_role_first(void) {
 }
 
 static void test_sse_chunk_content(void) {
-    usage_t u = {0};
-    char *sse = gen_sse_chunk("id-1", "gpt2", 1234, false, "hello", false,
-                              FINISH_STOP, false, &u);
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-1", .model = "gpt2", .created = 1234,
+        .delta_text = "hello",
+    });
     assert(sse != NULL);
     yyjson_doc *doc = parse_sse_payload(sse);
     yyjson_val *root = yyjson_doc_get_root(doc);
@@ -115,9 +118,10 @@ static void test_sse_chunk_content(void) {
 }
 
 static void test_sse_chunk_final(void) {
-    usage_t u = {0};
-    char *sse = gen_sse_chunk("id-1", "gpt2", 1234, false, NULL, true,
-                              FINISH_STOP, false, &u);
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-1", .model = "gpt2", .created = 1234,
+        .final = true, .reason = FINISH_STOP,
+    });
     assert(sse != NULL);
     yyjson_doc *doc = parse_sse_payload(sse);
     yyjson_val *root = yyjson_doc_get_root(doc);
@@ -129,13 +133,36 @@ static void test_sse_chunk_final(void) {
     free(sse);
 }
 
-static void test_sse_chunk_usage(void) {
-    usage_t u = {.prompt_tokens = 10, .completion_tokens = 20, .total_tokens = 30};
-    char *sse = gen_sse_chunk("id-1", "gpt2", 1234, false, NULL, false,
-                              FINISH_STOP, true, &u);
+static void test_sse_chunk_role_and_content_first(void) {
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-1", .model = "gpt2", .created = 1234,
+        .role_first = true, .delta_text = "hello",
+    });
     assert(sse != NULL);
     yyjson_doc *doc = parse_sse_payload(sse);
     yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *choices = yyjson_obj_get(root, "choices");
+    assert(yyjson_arr_size(choices) == 1);
+    yyjson_val *c0 = yyjson_arr_get(choices, 0);
+    yyjson_val *delta = yyjson_obj_get(c0, "delta");
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(delta, "role")), "assistant") == 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(delta, "content")), "hello") == 0);
+    yyjson_doc_free(doc);
+    free(sse);
+}
+
+static void test_sse_chunk_usage(void) {
+    usage_t u = {.prompt_tokens = 10, .completion_tokens = 20, .total_tokens = 30};
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-1", .model = "gpt2", .created = 1234,
+        .include_usage = true, .usage = &u,
+    });
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *choices = yyjson_obj_get(root, "choices");
+    assert(choices != NULL);
+    assert(yyjson_arr_size(choices) == 0);
     yyjson_val *usage = yyjson_obj_get(root, "usage");
     assert(usage != NULL);
     assert(yyjson_get_sint(yyjson_obj_get(usage, "prompt_tokens")) == 10);
@@ -198,8 +225,10 @@ static void test_completion_response_null_usage(void) {
 }
 
 static void test_sse_chunk_null_usage_omits(void) {
-    char *sse = gen_sse_chunk("id-1", "gpt2", 1234, false, NULL, false,
-                              FINISH_STOP, true, NULL);
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-1", .model = "gpt2", .created = 1234,
+        .include_usage = true,
+    });
     assert(sse != NULL);
     yyjson_doc *doc = parse_sse_payload(sse);
     yyjson_val *root = yyjson_doc_get_root(doc);
@@ -222,6 +251,24 @@ static void test_chat_prompt_bad_template_nulls_ids(void) {
     assert(ids == NULL);
 
     tokenizer_free(tok);
+}
+
+static void test_chat_response_null_content(void) {
+    usage_t u = {.prompt_tokens = 5, .completion_tokens = 0, .total_tokens = 5};
+    char *json = gen_build_chat_response("chatcmpl-1", "gpt2", 1234, NULL,
+                                          FINISH_STOP, &u);
+    assert(json != NULL);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *choices = yyjson_obj_get(root, "choices");
+    yyjson_val *c0 = yyjson_arr_get(choices, 0);
+    yyjson_val *msg = yyjson_obj_get(c0, "message");
+    yyjson_val *content = yyjson_obj_get(msg, "content");
+    assert(content != NULL);
+    assert(yyjson_is_null(content));
+    yyjson_doc_free(doc);
+    free(json);
 }
 
 static void test_completion_response_roundtrip(void) {
@@ -249,11 +296,13 @@ int main(void) {
     test_sse_chunk_role_first();
     test_sse_chunk_content();
     test_sse_chunk_final();
+    test_sse_chunk_role_and_content_first();
     test_sse_chunk_usage();
     test_chat_response_roundtrip();
     test_chat_response_null_usage();
     test_completion_response_null_usage();
     test_sse_chunk_null_usage_omits();
+    test_chat_response_null_content();
     test_chat_prompt_bad_template_nulls_ids();
     test_completion_response_roundtrip();
     printf("test_http_gen: all passed\n");
