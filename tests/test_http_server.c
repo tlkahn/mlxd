@@ -245,6 +245,130 @@ static void test_embeddings_invalid_400(void) {
     engine_destroy(&eng);
 }
 
+/* --- Stage 11 tests ------------------------------------------------------- */
+
+static void test_malformed_json_400(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    srv_fixture_t f = fixture_up(cfg);
+
+    const char *body = "{bad";
+    char raw[512];
+    snprintf(raw, sizeof(raw),
+        "POST /v1/embeddings HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n%s", strlen(body), body);
+
+    http_client_response_t resp;
+    int rc = http_client_request("127.0.0.1", f.port, raw, &resp);
+    assert(rc == 0);
+    assert(resp.status == 400);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err != NULL);
+    yyjson_doc_free(doc);
+
+    http_client_response_free(&resp);
+    fixture_down(&f);
+    engine_destroy(&eng);
+}
+
+static void test_body_too_large_413(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng, .max_body_bytes = 64};
+    srv_fixture_t f = fixture_up(cfg);
+
+    char body[128];
+    memset(body, 'A', sizeof(body) - 1);
+    body[sizeof(body) - 1] = '\0';
+
+    char raw[512];
+    snprintf(raw, sizeof(raw),
+        "POST /v1/embeddings HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n%s", strlen(body), body);
+
+    http_client_response_t resp;
+    int rc = http_client_request("127.0.0.1", f.port, raw, &resp);
+    assert(rc == 0);
+    assert(resp.status == 413);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(err, "type")),
+                 "payload_too_large") == 0);
+    yyjson_doc_free(doc);
+
+    assert(!resp.keep_alive);
+
+    http_client_response_free(&resp);
+    fixture_down(&f);
+    engine_destroy(&eng);
+}
+
+static void test_wrong_method_405(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    srv_fixture_t f = fixture_up(cfg);
+
+    http_client_response_t resp;
+    int rc = http_client_request("127.0.0.1", f.port,
+        "PUT /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        &resp);
+    assert(rc == 0);
+    assert(resp.status == 405);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(err, "type")),
+                 "method_not_allowed") == 0);
+    yyjson_doc_free(doc);
+
+    http_client_response_free(&resp);
+    fixture_down(&f);
+    engine_destroy(&eng);
+}
+
+static void test_malformed_http_400(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    srv_fixture_t f = fixture_up(cfg);
+
+    http_client_response_t resp;
+    int rc = http_client_request("127.0.0.1", f.port,
+        "GARBAGE\r\n\r\n", &resp);
+    assert(rc == 0);
+    assert(resp.status == 400);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err != NULL);
+    yyjson_doc_free(doc);
+
+    http_client_response_free(&resp);
+    fixture_down(&f);
+    engine_destroy(&eng);
+}
+
 /* --- main ----------------------------------------------------------------- */
 
 int main(void) {
@@ -258,6 +382,10 @@ int main(void) {
     test_options_preflight();
     test_embeddings_501();
     test_embeddings_invalid_400();
+    test_malformed_json_400();
+    test_body_too_large_413();
+    test_wrong_method_405();
+    test_malformed_http_400();
     printf("test_http_server: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");
