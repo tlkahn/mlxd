@@ -513,6 +513,103 @@ static void test_completion_sse_sequence(void) {
     fixture_down(&f);
 }
 
+/* --- 13a: client disconnect cancels generation --------------------------- */
+
+static void test_client_disconnect_cancels(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    /* Use a long prompt so the engine's echo loop parks on stream_push
+     * (ring cap 64 fills up). The client disconnecting mid-stream should
+     * cancel the stream, unblock the engine, and allow clean teardown. */
+    char long_content[4096];
+    memset(long_content, 0, sizeof(long_content));
+    int off = 0;
+    for (int i = 0; i < 200 && off < 3800; i++)
+        off += snprintf(long_content + off, sizeof(long_content) - (size_t)off,
+                        "word%d ", i);
+
+    char body[8192];
+    snprintf(body, sizeof(body),
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],\"stream\":true}",
+        long_content);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions", body,
+                                  hdrbuf, sizeof(hdrbuf));
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    /* Read a few events to confirm streaming started */
+    char evbuf[4096];
+    int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+    assert(n > 0);
+
+    /* Abruptly close the client fd mid-stream */
+    close(fd);
+
+    /* Small delay for the server to notice the disconnect */
+    usleep(50000);
+
+    /* The test is that fixture_down completes without hang or crash.
+     * Under tsan, this validates there are no data races in the
+     * teardown path. */
+    fixture_down(&f);
+}
+
+/* --- 13b: server stop during stream -------------------------------------- */
+
+static void test_server_stop_during_stream(void) {
+    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+
+    char long_content[4096];
+    memset(long_content, 0, sizeof(long_content));
+    int off = 0;
+    for (int i = 0; i < 200 && off < 3800; i++)
+        off += snprintf(long_content + off, sizeof(long_content) - (size_t)off,
+                        "word%d ", i);
+
+    char body[8192];
+    snprintf(body, sizeof(body),
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],\"stream\":true}",
+        long_content);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions", body,
+                                  hdrbuf, sizeof(hdrbuf));
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    /* Read a few events */
+    char evbuf[4096];
+    http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+
+    /* Stop the server while the client is still connected and streaming.
+     * This tests that walk_close_cb correctly handles gen-owned handles
+     * and doesn't cause EBUSY on uv_loop_close. */
+    fixture_down(&f);
+
+    close(fd);
+}
+
+/* --- 13c: disconnect on no-model path ------------------------------------ */
+
+static void test_disconnect_no_model(void) {
+    gen_fixture_t f = fixture_up(false, true, TRIVIAL_TMPL);
+
+    /* On the no-model path, the engine pushes CHUNK_ERROR then CHUNK_DONE.
+     * If the consumer disconnects before draining, the ERROR push may fail
+     * (consumer cancelled), and NO terminal chunk is injected. The teardown
+     * must still complete via the refcount gate. */
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}",
+        hdrbuf, sizeof(hdrbuf));
+
+    /* Immediately close without reading any events */
+    close(fd);
+
+    usleep(50000);
+    fixture_down(&f);
+}
+
 /* --- main ---------------------------------------------------------------- */
 
 int main(void) {
@@ -530,6 +627,9 @@ int main(void) {
     test_chat_sse_sequence();
     test_chat_sse_include_usage();
     test_completion_sse_sequence();
+    test_client_disconnect_cancels();
+    test_server_stop_during_stream();
+    test_disconnect_no_model();
     printf("test_http_generate: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

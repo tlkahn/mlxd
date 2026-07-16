@@ -17,7 +17,8 @@ char *sse_format(const char *data, size_t len) {
     for (size_t i = 0; i < len; i++)
         if (data[i] == '\n') lines++;
 
-    size_t total = lines * 6 + len + 1 + 1;
+    /* Each line: "data: " (6) + segment + '\n' (1); plus final '\n' + NUL */
+    size_t total = lines * 7 + len + 2;
     char *buf = malloc(total);
     if (!buf) return NULL;
 
