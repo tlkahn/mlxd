@@ -30,6 +30,7 @@ struct http_server {
     atomic_bool    stop_sent;
     bool           draining;
     bool           drain_timer_active;
+    int            drain_open_conns;
 };
 
 typedef struct conn {
@@ -283,22 +284,9 @@ typedef struct {
     int            gen_count;
 } drain_walk_ctx_t;
 
-static void walk_count_tcp_cb(uv_handle_t *handle, void *arg) {
-    drain_walk_ctx_t *ctx = (drain_walk_ctx_t *)arg;
-    if (uv_is_closing(handle)) return;
-    if (handle->type == UV_TCP && handle != (uv_handle_t *)&ctx->srv->listener)
-        ctx->gen_count++;
-}
-
-static int count_open_tcp(http_server_t *srv) {
-    drain_walk_ctx_t ctx = {.srv = srv, .gen_count = 0};
-    uv_walk(&srv->loop, walk_count_tcp_cb, &ctx);
-    return ctx.gen_count;
-}
-
 static void drain_check(http_server_t *srv) {
     if (!srv->draining || !srv->drain_timer_active) return;
-    if (count_open_tcp(srv) == 0) {
+    if (--srv->drain_open_conns == 0) {
         srv->drain_timer_active = false;
         uv_timer_stop(&srv->drain_timer);
         uv_close((uv_handle_t *)&srv->drain_timer, NULL);
@@ -361,6 +349,7 @@ static void on_stop_async(uv_async_t *handle) {
         if (uv_timer_init(&srv->loop, &srv->drain_timer) == 0) {
             srv->drain_timer.data = srv;
             uv_timer_start(&srv->drain_timer, on_drain_timeout, deadline, 0);
+            srv->drain_open_conns = ctx.gen_count;
             srv->drain_timer_active = true;
         }
     }
