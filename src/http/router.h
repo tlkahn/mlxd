@@ -24,7 +24,6 @@ typedef struct {
     const char *content_type;
     char       *body;
     size_t      body_len;
-    bool        streaming;
     bool        deferred;
 } http_response_t;
 

@@ -130,27 +130,23 @@ char *gen_sse_error(const char *msg) {
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
     if (!mdoc) return NULL;
     yyjson_mut_val *root = error_envelope_serialize(msg, "server_error", NULL, mdoc);
-    yyjson_mut_doc_set_root(mdoc, root);
-    char *json = yyjson_mut_write(mdoc, 0, NULL);
-    yyjson_mut_doc_free(mdoc);
+    char *json = serialize_mut_root(mdoc, root);
     if (!json) return NULL;
     char *sse = sse_format(json, strlen(json));
     free(json);
     return sse;
 }
 
-extern uint32_t arc4random(void);
+extern void arc4random_buf(void *buf, size_t nbytes);
 
 char *gen_make_id(const char *prefix) {
     size_t plen = prefix ? strlen(prefix) : 0;
     char *id = malloc(plen + 24 + 1);
     if (!id) return NULL;
     if (plen > 0) memcpy(id, prefix, plen);
-    for (int i = 0; i < 24; i += 8) {
-        uint32_t r = arc4random();
-        snprintf(id + plen + i, 9, "%08x", r);
-    }
-    id[plen + 24] = '\0';
+    uint32_t r[3];
+    arc4random_buf(r, sizeof(r));
+    snprintf(id + plen, 25, "%08x%08x%08x", r[0], r[1], r[2]);
     return id;
 }
 
