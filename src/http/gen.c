@@ -25,6 +25,7 @@ int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
         .tools_json = tools_json,
         .add_generation_prompt = true,
     };
+    *out_ids = NULL;
     chat_diagnostics_t diag = {0};
     char *rendered = chat_render(&p, &diag);
     if (!rendered) {
@@ -68,9 +69,9 @@ char *gen_sse_chunk(const char *id, const char *model, int64_t created,
         .delta_content = (char *)delta_text,
         .has_finish_reason = final,
         .finish_reason = reason,
-        .has_usage = include_usage,
+        .has_usage = include_usage && usage,
     };
-    if (include_usage && usage)
+    if (chunk.has_usage)
         chunk.usage = *usage;
 
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
@@ -88,13 +89,14 @@ char *gen_sse_chunk(const char *id, const char *model, int64_t created,
 char *gen_build_chat_response(const char *id, const char *model, int64_t created,
                               const char *content, finish_reason_t reason,
                               const usage_t *u) {
+    usage_t zero = {0};
     chat_completion_response_t resp = {
         .id = (char *)id,
         .model = (char *)model,
         .created = created,
         .finish_reason = reason,
         .content = (char *)content,
-        .usage = *u,
+        .usage = u ? *u : zero,
     };
 
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
@@ -107,13 +109,14 @@ char *gen_build_chat_response(const char *id, const char *model, int64_t created
 char *gen_build_completion_response(const char *id, const char *model, int64_t created,
                                     const char *text, finish_reason_t reason,
                                     const usage_t *u) {
+    usage_t zero = {0};
     completion_response_t resp = {
         .id = (char *)id,
         .model = (char *)model,
         .created = created,
         .finish_reason = reason,
         .text = (char *)text,
-        .usage = *u,
+        .usage = u ? *u : zero,
     };
 
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);

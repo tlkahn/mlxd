@@ -30,12 +30,14 @@ char *gen_sse_chunk(const char *id, const char *model, int64_t created,
                     bool role_first, const char *delta_text, bool final,
                     finish_reason_t reason, bool include_usage, const usage_t *usage);
 
-/* Build a complete chat completion response JSON. Caller frees. */
+/* Build a complete chat completion response JSON. u may be NULL (zeroed usage).
+ * Caller frees. */
 char *gen_build_chat_response(const char *id, const char *model, int64_t created,
                               const char *content, finish_reason_t reason,
                               const usage_t *u);
 
-/* Build a complete text completion response JSON. Caller frees. */
+/* Build a complete text completion response JSON. u may be NULL (zeroed usage).
+ * Caller frees. */
 char *gen_build_completion_response(const char *id, const char *model, int64_t created,
                                     const char *text, finish_reason_t reason,
                                     const usage_t *u);

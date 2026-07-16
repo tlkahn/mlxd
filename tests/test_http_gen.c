@@ -167,6 +167,63 @@ static void test_chat_response_roundtrip(void) {
     free(json);
 }
 
+static void test_chat_response_null_usage(void) {
+    char *json = gen_build_chat_response("chatcmpl-1", "gpt2", 1234, "hi",
+                                          FINISH_STOP, NULL);
+    assert(json != NULL);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *usage = yyjson_obj_get(root, "usage");
+    assert(usage != NULL);
+    assert(yyjson_get_sint(yyjson_obj_get(usage, "prompt_tokens")) == 0);
+    assert(yyjson_get_sint(yyjson_obj_get(usage, "completion_tokens")) == 0);
+    assert(yyjson_get_sint(yyjson_obj_get(usage, "total_tokens")) == 0);
+    yyjson_doc_free(doc);
+    free(json);
+}
+
+static void test_completion_response_null_usage(void) {
+    char *json = gen_build_completion_response("cmpl-1", "gpt2", 1234, "x",
+                                                FINISH_STOP, NULL);
+    assert(json != NULL);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *usage = yyjson_obj_get(root, "usage");
+    assert(usage != NULL);
+    assert(yyjson_get_sint(yyjson_obj_get(usage, "total_tokens")) == 0);
+    yyjson_doc_free(doc);
+    free(json);
+}
+
+static void test_sse_chunk_null_usage_omits(void) {
+    char *sse = gen_sse_chunk("id-1", "gpt2", 1234, false, NULL, false,
+                              FINISH_STOP, true, NULL);
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *usage = yyjson_obj_get(root, "usage");
+    assert(usage == NULL);
+    yyjson_doc_free(doc);
+    free(sse);
+}
+
+static void test_chat_prompt_bad_template_nulls_ids(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    int32_t *ids = (int32_t *)(uintptr_t)0xDEAD;
+    const char *err = NULL;
+    int n = gen_build_chat_prompt(tok, "{{ ", msgs, NULL, &ids, &err);
+    assert(n == -1);
+    assert(err != NULL);
+    assert(ids == NULL);
+
+    tokenizer_free(tok);
+}
+
 static void test_completion_response_roundtrip(void) {
     usage_t u = {.prompt_tokens = 4, .completion_tokens = 6, .total_tokens = 10};
     char *json = gen_build_completion_response("cmpl-1", "gpt2", 1234, "once upon",
@@ -194,6 +251,10 @@ int main(void) {
     test_sse_chunk_final();
     test_sse_chunk_usage();
     test_chat_response_roundtrip();
+    test_chat_response_null_usage();
+    test_completion_response_null_usage();
+    test_sse_chunk_null_usage_omits();
+    test_chat_prompt_bad_template_nulls_ids();
     test_completion_response_roundtrip();
     printf("test_http_gen: all passed\n");
     return 0;
