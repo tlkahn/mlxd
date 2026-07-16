@@ -11,8 +11,10 @@ detok_t *detok_create(const tokenizer_t *tok);
 
 /* Feed one token id. *out is a heap-allocated buffer of newly completed UTF-8
  * bytes (never NULL, NUL-terminated, may be empty). *out_len is its byte
- * length. Withholds incomplete trailing UTF-8 sequences. Caller frees *out.
- * Returns 0 on success, -1 on error. */
+ * length. Withholds incomplete trailing UTF-8 sequences; invalid lead bytes
+ * and bare continuations pass through as-is (not a validating UTF-8 decoder).
+ * Caller frees *out. Returns 0 on success, -1 on error (instance is then
+ * in an undefined state; create a new one). */
 int detok_feed(detok_t *d, int32_t id, char **out, size_t *out_len);
 
 /* Emit any withheld trailing bytes verbatim. Same output contract as feed. */
