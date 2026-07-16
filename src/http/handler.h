@@ -2,8 +2,8 @@
 #define MLXD_HTTP_HANDLER_H
 
 #include "http/router.h"
+#include "http/serve_ctx.h"
 
-/* Register all API handlers on the router. */
-void handler_register_all(http_router_t *router, void *engine_ctx);
+void handler_register_all(http_router_t *router, serve_ctx_t *ctx);
 
 #endif

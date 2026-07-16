@@ -107,6 +107,8 @@ unicode-tables:
 
 clean:
 	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d
+	find src vendor -name '*.tsan.o' -delete
+	rm -rf build/tsan
 
 install: mlxd
 	install -d $(PREFIX)/bin
@@ -115,7 +117,50 @@ install: mlxd
 compile_commands.json: Makefile
 	bear -- $(MAKE) clean mlxd
 
-.PHONY: test test-gpu clean install analyze coverage clean-coverage unicode-tables
+test-leaks: tests/test_http_server
+	leaks --atExit -- ./tests/test_http_server
+
+.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage clean-coverage unicode-tables
+
+# --- Thread Sanitizer tests ---------------------------------------------------
+
+TSAN_CFLAGS   := -g -O1 -fsanitize=thread
+TSAN_LDFLAGS  := -fsanitize=thread
+TSAN_DIR      := build/tsan
+TSAN_ALL_OBJS := $(SRCS:.c=.tsan.o)
+JINJA_TSAN_OBJS := $(JINJA_SRCS:.cpp=.tsan.o)
+TSAN_LIB_OBJS := $(filter-out src/main.tsan.o,$(TSAN_ALL_OBJS)) vendor/yyjson/yyjson.tsan.o $(JINJA_TSAN_OBJS)
+
+.PRECIOUS: %.tsan.o
+%.tsan.o: %.c
+	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -c -o $@ $<
+
+vendor/yyjson/yyjson.tsan.o: vendor/yyjson/yyjson.c
+	$(CC) -std=c11 -g -O1 -DNDEBUG -fsanitize=thread -c -o $@ $<
+
+vendor/jinja_cpp/%.tsan.o: vendor/jinja_cpp/%.cpp
+	$(CXX) $(CXXFLAGS) -g -O1 -fsanitize=thread -c -o $@ $<
+
+$(TSAN_DIR)/test_%: tests/test_%.c $(TSAN_LIB_OBJS) | $(TSAN_DIR)
+	$(CC) $(ALL_CFLAGS) $(TSAN_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(TSAN_LIB_OBJS) $(ALL_LDFLAGS) $(TSAN_LDFLAGS)
+
+$(TSAN_DIR):
+	mkdir -p $@
+
+TSAN_TEST_BINS := $(TEST_SRCS:tests/test_%.c=$(TSAN_DIR)/test_%)
+
+test-tsan: $(TSAN_TEST_BINS)
+	@pass=0; fail=0; \
+	for t in $(TSAN_TEST_BINS); do \
+		printf "  %-40s" "$$(basename $$t)"; \
+		if ./$$t > /dev/null 2>&1; then \
+			printf "OK\n"; pass=$$((pass + 1)); \
+		else \
+			printf "FAIL\n"; fail=$$((fail + 1)); \
+		fi; \
+	done; \
+	printf "\n%d passed, %d failed (tsan)\n" $$pass $$fail; \
+	[ $$fail -eq 0 ]
 
 # --- Debug/Release shortcuts --------------------------------------------------
 

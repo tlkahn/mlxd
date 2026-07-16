@@ -15,13 +15,17 @@ typedef struct {
     size_t      body_len;
 } http_request_t;
 
+/* Ownership: handler allocates resp.body on the heap; the server frees it
+ * after building wire bytes - unless resp.deferred is true (handler retains
+ * ownership and completes asynchronously via the conn handle in req->ctx).
+ * content_type is always a borrowed literal. */
 typedef struct {
     int         status;
     const char *content_type;
     char       *body;
     size_t      body_len;
-    /* set to true for SSE streaming */
-    _Bool       streaming;
+    bool        streaming;
+    bool        deferred;
 } http_response_t;
 
 typedef void (*http_handler_fn)(const http_request_t *req, http_response_t *resp, void *ctx);

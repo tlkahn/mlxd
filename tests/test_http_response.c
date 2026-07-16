@@ -84,6 +84,32 @@ static void test_null_body(void) {
     free(r);
 }
 
+static void test_preflight_keep_alive(void) {
+    size_t out_len = 0;
+    char *r = http_build_preflight(true, &out_len);
+    assert(r != NULL);
+    const char *expected =
+        "HTTP/1.1 204 No Content\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n";
+    assert(out_len == strlen(expected));
+    assert(memcmp(r, expected, out_len) == 0);
+    free(r);
+}
+
+static void test_preflight_close(void) {
+    size_t out_len = 0;
+    char *r = http_build_preflight(false, &out_len);
+    assert(r != NULL);
+    assert(strstr(r, "Connection: close\r\n") != NULL);
+    assert(strstr(r, "keep-alive") == NULL);
+    free(r);
+}
+
 int main(void) {
     test_200_exact_bytes();
     test_status_reasons();
@@ -93,6 +119,8 @@ int main(void) {
     test_header_injection_rejected();
     test_null_content_type_rejected();
     test_null_body();
+    test_preflight_keep_alive();
+    test_preflight_close();
     printf("test_http_response: all passed\n");
     return 0;
 }
