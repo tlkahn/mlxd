@@ -188,12 +188,12 @@ static void dispatch(conn_t *c, http_parsed_request_t *pr) {
 
     if (strcmp(pr->method, "OPTIONS") == 0) {
         size_t pf_len = 0;
-        char *pf = http_build_preflight(&pf_len);
+        char *pf = http_build_preflight(pr->keep_alive, &pf_len);
         if (!pf) {
             close_conn(c);
             return;
         }
-        queue_write(c, pf, pf_len, false);
+        queue_write(c, pf, pf_len, !pr->keep_alive);
         return;
     }
 

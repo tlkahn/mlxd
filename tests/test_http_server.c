@@ -436,6 +436,39 @@ static void test_connection_close(void) {
     engine_destroy(&eng);
 }
 
+static void test_options_preflight_close(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    srv_fixture_t f = fixture_up(cfg);
+
+    int fd = http_client_connect("127.0.0.1", f.port);
+    assert(fd >= 0);
+
+    const char *req =
+        "OPTIONS /v1/chat/completions HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    assert(http_client_send_all(fd, req, strlen(req)) == 0);
+
+    http_client_response_t resp;
+    assert(http_client_recv_response(fd, &resp) == 0);
+    assert(resp.status == 204);
+
+    char val[256];
+    assert(http_client_header(&resp, "Connection", val, sizeof(val)));
+    assert(strcmp(val, "close") == 0);
+
+    char buf[1];
+    assert(read(fd, buf, 1) <= 0);
+
+    http_client_response_free(&resp);
+    close(fd);
+    fixture_down(&f);
+    engine_destroy(&eng);
+}
+
 static void test_stop_with_open_connections(void) {
     engine_t eng;
     engine_init(&eng);
@@ -490,6 +523,7 @@ int main(void) {
     test_malformed_http_400();
     test_keep_alive_two_requests();
     test_connection_close();
+    test_options_preflight_close();
     test_stop_with_open_connections();
     printf("test_http_server: all passed\n");
 

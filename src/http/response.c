@@ -54,20 +54,22 @@ char *http_build_response(int status, const char *content_type, const char *body
     return buf;
 }
 
-char *http_build_preflight(size_t *out_len) {
-    const char *resp =
+char *http_build_preflight(bool keep_alive, size_t *out_len) {
+    const char *conn = keep_alive ? "keep-alive" : "close";
+    char resp[512];
+    int len = snprintf(resp, sizeof(resp),
         "HTTP/1.1 204 No Content\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
         "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
         "Content-Length: 0\r\n"
-        "Connection: keep-alive\r\n"
-        "\r\n";
-    size_t len = strlen(resp);
-    char *buf = malloc(len + 1);
+        "Connection: %s\r\n"
+        "\r\n", conn);
+    if (len < 0 || (size_t)len >= sizeof(resp)) return NULL;
+    char *buf = malloc((size_t)len + 1);
     if (!buf) return NULL;
-    memcpy(buf, resp, len + 1);
-    if (out_len) *out_len = len;
+    memcpy(buf, resp, (size_t)len + 1);
+    if (out_len) *out_len = (size_t)len;
     return buf;
 }
 

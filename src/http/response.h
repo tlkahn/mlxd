@@ -15,7 +15,7 @@ char *http_build_response(int status, const char *content_type, const char *body
 char *http_build_sse_head(size_t *out_len);
 
 /* Build a CORS preflight 204 response (Access-Control-Allow-*). */
-char *http_build_preflight(size_t *out_len);
+char *http_build_preflight(bool keep_alive, size_t *out_len);
 
 const char *http_status_reason(int status);
 
