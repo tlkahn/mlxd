@@ -96,12 +96,60 @@ static void test_start_stop_clean(void) {
     engine_destroy(&eng);
 }
 
+/* --- Stage 7 tests -------------------------------------------------------- */
+
+static void test_models_list(void) {
+    engine_t eng;
+    engine_init(&eng);
+    http_server_config_t cfg = {.port = 0, .engine = &eng};
+    srv_fixture_t f = fixture_up(cfg);
+
+    http_client_response_t resp;
+    int rc = http_client_request("127.0.0.1", f.port,
+        "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        &resp);
+    assert(rc == 0);
+    assert(resp.status == 200);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(root, "object")), "list") == 0);
+
+    yyjson_val *data = yyjson_obj_get(root, "data");
+    assert(yyjson_is_arr(data));
+
+    int found_qwen = 0, found_other = 0;
+    size_t idx, max;
+    yyjson_val *item;
+    yyjson_arr_foreach(data, idx, max, item) {
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(item, "object")), "model") == 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(item, "owned_by")), "mlxd") == 0);
+        const char *id = yyjson_get_str(yyjson_obj_get(item, "id"));
+        if (strcmp(id, "mlx-community/Qwen3-0.6B-4bit") == 0) found_qwen = 1;
+        if (strcmp(id, "org/other-model") == 0) found_other = 1;
+    }
+    assert(found_qwen);
+    assert(found_other);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    fixture_down(&f);
+    engine_destroy(&eng);
+}
+
 /* --- main ----------------------------------------------------------------- */
 
 int main(void) {
+    setenv("MLXD_CACHE_DIR", MLXD_FIXTURES_DIR "/registry_cache", 1);
+    unsetenv("MLXD_HF_HUB_DIR");
+
     test_bind_reports_port();
     test_unknown_route_404();
     test_start_stop_clean();
+    test_models_list();
     printf("test_http_server: all passed\n");
+
+    unsetenv("MLXD_CACHE_DIR");
     return 0;
 }
