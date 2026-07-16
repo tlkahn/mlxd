@@ -4,6 +4,7 @@
 #include "registry/registry.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define MLXD_USER_AGENT "mlxd/0.1.0"
 
@@ -24,8 +25,9 @@ char *reg_endpoint(void);
 int   reg_file_wanted(const char *rfilename);
 int   reg_rfilename_safe(const char *rfilename);
 
-int   reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n);
-void  reg_file_plan_free(char **files, size_t n);
+int   reg_parse_file_plan(const char *json, size_t len, char ***files,
+                          int64_t **sizes, size_t *n);
+void  reg_file_plan_free(char **files, int64_t *sizes, size_t n);
 
 int   reg_download_file(const char *url, const char *dest, const char *token,
                         const char *filename,
@@ -37,5 +39,8 @@ char *reg_meta_read_revision(const char *dir);
 char *reg_dup_str(const char *s);
 char *reg_path_join(const char *dir, const char *name);
 int   reg_dir_has_config_json(const char *dir);
+
+char *reg_hf_hub_dir(void);
+char *reg_find_latest_snapshot(const char *model_dir);
 
 #endif

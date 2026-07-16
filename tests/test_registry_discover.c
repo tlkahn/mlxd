@@ -11,7 +11,7 @@ static void test_discover_finds_models(void) {
     setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
     unsetenv("MLXD_HF_HUB_DIR");
     int count = -1;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     assert(count == 2);
     assert(models != NULL);
 
@@ -37,7 +37,7 @@ static void test_discover_skips_no_config(void) {
     setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
     unsetenv("MLXD_HF_HUB_DIR");
     int count = -1;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     for (int i = 0; i < count; i++) {
         assert(strcmp(models[i].id, "not-a-model") != 0);
     }
@@ -49,7 +49,7 @@ static void test_discover_skips_part_only(void) {
     setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
     unsetenv("MLXD_HF_HUB_DIR");
     int count = -1;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     for (int i = 0; i < count; i++) {
         assert(strstr(models[i].id, "half") == NULL);
     }
@@ -61,7 +61,7 @@ static void test_discover_empty_cache(void) {
     setenv("MLXD_CACHE_DIR", "/nonexistent/path", 1);
     unsetenv("MLXD_HF_HUB_DIR");
     int count = -1;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     assert(count == 0);
     assert(models == NULL);
     unsetenv("MLXD_CACHE_DIR");
@@ -71,7 +71,7 @@ static void test_discover_hub_cache(void) {
     setenv("MLXD_CACHE_DIR", "/nonexistent", 1);
     setenv("MLXD_HF_HUB_DIR", MLXD_FIXTURES_DIR "/hf_hub_cache/hub", 1);
     int count = -1;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     assert(count == 1);
     assert(models != NULL);
     assert(strcmp(models[0].id, "org/hubmodel") == 0);
@@ -86,7 +86,7 @@ static void test_discover_dedup_mlxd_wins(void) {
     setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
     setenv("MLXD_HF_HUB_DIR", MLXD_FIXTURES_DIR "/hf_hub_cache/hub", 1);
     int count = -1;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     assert(models != NULL);
     int hub_only_found = 0;
     for (int i = 0; i < count; i++) {
@@ -112,7 +112,7 @@ static void test_free_null_safe(void) {
 static void test_discover_null_count(void) {
     setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
     unsetenv("MLXD_HF_HUB_DIR");
-    registry_model_info_t *models = model_discover(NULL);
+    registry_model_info_t *models = registry_discover(NULL);
     assert(models == NULL);
     unsetenv("MLXD_CACHE_DIR");
 }

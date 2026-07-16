@@ -43,6 +43,26 @@ int reg_dir_has_config_json(const char *dir) {
     return ok;
 }
 
+static int reg_spec_char_ok(char c) {
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= 'a' && c <= 'z') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    if (c == '.' || c == '_' || c == '-') return 1;
+    return 0;
+}
+
+static int reg_spec_charset_ok(const char *s) {
+    for (; *s; s++)
+        if (!reg_spec_char_ok(*s)) return 0;
+    return 1;
+}
+
+static int reg_spec_charset_ok_n(const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (!reg_spec_char_ok(s[i])) return 0;
+    return 1;
+}
+
 int reg_spec_parse(const char *spec, reg_spec_t *out) {
     if (!spec || !out)
         return -1;
@@ -89,6 +109,8 @@ int reg_spec_parse(const char *spec, reg_spec_t *out) {
         const char *rev = colon + 1;
         if (rev[0] == '\0')
             return -1;
+        if (!reg_spec_charset_ok(rev))
+            return -1;
         out->revision = reg_dup_str(rev);
         if (!out->revision)
             return -1;
@@ -97,6 +119,13 @@ int reg_spec_parse(const char *spec, reg_spec_t *out) {
     }
 
     if (model_len == 0) {
+        free(out->revision);
+        out->revision = NULL;
+        return -1;
+    }
+
+    if (!reg_spec_charset_ok_n(spec, org_len) ||
+        !reg_spec_charset_ok_n(after_slash, model_len)) {
         free(out->revision);
         out->revision = NULL;
         return -1;
@@ -180,7 +209,8 @@ char *reg_endpoint(void) {
 static const char *EXACT_FILES[] = {
     "config.json", "tokenizer.json", "tokenizer_config.json",
     "generation_config.json", "special_tokens_map.json",
-    "chat_template.jinja",
+    "chat_template.jinja", "chat_template.json",
+    "tokenizer.model", "vocab.json", "merges.txt",
 };
 #define EXACT_FILES_N (sizeof(EXACT_FILES) / sizeof(EXACT_FILES[0]))
 
@@ -240,7 +270,9 @@ static size_t membuf_write(void *data, size_t size, size_t nmemb, void *userdata
 
 static int mkdirs(const char *path) {
     char tmp[4096];
-    snprintf(tmp, sizeof(tmp), "%s", path);
+    int tlen = snprintf(tmp, sizeof(tmp), "%s", path);
+    if (tlen < 0 || (size_t)tlen >= sizeof(tmp))
+        return -1;
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
@@ -406,8 +438,14 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     }
 
     char api_url[2048];
-    snprintf(api_url, sizeof(api_url), "%s/api/models/%s/%s/revision/%s",
-             endpoint, s.org, s.model, revision);
+    int api_url_len = snprintf(api_url, sizeof(api_url),
+                               "%s/api/models/%s/%s/revision/%s?blobs=true",
+                               endpoint, s.org, s.model, revision);
+    if (api_url_len < 0 || (size_t)api_url_len >= sizeof(api_url)) {
+        free(endpoint);
+        reg_spec_free(&s);
+        return NULL;
+    }
 
     CURL *c = curl_easy_init();
     if (!c) {
@@ -419,12 +457,22 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     membuf_t api_buf = {0};
     api_buf.cap = 4096;
     api_buf.buf = calloc(1, api_buf.cap);
+    if (!api_buf.buf) {
+        curl_easy_cleanup(c);
+        free(endpoint);
+        reg_spec_free(&s);
+        return NULL;
+    }
 
     curl_easy_setopt(c, CURLOPT_URL, api_url);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, membuf_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &api_buf);
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_USERAGENT, MLXD_USER_AGENT);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
 
     struct curl_slist *hdrs = NULL;
     if (token) {
@@ -452,8 +500,9 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     }
 
     char **files = NULL;
+    int64_t *sizes = NULL;
     size_t nfiles = 0;
-    if (reg_parse_file_plan(api_buf.buf, api_buf.len, &files, &nfiles) != 0 || nfiles == 0) {
+    if (reg_parse_file_plan(api_buf.buf, api_buf.len, &files, &sizes, &nfiles) != 0 || nfiles == 0) {
         log_error("no downloadable files in model");
         free(api_buf.buf);
         free(endpoint);
@@ -471,7 +520,7 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     char *cache_dir = reg_model_cache_dir(s.org, s.model);
     if (!cache_dir || mkdirs(cache_dir) != 0) {
         log_error("failed to create cache directory");
-        reg_file_plan_free(files, nfiles);
+        reg_file_plan_free(files, sizes, nfiles);
         if (api_doc) yyjson_doc_free(api_doc);
         free(api_buf.buf);
         free(endpoint);
@@ -524,8 +573,13 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
         }
 
         char file_url[2048];
-        snprintf(file_url, sizeof(file_url), "%s/%s/%s/resolve/%s/%s",
-                 endpoint, s.org, s.model, revision, files[i]);
+        int furl_len = snprintf(file_url, sizeof(file_url), "%s/%s/%s/resolve/%s/%s",
+                                endpoint, s.org, s.model, revision, files[i]);
+        if (furl_len < 0 || (size_t)furl_len >= sizeof(file_url)) {
+            free(dest);
+            ok = 0;
+            break;
+        }
 
         int rc = reg_download_file(file_url, dest, token, files[i], cb, ud, i, nfiles);
         free(dest);
@@ -535,7 +589,7 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
         }
     }
 
-    reg_file_plan_free(files, nfiles);
+    reg_file_plan_free(files, sizes, nfiles);
     free(endpoint);
 
     if (!ok) {
@@ -552,6 +606,34 @@ char *registry_pull(const char *spec, const registry_pull_opts_t *opts) {
     free(api_buf.buf);
     reg_spec_free(&s);
     return cache_dir;
+}
+
+static char *resolve_hub_fallback(const char *org, const char *model) {
+    char *hub = reg_hf_hub_dir();
+    if (!hub)
+        return NULL;
+    size_t olen = strlen(org);
+    size_t mlen = strlen(model);
+    char *dirname = malloc(8 + olen + 2 + mlen + 1);
+    if (!dirname) {
+        free(hub);
+        return NULL;
+    }
+    memcpy(dirname, "models--", 8);
+    memcpy(dirname + 8, org, olen);
+    memcpy(dirname + 8 + olen, "--", 2);
+    memcpy(dirname + 8 + olen + 2, model, mlen);
+    dirname[8 + olen + 2 + mlen] = '\0';
+
+    char *model_dir = reg_path_join(hub, dirname);
+    free(dirname);
+    free(hub);
+    if (!model_dir)
+        return NULL;
+
+    char *snap = reg_find_latest_snapshot(model_dir);
+    free(model_dir);
+    return snap;
 }
 
 char *registry_resolve(const char *specifier) {
@@ -580,6 +662,8 @@ char *registry_resolve(const char *specifier) {
             }
             free(cached_rev);
         }
+        if (!dir)
+            dir = resolve_hub_fallback(s.org, s.model);
     }
 
     reg_spec_free(&s);

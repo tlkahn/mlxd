@@ -135,6 +135,23 @@ static void test_empty_revision(void) {
     assert(reg_spec_parse("org/model:", &s) == -1);
 }
 
+static void test_charset_guard(void) {
+    reg_spec_t s = {0};
+    assert(reg_spec_parse("org/model with space", &s) == -1);
+    assert(reg_spec_parse("org/model#fragment", &s) == -1);
+    assert(reg_spec_parse("org/model%20encoded", &s) == -1);
+    assert(reg_spec_parse("org name/model", &s) == -1);
+    assert(reg_spec_parse("org/model:rev with space", &s) == -1);
+    assert(reg_spec_parse("org/model:rev#x", &s) == -1);
+
+    int rc = reg_spec_parse("org.name/model-v1.2:rev_3", &s);
+    assert(rc == 0);
+    assert(strcmp(s.org, "org.name") == 0);
+    assert(strcmp(s.model, "model-v1.2") == 0);
+    assert(strcmp(s.revision, "rev_3") == 0);
+    reg_spec_free(&s);
+}
+
 int main(void) {
     test_org_model();
     test_org_model_revision();
@@ -152,6 +169,7 @@ int main(void) {
     test_slash_model_is_local_path();
     test_empty_model();
     test_empty_revision();
+    test_charset_guard();
     printf("test_registry_spec: all passed\n");
     return 0;
 }

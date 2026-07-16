@@ -10,8 +10,10 @@
 #include <sys/stat.h>
 #include <yyjson/yyjson.h>
 
-int reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n) {
+int reg_parse_file_plan(const char *json, size_t len, char ***files,
+                        int64_t **sizes, size_t *n) {
     *files = NULL;
+    *sizes = NULL;
     *n = 0;
 
     yyjson_doc *doc = yyjson_read(json, len, 0);
@@ -32,7 +34,10 @@ int reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n) 
     }
 
     char **result = calloc(arr_len, sizeof(char *));
-    if (!result) {
+    int64_t *sz = calloc(arr_len, sizeof(int64_t));
+    if (!result || !sz) {
+        free(result);
+        free(sz);
         yyjson_doc_free(doc);
         return -1;
     }
@@ -52,10 +57,14 @@ int reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n) 
             continue;
         result[count] = reg_dup_str(name);
         if (!result[count]) {
-            reg_file_plan_free(result, count);
+            reg_file_plan_free(result, sz, count);
             yyjson_doc_free(doc);
             return -1;
         }
+        yyjson_val *sv = yyjson_obj_get(item, "size");
+        sz[count] = yyjson_is_sint(sv) || yyjson_is_uint(sv)
+                        ? (int64_t)yyjson_get_sint(sv)
+                        : -1;
         count++;
     }
 
@@ -63,20 +72,23 @@ int reg_parse_file_plan(const char *json, size_t len, char ***files, size_t *n) 
 
     if (count == 0) {
         free(result);
+        free(sz);
         return 0;
     }
 
     *files = result;
+    *sizes = sz;
     *n = count;
     return 0;
 }
 
-void reg_file_plan_free(char **files, size_t n) {
+void reg_file_plan_free(char **files, int64_t *sizes, size_t n) {
     if (!files)
         return;
     for (size_t i = 0; i < n; i++)
         free(files[i]);
     free(files);
+    free(sizes);
 }
 
 static void curl_once_fn(void) {
@@ -159,7 +171,9 @@ int reg_download_file(const char *url, const char *dest, const char *token,
     reg_curl_init_once();
 
     char part_path[4096];
-    snprintf(part_path, sizeof(part_path), "%s.part", dest);
+    int pp_len = snprintf(part_path, sizeof(part_path), "%s.part", dest);
+    if (pp_len < 0 || (size_t)pp_len >= sizeof(part_path))
+        return -1;
 
     int attempt = 0;
 retry:;
@@ -201,6 +215,9 @@ retry:;
     curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress_cb);
     curl_easy_setopt(c, CURLOPT_XFERINFODATA, &ctx);
     curl_easy_setopt(c, CURLOPT_USERAGENT, MLXD_USER_AGENT);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
     curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, dl_header_cb);
     curl_easy_setopt(c, CURLOPT_HEADERDATA, &ctx);
 

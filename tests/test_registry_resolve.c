@@ -167,6 +167,28 @@ static void test_resolve_tilde_expansion(void) {
     else unsetenv("HOME");
 }
 
+static void test_resolve_hub_fallback(void) {
+    setenv("MLXD_CACHE_DIR", "/nonexistent", 1);
+    setenv("MLXD_HF_HUB_DIR", MLXD_FIXTURES_DIR "/hf_hub_cache/hub", 1);
+    char *path = registry_resolve("org/hubmodel");
+    assert(path != NULL);
+    assert(strstr(path, "snapshots/abc123") != NULL);
+    free(path);
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
+static void test_resolve_mlxd_cache_wins_over_hub(void) {
+    setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
+    setenv("MLXD_HF_HUB_DIR", MLXD_FIXTURES_DIR "/hf_hub_cache/hub", 1);
+    char *path = registry_resolve("mlx-community/Qwen3-0.6B-4bit");
+    assert(path != NULL);
+    assert(strstr(path, "registry_cache") != NULL);
+    free(path);
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
 static void test_resolve_revision_missing_meta(void) {
     make_tmpdir();
     setenv("MLXD_CACHE_DIR", tmpdir_buf, 1);
@@ -195,6 +217,8 @@ int main(void) {
     test_resolve_revision_mismatch();
     test_resolve_no_revision_returns_dir();
     test_resolve_tilde_expansion();
+    test_resolve_hub_fallback();
+    test_resolve_mlxd_cache_wins_over_hub();
     test_resolve_revision_missing_meta();
     printf("test_registry_resolve: all passed\n");
     return 0;

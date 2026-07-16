@@ -65,7 +65,7 @@ static int cmd_pull(int argc, char **argv) {
 
 static int cmd_list(void) {
     int count = 0;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     if (!models || count == 0) {
         printf("no models found\n");
         return 0;

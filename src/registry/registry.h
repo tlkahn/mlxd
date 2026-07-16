@@ -31,7 +31,7 @@ typedef struct {
     int64_t  mtime;
 } registry_model_info_t;
 
-registry_model_info_t *model_discover(int *count);
+registry_model_info_t *registry_discover(int *count);
 void registry_model_list_free(registry_model_info_t *models, int count);
 
 #endif

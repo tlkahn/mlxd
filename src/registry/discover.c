@@ -125,7 +125,7 @@ static registry_model_info_t *scan_mlxd_cache(int *count) {
     return arr;
 }
 
-static char *hf_hub_dir(void) {
+char *reg_hf_hub_dir(void) {
     const char *env = getenv("MLXD_HF_HUB_DIR");
     if (env && env[0])
         return reg_dup_str(env);
@@ -139,7 +139,7 @@ static char *hf_hub_dir(void) {
     return cache;
 }
 
-static char *find_latest_snapshot(const char *model_dir) {
+char *reg_find_latest_snapshot(const char *model_dir) {
     char *snap_dir = reg_path_join(model_dir, "snapshots");
     if (!snap_dir)
         return NULL;
@@ -212,7 +212,7 @@ static int id_in_list(const registry_model_info_t *arr, int count, const char *i
 }
 
 static registry_model_info_t *scan_hub_cache(registry_model_info_t *arr, int *count, int *cap) {
-    char *hub = hf_hub_dir();
+    char *hub = reg_hf_hub_dir();
     if (!hub)
         return arr;
     DIR *d = opendir(hub);
@@ -237,7 +237,7 @@ static registry_model_info_t *scan_hub_cache(registry_model_info_t *arr, int *co
             free(id);
             continue;
         }
-        char *snap_path = find_latest_snapshot(model_dir);
+        char *snap_path = reg_find_latest_snapshot(model_dir);
         free(model_dir);
         if (!snap_path) {
             free(id);
@@ -279,7 +279,7 @@ static registry_model_info_t *scan_hub_cache(registry_model_info_t *arr, int *co
     return arr;
 }
 
-registry_model_info_t *model_discover(int *count) {
+registry_model_info_t *registry_discover(int *count) {
     if (!count)
         return NULL;
     int cap = 0;

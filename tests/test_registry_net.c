@@ -33,7 +33,7 @@ int main(void) {
     free(resolved);
 
     int count = 0;
-    registry_model_info_t *models = model_discover(&count);
+    registry_model_info_t *models = registry_discover(&count);
     assert(count >= 1);
     int found = 0;
     for (int i = 0; i < count; i++) {
