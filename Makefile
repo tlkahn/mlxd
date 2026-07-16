@@ -140,8 +140,20 @@ $(TSAN_DIR)/test_%: tests/test_%.c $(TSAN_LIB_OBJS) | $(TSAN_DIR)
 $(TSAN_DIR):
 	mkdir -p $@
 
-test-tsan: $(TSAN_DIR)/test_http_server
-	$(TSAN_DIR)/test_http_server
+TSAN_TEST_BINS := $(TEST_SRCS:tests/test_%.c=$(TSAN_DIR)/test_%)
+
+test-tsan: $(TSAN_TEST_BINS)
+	@pass=0; fail=0; \
+	for t in $(TSAN_TEST_BINS); do \
+		printf "  %-40s" "$$(basename $$t)"; \
+		if ./$$t > /dev/null 2>&1; then \
+			printf "OK\n"; pass=$$((pass + 1)); \
+		else \
+			printf "FAIL\n"; fail=$$((fail + 1)); \
+		fi; \
+	done; \
+	printf "\n%d passed, %d failed (tsan)\n" $$pass $$fail; \
+	[ $$fail -eq 0 ]
 
 # --- Debug/Release shortcuts --------------------------------------------------
 
