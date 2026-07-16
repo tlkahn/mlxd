@@ -1,82 +1,7 @@
-#include "http/server.h"
-#include "model/tokenizer.h"
-#include "http_client.h"
+#include "gen_server_harness.h"
 
-#include <assert.h>
-#include <pthread.h>
 #include <stdio.h>
-#include <string.h>
-#include <sys/time.h>
 #include <yyjson/yyjson.h>
-
-#ifndef MLXD_FIXTURES_DIR
-#error "MLXD_FIXTURES_DIR must be defined"
-#endif
-
-#define TRIVIAL_TMPL "{{ messages[0].content }}"
-
-/* --- Fixture --------------------------------------------------------------- */
-
-typedef struct {
-    engine_t       eng;
-    tokenizer_t   *tok;
-    http_server_t *srv;
-    pthread_t      th;
-    int            port;
-} gen_fixture_t;
-
-static void *server_thread(void *arg) {
-    http_server_start((http_server_t *)arg);
-    return NULL;
-}
-
-static gen_fixture_t fixture_up(bool load_model, bool set_tokenizer,
-                                const char *chat_template) {
-    gen_fixture_t f = {0};
-    engine_init(&f.eng);
-
-    if (load_model) {
-        engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
-        assert(cmd != NULL);
-        cmd->tag = CMD_LOAD;
-        cmd->load.model_path = strdup("gpt2");
-        engine_post(&f.eng, cmd);
-        usleep(10000);
-    }
-
-    f.tok = set_tokenizer
-        ? tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json")
-        : NULL;
-
-    http_server_config_t cfg = {
-        .port = 0,
-        .engine = &f.eng,
-        .tokenizer = f.tok,
-        .chat_template = chat_template,
-        .model_id = "gpt2",
-    };
-    f.srv = http_server_create(&cfg);
-    assert(f.srv != NULL);
-    f.port = http_server_port(f.srv);
-    assert(f.port > 0);
-    int rc = pthread_create(&f.th, NULL, server_thread, f.srv);
-    assert(rc == 0);
-    for (int i = 0; i < 500; i++) {
-        int fd = http_client_connect("127.0.0.1", f.port);
-        if (fd >= 0) { close(fd); break; }
-        usleep(1000);
-        assert(i < 499);
-    }
-    return f;
-}
-
-static void fixture_down(gen_fixture_t *f) {
-    http_server_stop(f->srv);
-    pthread_join(f->th, NULL);
-    http_server_destroy(f->srv);
-    engine_destroy(&f->eng);
-    if (f->tok) tokenizer_free(f->tok);
-}
 
 /* --- Helpers --------------------------------------------------------------- */
 
@@ -100,7 +25,7 @@ static http_client_response_t post_json(int port, const char *path,
 /* --- 9a: chat echo roundtrip --------------------------------------------- */
 
 static void test_chat_echo_roundtrip(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]}");
@@ -134,13 +59,13 @@ static void test_chat_echo_roundtrip(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 9b: completion echo roundtrip --------------------------------------- */
 
 static void test_completion_echo_roundtrip(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/completions",
         "{\"model\":\"gpt2\",\"prompt\":\"Once upon a time\"}");
@@ -164,13 +89,13 @@ static void test_completion_echo_roundtrip(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 9c: max_tokens defaults --------------------------------------------- */
 
 static void test_max_tokens_defaults(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     /* Completions with a >16-token prompt and no max_tokens: default 16 truncates */
     const char *long_prompt = "one two three four five six seven eight nine ten "
@@ -220,13 +145,13 @@ static void test_max_tokens_defaults(void) {
     yyjson_doc_free(doc2);
     http_client_response_free(&resp2);
 
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 9d: no model -> 500 ------------------------------------------------- */
 
 static void test_no_model_500(void) {
-    gen_fixture_t f = fixture_up(false, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(false, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
@@ -245,13 +170,13 @@ static void test_no_model_500(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 9e: missing messages -> 400 ----------------------------------------- */
 
 static void test_missing_messages_400(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\"}");
@@ -265,13 +190,13 @@ static void test_missing_messages_400(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 9f: null tokenizer -> 503 ------------------------------------------- */
 
 static void test_null_tokenizer_503(void) {
-    gen_fixture_t f = fixture_up(true, false, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, false, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
@@ -285,13 +210,13 @@ static void test_null_tokenizer_503(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 9g: null template -> chat 400, completions ok ----------------------- */
 
 static void test_null_template_400_chat(void) {
-    gen_fixture_t f = fixture_up(true, true, NULL);
+    gen_fixture_t f = gen_fixture_up(true, true, NULL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
@@ -301,11 +226,11 @@ static void test_null_template_400_chat(void) {
     assert(doc != NULL);
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 static void test_null_template_completion_ok(void) {
-    gen_fixture_t f = fixture_up(true, true, NULL);
+    gen_fixture_t f = gen_fixture_up(true, true, NULL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/completions",
         "{\"model\":\"gpt2\",\"prompt\":\"hello\"}");
@@ -315,29 +240,10 @@ static void test_null_template_completion_ok(void) {
     assert(doc != NULL);
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- SSE helpers --------------------------------------------------------- */
-
-static int sse_connect_and_post(int port, const char *path, const char *body,
-                                char *hdrbuf, size_t hdrcap) {
-    int fd = http_client_connect("127.0.0.1", port);
-    assert(fd >= 0);
-
-    char raw[4096];
-    snprintf(raw, sizeof(raw),
-        "POST %s HTTP/1.1\r\n"
-        "Host: localhost\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %zu\r\n"
-        "\r\n%s", path, strlen(body), body);
-    assert(http_client_send_all(fd, raw, strlen(raw)) == 0);
-
-    int rc = http_client_recv_headers(fd, hdrbuf, hdrcap);
-    assert(rc > 0);
-    return fd;
-}
 
 static yyjson_doc *parse_sse_json(const char *event) {
     assert(strncmp(event, "data: ", 6) == 0);
@@ -351,7 +257,7 @@ static yyjson_doc *parse_sse_json(const char *event) {
 /* --- 10a: chat SSE sequence ---------------------------------------------- */
 
 static void test_chat_sse_sequence(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     char hdrbuf[4096];
     int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
@@ -410,13 +316,13 @@ static void test_chat_sse_sequence(void) {
     assert(strcmp(concat, "hello world") == 0);
 
     close(fd);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 10b: chat SSE include_usage ----------------------------------------- */
 
 static void test_chat_sse_include_usage(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     char hdrbuf[4096];
     int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
@@ -459,13 +365,13 @@ static void test_chat_sse_include_usage(void) {
     assert(got_done);
 
     close(fd);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 10c: completion SSE sequence ---------------------------------------- */
 
 static void test_completion_sse_sequence(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     char hdrbuf[4096];
     int fd = sse_connect_and_post(f.port, "/v1/completions",
@@ -511,13 +417,13 @@ static void test_completion_sse_sequence(void) {
     assert(strcmp(concat, "hello world") == 0);
 
     close(fd);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 13a: client disconnect cancels generation --------------------------- */
 
 static void test_client_disconnect_cancels(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     /* Use a long prompt so the engine's echo loop parks on stream_push
      * (ring cap 64 fills up). The client disconnecting mid-stream should
@@ -550,16 +456,13 @@ static void test_client_disconnect_cancels(void) {
     /* Small delay for the server to notice the disconnect */
     usleep(50000);
 
-    /* The test is that fixture_down completes without hang or crash.
-     * Under tsan, this validates there are no data races in the
-     * teardown path. */
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 13b: server stop during stream - drain delivers [DONE] -------------- */
 
 static void test_server_stop_during_stream(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     char long_content[4096];
     memset(long_content, 0, sizeof(long_content));
@@ -586,7 +489,7 @@ static void test_server_stop_during_stream(void) {
 
     /* Graceful drain: server cancels the stream, engine injects DONE,
      * gen_request flushes data: [DONE] before closing the conn. */
-    fixture_down(&f);
+    gen_fixture_down(&f);
 
     bool got_done = false;
     while (!got_done) {
@@ -603,7 +506,7 @@ static void test_server_stop_during_stream(void) {
 /* --- 11a: negative temperature -> 400 (#10) ------------------------------ */
 
 static void test_bad_temperature_400(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":-1}");
@@ -619,13 +522,13 @@ static void test_bad_temperature_400(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 11b: bad top_p on completions -> 400 (#10) -------------------------- */
 
 static void test_bad_top_p_completions_400(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/completions",
         "{\"model\":\"gpt2\",\"prompt\":\"hello\",\"top_p\":2.0}");
@@ -639,13 +542,13 @@ static void test_bad_top_p_completions_400(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 11c: n/logprobs/stop silently ignored (#10 policy pin) -------------- */
 
 static void test_ignored_params_succeed(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
@@ -656,13 +559,13 @@ static void test_ignored_params_succeed(void) {
     assert(doc);
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 11d: error type maps from status (#9) ------------------------------- */
 
 static void test_no_model_error_type(void) {
-    gen_fixture_t f = fixture_up(false, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(false, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
@@ -678,13 +581,13 @@ static void test_no_model_error_type(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 13c: disconnect on no-model path ------------------------------------ */
 
 static void test_disconnect_no_model(void) {
-    gen_fixture_t f = fixture_up(false, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(false, true, TRIVIAL_TMPL, 0);
 
     /* On the no-model path, the engine pushes CHUNK_ERROR then CHUNK_DONE.
      * If the consumer disconnects before draining, the ERROR push may fail
@@ -699,13 +602,13 @@ static void test_disconnect_no_model(void) {
     close(fd);
 
     usleep(50000);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 14a: pipelined gen requests produce single response ----------------- */
 
 static void test_pipelined_gen_requests_single_response(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     int fd = http_client_connect("127.0.0.1", f.port);
     assert(fd >= 0);
@@ -754,13 +657,13 @@ static void test_pipelined_gen_requests_single_response(void) {
     assert(strstr(resp, "HTTP/1.1 200") != NULL);
     assert(strstr(resp, "Connection: close") != NULL);
 
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 14b: chat empty generation -> content:"" not null ------------------- */
 
 static void test_chat_empty_generation_content_empty_string(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
         "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"\"}]}");
@@ -781,13 +684,13 @@ static void test_chat_empty_generation_content_empty_string(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 14c: completion empty generation -> text:"" not missing ------------- */
 
 static void test_completion_empty_generation_text_field(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     http_client_response_t resp = post_json(f.port, "/v1/completions",
         "{\"model\":\"gpt2\",\"prompt\":\"\"}");
@@ -807,13 +710,13 @@ static void test_completion_empty_generation_text_field(void) {
 
     yyjson_doc_free(doc);
     http_client_response_free(&resp);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- 14d: SSE chat zero-token -> role chunk emitted ---------------------- */
 
 static void test_chat_sse_zero_token_role_chunk(void) {
-    gen_fixture_t f = fixture_up(true, true, TRIVIAL_TMPL);
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
 
     char hdrbuf[4096];
     int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
@@ -859,7 +762,7 @@ static void test_chat_sse_zero_token_role_chunk(void) {
     assert(got_done);
 
     close(fd);
-    fixture_down(&f);
+    gen_fixture_down(&f);
 }
 
 /* --- main ---------------------------------------------------------------- */
