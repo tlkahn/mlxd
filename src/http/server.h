@@ -3,6 +3,8 @@
 
 #include "engine/engine.h"
 
+#include <stdint.h>
+
 typedef struct tokenizer tokenizer_t;
 typedef struct http_server http_server_t;
 

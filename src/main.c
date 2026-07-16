@@ -4,7 +4,6 @@
 #include "model/tokenizer.h"
 #include "registry/registry.h"
 
-#include <errno.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -227,20 +226,46 @@ static int cmd_serve(int argc, char **argv) {
         fprintf(stderr, "mlxd serve: no chat_template found; chat endpoints will return 400\n");
 
     engine_t eng;
-    engine_init(&eng);
+    if (engine_init(&eng) != 0) {
+        fprintf(stderr, "mlxd serve: failed to start engine thread\n");
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
 
     engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
     if (!cmd) {
         fprintf(stderr, "mlxd serve: out of memory\n");
+        engine_destroy(&eng);
         tokenizer_free(tok);
         free(chat_template);
         free(resolved_dir);
-        engine_destroy(&eng);
         return 1;
     }
     cmd->tag = CMD_LOAD;
     cmd->load.model_path = strdup(model_dir);
+    if (!cmd->load.model_path) {
+        fprintf(stderr, "mlxd serve: out of memory\n");
+        free(cmd);
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
     engine_post(&eng, cmd);
+
+    for (int i = 0; i < 30000 && !engine_loaded(&eng); i++)
+        usleep(1000);
+    if (!engine_loaded(&eng)) {
+        fprintf(stderr, "mlxd serve: timed out waiting for model load\n");
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
 
     http_server_config_t cfg = {
         .host = "127.0.0.1",
@@ -264,14 +289,17 @@ static int cmd_serve(int argc, char **argv) {
     fprintf(stderr, "mlxd serve: listening on 127.0.0.1:%d\n",
             http_server_port(srv));
 
-    atomic_store(&g_sigint_count, 0);
     g_srv = srv;
+    atomic_store(&g_sigint_count, 0);
     struct sigaction sa = {.sa_handler = sigint_handler};
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
 
     http_server_start(srv);
+
+    g_srv = NULL;
+    signal(SIGINT, SIG_DFL);
 
     engine_destroy(&eng);
     http_server_destroy(srv);

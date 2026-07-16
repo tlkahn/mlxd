@@ -9,6 +9,7 @@
 #include "core/log.h"
 #include "core/openai.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <uv.h>
@@ -26,6 +27,7 @@ struct http_server {
     int            port;
     size_t         max_body_bytes;
     uint64_t       drain_deadline_ms;
+    atomic_bool    stop_sent;
     bool           draining;
     bool           drain_timer_active;
 };
@@ -134,7 +136,7 @@ static void close_conn(conn_t *c) {
         cb(ctx);
     }
     uv_close((uv_handle_t *)&c->handle, on_conn_close);
-    drain_check(c->server);
+    drain_check(c->server);  /* safe: uv_close defers on_conn_close */
 }
 
 static void on_conn_close(uv_handle_t *handle) {
@@ -315,6 +317,8 @@ static void on_drain_timeout(uv_timer_t *handle) {
     srv->drain_timer_active = false;
     uv_walk(&srv->loop, walk_force_close_tcp_cb, srv);
     uv_close((uv_handle_t *)&srv->drain_timer, NULL);
+    if (srv->serve_ctx.engine)
+        engine_signal_shutdown(srv->serve_ctx.engine);
 }
 
 static void walk_drain_cb(uv_handle_t *handle, void *arg) {
@@ -354,10 +358,11 @@ static void on_stop_async(uv_async_t *handle) {
 
     if (ctx.gen_count > 0) {
         uint64_t deadline = srv->drain_deadline_ms ? srv->drain_deadline_ms : 5000;
-        uv_timer_init(&srv->loop, &srv->drain_timer);
-        srv->drain_timer.data = srv;
-        uv_timer_start(&srv->drain_timer, on_drain_timeout, deadline, 0);
-        srv->drain_timer_active = true;
+        if (uv_timer_init(&srv->loop, &srv->drain_timer) == 0) {
+            srv->drain_timer.data = srv;
+            uv_timer_start(&srv->drain_timer, on_drain_timeout, deadline, 0);
+            srv->drain_timer_active = true;
+        }
     }
 }
 
@@ -431,6 +436,7 @@ int http_server_start(http_server_t *srv) {
 
 void http_server_stop(http_server_t *srv) {
     if (!srv) return;
+    if (atomic_exchange(&srv->stop_sent, true)) return;
     uv_async_send(&srv->stop_async);
 }
 

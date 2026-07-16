@@ -75,6 +75,7 @@ typedef struct {
     engine_cmd_t   *mailbox_head;
     engine_cmd_t   *mailbox_tail;
     atomic_bool     shutdown;
+    atomic_bool     loaded;
     char           *loaded_model;
     stream_t       *inflight;
 } engine_t;
@@ -84,6 +85,16 @@ int  engine_init(engine_t *eng);
 /* Shut down: cancel in-flight work, join engine thread, drain pending.
    Producers must be quiesced before this returns. */
 void engine_destroy(engine_t *eng);
+
+/* Signal shutdown without joining. Sets shutdown flag, cancels in-flight
+   stream, and wakes the engine thread. Safe from any thread including
+   libuv callbacks. engine_destroy still required for full cleanup. */
+void engine_signal_shutdown(engine_t *eng);
+
+/* True once the engine has processed a CMD_LOAD. Safe from any thread. */
+static inline bool engine_loaded(const engine_t *eng) {
+    return atomic_load(&eng->loaded);
+}
 
 /* Post cmd for async processing. Concurrent posts during destroy are
    safe (re-checked under lock). After destroy returns, posts are

@@ -224,7 +224,8 @@ static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
 
         if (!aborted) {
             finish_reason_t reason = truncated ? FINISH_LENGTH : FINISH_STOP;
-            stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = reason});
+            if (!stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = reason}))
+                stream_finish_cancelled(s);
         }
     }
 
@@ -252,6 +253,7 @@ static void *engine_thread_main(void *arg) {
         case CMD_LOAD:
             free(eng->loaded_model);
             eng->loaded_model = cmd->load.model_path;
+            atomic_store(&eng->loaded, true);
             free(cmd);
             break;
         case CMD_UNLOAD:
@@ -284,6 +286,7 @@ int engine_init(engine_t *eng) {
     eng->mailbox_head = NULL;
     eng->mailbox_tail = NULL;
     atomic_store(&eng->shutdown, false);
+    atomic_store(&eng->loaded, false);
     eng->loaded_model = NULL;
     eng->inflight = NULL;
 
@@ -295,15 +298,17 @@ int engine_init(engine_t *eng) {
     return 0;
 }
 
-void engine_destroy(engine_t *eng) {
+void engine_signal_shutdown(engine_t *eng) {
     atomic_store(&eng->shutdown, true);
-
     pthread_mutex_lock(&eng->mailbox_mtx);
     if (eng->inflight)
         stream_cancel(eng->inflight);
     pthread_cond_signal(&eng->mailbox_cond);
     pthread_mutex_unlock(&eng->mailbox_mtx);
+}
 
+void engine_destroy(engine_t *eng) {
+    engine_signal_shutdown(eng);
     pthread_join(eng->thread, NULL);
 
     pthread_mutex_lock(&eng->mailbox_mtx);

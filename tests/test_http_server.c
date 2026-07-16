@@ -730,7 +730,7 @@ static void test_stop_drain_deadline_bounded(void) {
     pthread_join(f.th, NULL);
     uint64_t elapsed = now_ms() - t0;
 
-    assert(elapsed < 3000);
+    assert(elapsed < 1500);
 
     http_server_destroy(f.srv);
     engine_destroy(&f.eng);
