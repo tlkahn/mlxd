@@ -334,6 +334,18 @@ static void test_main_unknown_command(void) {
     assert(strstr(errbuf, "usage") != NULL || strstr(errbuf, "serve") != NULL);
 }
 
+static void test_main_serve_help(void) {
+    char buf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(NULL, 1024, "w");
+    char *argv[] = {"mlxd", "serve", "--help"};
+    int rc = cli_main(3, argv, stdin, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    assert(rc == 0);
+    assert(strstr(buf, "serve") != NULL);
+}
+
 static void test_main_no_args(void) {
     char errbuf[4096] = {0};
     FILE *out = fmemopen(NULL, 1024, "w");
@@ -362,6 +374,7 @@ int main(void) {
     test_main_help();
     test_main_version();
     test_main_unknown_command();
+    test_main_serve_help();
     test_main_no_args();
     printf("test_cli_cmds: all tests passed\n");
     return 0;

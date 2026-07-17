@@ -104,6 +104,30 @@ static void test_serve_unknown_flag(void) {
     assert(strstr(a.err, "--bogus") != NULL);
 }
 
+static void test_serve_help(void) {
+    const char *argv[] = {"mlxd", "serve", "--help"};
+    cli_args_t a = parse(3, argv);
+    assert(a.cmd == CLI_HELP);
+}
+
+static void test_run_help(void) {
+    const char *argv[] = {"mlxd", "run", "-h"};
+    cli_args_t a = parse(3, argv);
+    assert(a.cmd == CLI_HELP);
+}
+
+static void test_pull_help(void) {
+    const char *argv[] = {"mlxd", "pull", "--help"};
+    cli_args_t a = parse(3, argv);
+    assert(a.cmd == CLI_HELP);
+}
+
+static void test_list_help(void) {
+    const char *argv[] = {"mlxd", "list", "--help"};
+    cli_args_t a = parse(3, argv);
+    assert(a.cmd == CLI_HELP);
+}
+
 /* --- run -------------------------------------------------------------------- */
 
 static void test_run_defaults(void) {
@@ -217,6 +241,10 @@ int main(void) {
     test_serve_bad_port();
     test_serve_threads_rejected();
     test_serve_unknown_flag();
+    test_serve_help();
+    test_run_help();
+    test_pull_help();
+    test_list_help();
     test_run_defaults();
     test_run_full();
     test_run_missing_model();

@@ -40,7 +40,10 @@ static cli_cmd_t parse_serve(int argc, char **argv, cli_args_t *out) {
 
     for (int i = 2; i < argc; i++) {
         const char *flag = argv[i];
-        if (strcmp(flag, "--model") == 0) {
+        if (strcmp(flag, "--help") == 0 || strcmp(flag, "-h") == 0) {
+            out->cmd = CLI_HELP;
+            return out->cmd;
+        } else if (strcmp(flag, "--model") == 0) {
             if (!(out->serve.model = flag_value(argc, argv, &i)))
                 return cli_errorf(out, "%s requires a value", flag);
         } else if (strcmp(flag, "--host") == 0) {
@@ -78,7 +81,10 @@ static cli_cmd_t parse_run(int argc, char **argv, cli_args_t *out) {
     int npos = 0;
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
-        if (strcmp(arg, "--max-tokens") == 0) {
+        if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
+            out->cmd = CLI_HELP;
+            return out->cmd;
+        } else if (strcmp(arg, "--max-tokens") == 0) {
             const char *v = flag_value(argc, argv, &i);
             if (!v)
                 return cli_errorf(out, "%s requires a value", arg);
@@ -113,6 +119,10 @@ static cli_cmd_t parse_run(int argc, char **argv, cli_args_t *out) {
 static cli_cmd_t parse_pull(int argc, char **argv, cli_args_t *out) {
     out->cmd = CLI_PULL;
 
+    if (argc >= 3 && (strcmp(argv[2], "--help") == 0 || strcmp(argv[2], "-h") == 0)) {
+        out->cmd = CLI_HELP;
+        return out->cmd;
+    }
     if (argc < 3)
         return cli_error(out, "pull: missing MODEL_SPEC argument");
     if (argc > 3)
@@ -127,7 +137,10 @@ static cli_cmd_t parse_list(int argc, char **argv, cli_args_t *out) {
 
     for (int i = 2; i < argc; i++) {
         const char *flag = argv[i];
-        if (strcmp(flag, "--json") == 0) {
+        if (strcmp(flag, "--help") == 0 || strcmp(flag, "-h") == 0) {
+            out->cmd = CLI_HELP;
+            return out->cmd;
+        } else if (strcmp(flag, "--json") == 0) {
             out->list.json = true;
         } else {
             return cli_errorf(out, "list: unknown option '%s'", flag);
