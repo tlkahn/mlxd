@@ -1,0 +1,1 @@
+{"chat_template": [{"name": "tool_use", "template": "tool tmpl"}, {"name": "default", "template": "default tmpl"}]}
