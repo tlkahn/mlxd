@@ -66,6 +66,122 @@ static void test_list_json_empty(void) {
     free(json);
 }
 
+/* --- Phase C: cli_cmd_list ------------------------------------------------- */
+
+#define FIXTURE_CACHE MLXD_FIXTURES_DIR "/registry_cache"
+
+static void test_cmd_list_table(void) {
+    setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
+    setenv("MLXD_HF_HUB_DIR", "/nonexistent", 1);
+
+    char buf[8192] = {0};
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+    cli_args_t args = {0};
+    args.cmd = CLI_LIST;
+    args.list.json = false;
+
+    int rc = cli_cmd_list(&args, out, err_f);
+    fclose(out);
+    fclose(err_f);
+
+    assert(rc == 0);
+    assert(strstr(buf, "MODEL") != NULL);
+    assert(strstr(buf, "mlx-community/Qwen3-0.6B-4bit") != NULL);
+
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
+static void test_cmd_list_json(void) {
+    setenv("MLXD_CACHE_DIR", FIXTURE_CACHE, 1);
+    setenv("MLXD_HF_HUB_DIR", "/nonexistent", 1);
+
+    char buf[8192] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(NULL, 1024, "w");
+    cli_args_t args = {0};
+    args.cmd = CLI_LIST;
+    args.list.json = true;
+
+    int rc = cli_cmd_list(&args, out, err_f);
+    fclose(out);
+    fclose(err_f);
+
+    assert(rc == 0);
+    yyjson_doc *doc = yyjson_read(buf, strlen(buf), 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(yyjson_is_arr(root));
+    assert(yyjson_arr_size(root) >= 1);
+
+    bool found = false;
+    yyjson_val *val;
+    yyjson_arr_iter iter;
+    yyjson_arr_iter_init(root, &iter);
+    while ((val = yyjson_arr_iter_next(&iter))) {
+        yyjson_val *id_val = yyjson_obj_get(val, "id");
+        if (id_val && strcmp(yyjson_get_str(id_val), "mlx-community/Qwen3-0.6B-4bit") == 0)
+            found = true;
+    }
+    assert(found);
+    yyjson_doc_free(doc);
+
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
+static void test_cmd_list_empty(void) {
+    setenv("MLXD_CACHE_DIR", "/nonexistent/path", 1);
+    setenv("MLXD_HF_HUB_DIR", "/nonexistent", 1);
+
+    char buf[4096] = {0};
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+    cli_args_t args = {0};
+    args.cmd = CLI_LIST;
+    args.list.json = false;
+
+    int rc = cli_cmd_list(&args, out, err_f);
+    fclose(out);
+    fclose(err_f);
+
+    assert(rc == 0);
+    assert(strstr(errbuf, "no models found") != NULL);
+
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
+static void test_cmd_list_empty_json(void) {
+    setenv("MLXD_CACHE_DIR", "/nonexistent/path", 1);
+    setenv("MLXD_HF_HUB_DIR", "/nonexistent", 1);
+
+    char buf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(NULL, 1024, "w");
+    cli_args_t args = {0};
+    args.cmd = CLI_LIST;
+    args.list.json = true;
+
+    int rc = cli_cmd_list(&args, out, err_f);
+    fclose(out);
+    fclose(err_f);
+
+    assert(rc == 0);
+    yyjson_doc *doc = yyjson_read(buf, strlen(buf), 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(yyjson_is_arr(root));
+    assert(yyjson_arr_size(root) == 0);
+    yyjson_doc_free(doc);
+
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
 /* --- Phase F: cli_sigint_decide ------------------------------------------- */
 
 static void test_sigint_decide(void) {
@@ -129,6 +245,10 @@ int main(void) {
     test_version_string();
     test_list_json_two_models();
     test_list_json_empty();
+    test_cmd_list_table();
+    test_cmd_list_json();
+    test_cmd_list_empty();
+    test_cmd_list_empty_json();
     test_sigint_decide();
     test_main_help();
     test_main_version();
