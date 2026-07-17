@@ -73,7 +73,7 @@ Dependency direction: arrows point upward. `core` and `mlxbridge` are leaves. `e
 
 ```
 mlxd serve   # start OpenAI-compatible HTTP server
-mlxd run     # one-shot or interactive text generation
+mlxd run     # one-shot text generation
 mlxd pull    # download model from HuggingFace
 mlxd list    # list locally available models
 ```

@@ -71,8 +71,13 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
     out->stream = false;
 
     int positional = 0;
+    bool opts_done = false;
     for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--max-tokens") == 0) {
+        if (!opts_done && strcmp(argv[i], "--") == 0) {
+            opts_done = true;
+            continue;
+        }
+        if (!opts_done && strcmp(argv[i], "--max-tokens") == 0) {
             if (i + 1 >= argc) {
                 snprintf(err, errsz, "--max-tokens requires a value");
                 return -1;
@@ -85,7 +90,7 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
                 return -1;
             }
             out->max_tokens = (int)v;
-        } else if (strcmp(argv[i], "--temperature") == 0) {
+        } else if (!opts_done && strcmp(argv[i], "--temperature") == 0) {
             if (i + 1 >= argc) {
                 snprintf(err, errsz, "--temperature requires a value");
                 return -1;
@@ -102,9 +107,9 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
             }
             out->temperature = v;
             out->temperature_set = true;
-        } else if (strcmp(argv[i], "--stream") == 0) {
+        } else if (!opts_done && strcmp(argv[i], "--stream") == 0) {
             out->stream = true;
-        } else if (argv[i][0] == '-') {
+        } else if (!opts_done && argv[i][0] == '-') {
             snprintf(err, errsz, "unknown option '%s'", argv[i]);
             return -1;
         } else {
@@ -135,8 +140,13 @@ int cli_parse_pull(int argc, char **argv, cli_pull_opts_t *out, char *err, size_
         return -1;
     }
 
+    bool opts_done = false;
     for (int i = 2; i < argc; i++) {
-        if (argv[i][0] == '-') {
+        if (!opts_done && strcmp(argv[i], "--") == 0) {
+            opts_done = true;
+            continue;
+        }
+        if (!opts_done && argv[i][0] == '-') {
             snprintf(err, errsz, "unknown option '%s'", argv[i]);
             return -1;
         }

@@ -36,9 +36,10 @@ static void usage(void) {
             "run options:\n"
             "  MODEL                   model directory or HuggingFace spec (required)\n"
             "  [PROMPT]                prompt text (reads stdin if omitted)\n"
-            "  --max-tokens <N>        maximum tokens to generate (default: unlimited)\n"
+            "  --max-tokens <N>        maximum tokens to generate (0 or unset: unlimited)\n"
             "  --temperature <F>       sampling temperature\n"
-            "  --stream                print tokens as they arrive\n"
+            "  --stream                flush each token to stdout as generated\n"
+            "  --                      end of options; remaining args are positional\n"
             "\n"
             "pull options:\n"
             "  <model-spec>            HuggingFace model spec (required)\n"
@@ -353,6 +354,7 @@ static int cmd_run(int argc, char **argv) {
     char err[256] = {0};
     if (cli_parse_run(argc, argv, &opts, err, sizeof(err)) != 0) {
         fprintf(stderr, "mlxd run: %s\n", err);
+        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--stream] [--]\n");
         return 1;
     }
 
@@ -412,6 +414,12 @@ static int cmd_run(int argc, char **argv) {
         goto cleanup;
     }
 
+    atomic_store(&g_run_cancel, 0);
+    struct sigaction sa = {.sa_handler = run_sigint_handler};
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
     if (engine_init(&eng) != 0) {
         fprintf(stderr, "mlxd run: failed to start engine thread\n");
         goto cleanup;
@@ -432,7 +440,15 @@ static int cmd_run(int argc, char **argv) {
     }
     engine_post(&eng, load_cmd);
 
-    if (wait_engine_load(&eng, 30000) != 0) {
+    for (int i = 0; i < 30000 && !engine_loaded(&eng); i++) {
+        if (atomic_load(&g_run_cancel) > 0) {
+            reason = FINISH_CANCELLED;
+            rc = 0;
+            goto cleanup;
+        }
+        usleep(1000);
+    }
+    if (!engine_loaded(&eng)) {
         fprintf(stderr, "mlxd run: timed out waiting for model load\n");
         goto cleanup;
     }
@@ -463,22 +479,14 @@ static int cmd_run(int argc, char **argv) {
     gen_cmd->generate.params.stop_count = 0;
     gen_cmd->generate.token_ids = ids;
     gen_cmd->generate.token_count = n_ids;
-    ids = NULL; /* ownership transferred to engine */
+    ids = NULL;
     stream_retain(s);
     gen_cmd->generate.stream = s;
-
-    atomic_store(&g_run_cancel, 0);
-    struct sigaction sa = {.sa_handler = run_sigint_handler};
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, NULL);
 
     engine_post(&eng, gen_cmd);
 
     rc = cli_run_consume(s, tok, stdout, opts.stream, &g_run_cancel,
                          &reason, err, sizeof(err));
-
-    signal(SIGINT, SIG_DFL);
 
     if (rc != 0)
         fprintf(stderr, "\nmlxd run: %s\n", err);
@@ -486,6 +494,7 @@ static int cmd_run(int argc, char **argv) {
         printf("\n");
 
 cleanup:
+    signal(SIGINT, SIG_DFL);
     free(prompt_buf);
     free(ids);
     if (s) stream_release(s);

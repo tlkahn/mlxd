@@ -312,6 +312,55 @@ static void test_run_max_tokens_overflow_rejected(void) {
     assert(strstr(err, "max-tokens") != NULL);
 }
 
+/* --- Review fix: -- end-of-options marker --------------------------------- */
+
+static void test_run_dashdash_prompt(void) {
+    char *argv[] = {"mlxd", "run", "model", "--", "-not-a-flag"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(strcmp(opts.model, "model") == 0);
+    assert(strcmp(opts.prompt, "-not-a-flag") == 0);
+}
+
+static void test_run_dashdash_model(void) {
+    char *argv[] = {"mlxd", "run", "--", "-weird/model-path"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(4, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(strcmp(opts.model, "-weird/model-path") == 0);
+}
+
+static void test_run_dashdash_known_flag_as_positional(void) {
+    char *argv[] = {"mlxd", "run", "model", "--", "--stream"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(strcmp(opts.prompt, "--stream") == 0);
+    assert(!opts.stream);
+}
+
+static void test_pull_dashdash_spec(void) {
+    char *argv[] = {"mlxd", "pull", "--", "-spec"};
+    cli_pull_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_pull(4, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(strcmp(opts.spec, "-spec") == 0);
+}
+
+static void test_run_unknown_flag_without_dashdash(void) {
+    char *argv[] = {"mlxd", "run", "m", "-x"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(4, argv, &opts, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "unknown") != NULL);
+}
+
 /* --- Cycle 7: cli_parse_pull and cli_parse_list --------------------------- */
 
 static void test_pull_spec(void) {
@@ -410,6 +459,13 @@ int main(void) {
     test_run_temperature_nan_rejected();
     test_run_temperature_inf_rejected();
     test_run_max_tokens_overflow_rejected();
+
+    /* review fix: -- end-of-options marker */
+    test_run_dashdash_prompt();
+    test_run_dashdash_model();
+    test_run_dashdash_known_flag_as_positional();
+    test_pull_dashdash_spec();
+    test_run_unknown_flag_without_dashdash();
 
     /* cycle 7: pull + list */
     test_pull_spec();

@@ -347,6 +347,71 @@ static void test_run_consume_delayed_producer(void) {
     tokenizer_free(tok);
 }
 
+/* --- Review fix: cancel with no terminal chunk (grace deadline) ----------- */
+
+typedef struct {
+    _Atomic int done;
+    int rc;
+    finish_reason_t reason;
+} cancel_no_terminal_result_t;
+
+typedef struct {
+    stream_t *stream;
+    tokenizer_t *tok;
+    FILE *out;
+    const _Atomic int *cancel_flag;
+    cancel_no_terminal_result_t *result;
+} cancel_no_terminal_ctx_t;
+
+static void *cancel_no_terminal_consumer(void *arg) {
+    cancel_no_terminal_ctx_t *ctx = arg;
+    char err[256] = {0};
+    ctx->result->rc = cli_run_consume(ctx->stream, ctx->tok, ctx->out, false,
+                                       ctx->cancel_flag, &ctx->result->reason,
+                                       err, sizeof(err));
+    atomic_store(&ctx->result->done, 1);
+    return NULL;
+}
+
+static void test_run_consume_cancel_no_terminal(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    stream_t *s = stream_create(4);
+    assert(s != NULL);
+
+    char *membuf = NULL;
+    size_t memlen = 0;
+    FILE *out = open_memstream(&membuf, &memlen);
+    assert(out != NULL);
+
+    _Atomic int cancel = 1;
+    cancel_no_terminal_result_t result = {.done = 0, .rc = -99, .reason = FINISH_STOP};
+    cancel_no_terminal_ctx_t ctx = {
+        .stream = s, .tok = tok, .out = out,
+        .cancel_flag = &cancel, .result = &result
+    };
+
+    pthread_t thr;
+    int prc = pthread_create(&thr, NULL, cancel_no_terminal_consumer, &ctx);
+    assert(prc == 0);
+
+    for (int i = 0; i < 500; i++) {
+        if (atomic_load(&result.done)) break;
+        usleep(10000);
+    }
+
+    assert(atomic_load(&result.done) && "consumer must return within ~5s grace deadline");
+    assert(result.rc == 0);
+    assert(result.reason == FINISH_CANCELLED);
+
+    pthread_join(thr, NULL);
+    fclose(out);
+    free(membuf);
+    stream_release(s);
+    tokenizer_free(tok);
+}
+
 /* --- cli_resolve_run_prompt ----------------------------------------------- */
 
 static void test_resolve_run_prompt_positional_ignores_stdin(void) {
@@ -413,6 +478,9 @@ int main(void) {
 
     /* review fix: delayed producer (exercises stream_next timeout path) */
     test_run_consume_delayed_producer();
+
+    /* review fix: cancel with no terminal chunk (grace deadline) */
+    test_run_consume_cancel_no_terminal();
 
     printf("test_cli_io: all passed\n");
     return 0;

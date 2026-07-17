@@ -4,6 +4,8 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 #include <yyjson/yyjson.h>
 
 char *cli_resolve_run_prompt(const char *positional, FILE *stdin_stream) {
@@ -47,25 +49,49 @@ char *cli_run_messages_json(const char *prompt) {
     return json;
 }
 
+/* Grace period (seconds) after cancel before we give up waiting for the
+   engine's terminal chunk.  stream_cancel does not inject DONE; the engine
+   injects DONE/FINISH_CANCELLED on its next stream_push failure.  This
+   deadline is defense against that contract breaking. */
+#define CANCEL_GRACE_SEC 2
+
 int cli_run_consume(stream_t *s, const tokenizer_t *tok, FILE *out, bool flush_each,
                     const _Atomic int *cancel_flag, finish_reason_t *reason,
                     char *err, size_t errsz) {
     detok_t *d = detok_create(tok);
+    bool cancel_sent = false;
+    struct timespec grace_deadline = {0, 0};
 
     for (;;) {
-        if (cancel_flag && atomic_load(cancel_flag) > 0)
+        if (cancel_flag && atomic_load(cancel_flag) > 0 && !cancel_sent) {
             stream_cancel(s);
+            cancel_sent = true;
+            clock_gettime(CLOCK_MONOTONIC, &grace_deadline);
+            grace_deadline.tv_sec += CANCEL_GRACE_SEC;
+        }
 
         chunk_t c;
-        if (!stream_next(s, &c, 100))
+        if (!stream_next(s, &c, 100)) {
+            if (cancel_sent) {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                if (now.tv_sec > grace_deadline.tv_sec ||
+                    (now.tv_sec == grace_deadline.tv_sec &&
+                     now.tv_nsec >= grace_deadline.tv_nsec)) {
+                    detok_free(d);
+                    *reason = FINISH_CANCELLED;
+                    return 0;
+                }
+                usleep(10000);
+            }
             continue;
+        }
 
         switch (c.tag) {
         case CHUNK_TOKEN: {
             if (d) {
                 char *text = NULL;
                 size_t text_len = 0;
-                // detok_feed fails only on OOM (untestable without malloc hook)
                 if (detok_feed(d, c.token.id, &text, &text_len) != 0) {
                     free(text);
                     detok_free(d);
