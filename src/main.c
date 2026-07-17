@@ -1,10 +1,13 @@
-#include "core/log.h"
+#include "cli/args.h"
+#include "cli/io.h"
 #include "engine/engine.h"
+#include "http/gen.h"
 #include "http/server.h"
 #include "model/tokenizer.h"
 #include "registry/registry.h"
 
 #include <inttypes.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -21,9 +24,31 @@ static void usage(void) {
             "\n"
             "commands:\n"
             "  serve   start OpenAI-compatible HTTP server\n"
-            "  run     one-shot or interactive text generation\n"
+            "  run     one-shot text generation\n"
             "  pull    download model from HuggingFace\n"
-            "  list    list locally available models\n");
+            "  list    list locally available models\n"
+            "\n"
+            "serve options:\n"
+            "  --model <dir-or-spec>   model directory or HuggingFace spec (required)\n"
+            "  --host <addr>           bind address (default: 127.0.0.1)\n"
+            "  --port <N>              listen port (default: 8080)\n"
+            "\n"
+            "run options:\n"
+            "  MODEL                   model directory or HuggingFace spec (required)\n"
+            "  [PROMPT]                prompt text (reads stdin if omitted)\n"
+            "  --max-tokens <N>        maximum tokens to generate (default: unlimited)\n"
+            "  --temperature <F>       sampling temperature\n"
+            "  --stream                print tokens as they arrive\n"
+            "\n"
+            "pull options:\n"
+            "  <model-spec>            HuggingFace model spec (required)\n"
+            "\n"
+            "list options:\n"
+            "  --json                  output as JSON array\n"
+            "\n"
+            "global flags:\n"
+            "  --help, -h              show this help\n"
+            "  --version               show version\n");
 }
 
 /* --- Signal handling for serve -------------------------------------------- */
@@ -31,12 +56,23 @@ static void usage(void) {
 static _Atomic int g_sigint_count;
 static http_server_t *g_srv;
 
-static void sigint_handler(int sig) {
+static void serve_sigint_handler(int sig) {
     (void)sig;
     int prev = atomic_fetch_add(&g_sigint_count, 1);
     if (prev == 0)
         http_server_stop(g_srv);
     else
+        _exit(130);
+}
+
+/* --- Signal handling for run ---------------------------------------------- */
+
+static _Atomic int g_run_cancel;
+
+static void run_sigint_handler(int sig) {
+    (void)sig;
+    int prev = atomic_fetch_add(&g_run_cancel, 1);
+    if (prev >= 1)
         _exit(130);
 }
 
@@ -98,6 +134,39 @@ static bool file_exists(const char *dir, const char *name) {
     return exists;
 }
 
+static const char *resolve_model_dir(const char *model_arg, char **resolved_out) {
+    *resolved_out = NULL;
+    if (file_exists(model_arg, "tokenizer.json"))
+        return model_arg;
+    *resolved_out = registry_resolve(model_arg);
+    return *resolved_out;
+}
+
+static int wait_engine_load(engine_t *eng, int timeout_ms) {
+    for (int i = 0; i < timeout_ms && !engine_loaded(eng); i++)
+        usleep(1000);
+    return engine_loaded(eng) ? 0 : -1;
+}
+
+static char *slurp_stdin(void) {
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    for (;;) {
+        size_t n = fread(buf + len, 1, cap - len, stdin);
+        len += n;
+        if (n == 0) break;
+        if (len == cap) {
+            cap *= 2;
+            char *tmp = realloc(buf, cap);
+            if (!tmp) { free(buf); return NULL; }
+            buf = tmp;
+        }
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
 /* --- Subcommands ---------------------------------------------------------- */
 
 static int pull_progress(const registry_progress_t *p, void *ud) {
@@ -116,25 +185,16 @@ static int pull_progress(const registry_progress_t *p, void *ud) {
     return 0;
 }
 
-static void human_size(uint64_t bytes, char *buf, size_t bufsz) {
-    if (bytes >= (uint64_t)1024 * 1024 * 1024)
-        snprintf(buf, bufsz, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-    else if (bytes >= 1024 * 1024)
-        snprintf(buf, bufsz, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
-    else if (bytes >= 1024)
-        snprintf(buf, bufsz, "%.1f KB", (double)bytes / 1024.0);
-    else
-        snprintf(buf, bufsz, "%" PRIu64 " B", bytes);
-}
-
 static int cmd_pull(int argc, char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "usage: mlxd pull <model-spec>\n");
+    cli_pull_opts_t opts;
+    char err[256] = {0};
+    if (cli_parse_pull(argc, argv, &opts, err, sizeof(err)) != 0) {
+        fprintf(stderr, "mlxd pull: %s\n", err);
         return 1;
     }
-    registry_pull_opts_t opts = {0};
-    opts.progress = pull_progress;
-    char *dir = registry_pull(argv[2], &opts);
+    registry_pull_opts_t pull_opts = {0};
+    pull_opts.progress = pull_progress;
+    char *dir = registry_pull(opts.spec, &pull_opts);
     if (!dir) {
         fprintf(stderr, "\nfailed to pull model\n");
         return 1;
@@ -145,30 +205,48 @@ static int cmd_pull(int argc, char **argv) {
     return 0;
 }
 
-static int cmd_list(void) {
+static int cmd_list(int argc, char **argv) {
+    cli_list_opts_t opts;
+    char err[256] = {0};
+    if (cli_parse_list(argc, argv, &opts, err, sizeof(err)) != 0) {
+        fprintf(stderr, "mlxd list: %s\n", err);
+        return 1;
+    }
+
     int count = 0;
     registry_model_info_t *models = registry_discover(&count);
     if (!models || count == 0) {
-        printf("no models found\n");
+        if (opts.json)
+            printf("[]\n");
+        else
+            printf("no models found\n");
         return 0;
     }
 
-    printf("%-40s  %10s  %s\n", "MODEL", "SIZE", "MODIFIED");
-    printf("%-40s  %10s  %s\n", "-----", "----", "--------");
-
-    for (int i = 0; i < count; i++) {
-        char size_buf[32];
-        human_size(models[i].size_bytes, size_buf, sizeof(size_buf));
-
-        char time_buf[64] = "unknown";
-        if (models[i].mtime > 0) {
-            time_t t = (time_t)models[i].mtime;
-            struct tm *tm = localtime(&t);
-            if (tm)
-                strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M", tm);
+    if (opts.json) {
+        char *json = cli_list_json(models, count);
+        if (json) {
+            printf("%s\n", json);
+            free(json);
         }
+    } else {
+        printf("%-40s  %10s  %s\n", "MODEL", "SIZE", "MODIFIED");
+        printf("%-40s  %10s  %s\n", "-----", "----", "--------");
 
-        printf("%-40s  %10s  %s\n", models[i].id, size_buf, time_buf);
+        for (int i = 0; i < count; i++) {
+            char size_buf[32];
+            cli_human_size(models[i].size_bytes, size_buf, sizeof(size_buf));
+
+            char time_buf[64] = "unknown";
+            if (models[i].mtime > 0) {
+                time_t t = (time_t)models[i].mtime;
+                struct tm *tm = localtime(&t);
+                if (tm)
+                    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M", tm);
+            }
+
+            printf("%-40s  %10s  %s\n", models[i].id, size_buf, time_buf);
+        }
     }
 
     registry_model_list_free(models, count);
@@ -176,42 +254,19 @@ static int cmd_list(void) {
 }
 
 static int cmd_serve(int argc, char **argv) {
-    int port = 8080;
-    const char *model_arg = NULL;
-
-    for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-            char *end;
-            long v = strtol(argv[++i], &end, 10);
-            if (*end != '\0' || v < 1 || v > 65535) {
-                fprintf(stderr, "mlxd serve: invalid port '%s'\n", argv[i]);
-                return 1;
-            }
-            port = (int)v;
-        } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
-            model_arg = argv[++i];
-        } else {
-            fprintf(stderr, "mlxd serve: unknown option '%s'\n", argv[i]);
-            fprintf(stderr, "usage: mlxd serve --model <dir-or-spec> [--port N]\n");
-            return 1;
-        }
-    }
-
-    if (!model_arg) {
-        fprintf(stderr, "mlxd serve: --model is required\n");
-        fprintf(stderr, "usage: mlxd serve --model <dir-or-spec> [--port N]\n");
+    cli_serve_opts_t opts;
+    char err[256] = {0};
+    if (cli_parse_serve(argc, argv, &opts, err, sizeof(err)) != 0) {
+        fprintf(stderr, "mlxd serve: %s\n", err);
+        fprintf(stderr, "usage: mlxd serve --model <dir-or-spec> [--host ADDR] [--port N]\n");
         return 1;
     }
 
-    const char *model_dir = model_arg;
     char *resolved_dir = NULL;
-    if (!file_exists(model_arg, "tokenizer.json")) {
-        resolved_dir = registry_resolve(model_arg);
-        if (!resolved_dir) {
-            fprintf(stderr, "mlxd serve: cannot find model '%s'\n", model_arg);
-            return 1;
-        }
-        model_dir = resolved_dir;
+    const char *model_dir = resolve_model_dir(opts.model, &resolved_dir);
+    if (!model_dir) {
+        fprintf(stderr, "mlxd serve: cannot find model '%s'\n", opts.model);
+        return 1;
     }
 
     tokenizer_t *tok = tokenizer_load_dir(model_dir);
@@ -256,9 +311,7 @@ static int cmd_serve(int argc, char **argv) {
     }
     engine_post(&eng, cmd);
 
-    for (int i = 0; i < 30000 && !engine_loaded(&eng); i++)
-        usleep(1000);
-    if (!engine_loaded(&eng)) {
+    if (wait_engine_load(&eng, 30000) != 0) {
         fprintf(stderr, "mlxd serve: timed out waiting for model load\n");
         engine_destroy(&eng);
         tokenizer_free(tok);
@@ -268,8 +321,8 @@ static int cmd_serve(int argc, char **argv) {
     }
 
     http_server_config_t cfg = {
-        .host = "127.0.0.1",
-        .port = port,
+        .host = opts.host,
+        .port = opts.port,
         .engine = &eng,
         .tokenizer = tok,
         .chat_template = chat_template,
@@ -278,7 +331,8 @@ static int cmd_serve(int argc, char **argv) {
     };
     http_server_t *srv = http_server_create(&cfg);
     if (!srv) {
-        fprintf(stderr, "mlxd serve: failed to create server on port %d\n", port);
+        fprintf(stderr, "mlxd serve: failed to create server on %s:%d\n",
+                opts.host, opts.port);
         engine_destroy(&eng);
         tokenizer_free(tok);
         free(chat_template);
@@ -286,12 +340,12 @@ static int cmd_serve(int argc, char **argv) {
         return 1;
     }
 
-    fprintf(stderr, "mlxd serve: listening on 127.0.0.1:%d\n",
-            http_server_port(srv));
+    fprintf(stderr, "mlxd serve: listening on %s:%d\n",
+            opts.host, http_server_port(srv));
 
     g_srv = srv;
     atomic_store(&g_sigint_count, 0);
-    struct sigaction sa = {.sa_handler = sigint_handler};
+    struct sigaction sa = {.sa_handler = serve_sigint_handler};
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
@@ -309,34 +363,211 @@ static int cmd_serve(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_run(int argc, char **argv) {
+    cli_run_opts_t opts;
+    char err[256] = {0};
+    if (cli_parse_run(argc, argv, &opts, err, sizeof(err)) != 0) {
+        fprintf(stderr, "mlxd run: %s\n", err);
+        return 1;
+    }
+
+    char *resolved_dir = NULL;
+    const char *model_dir = resolve_model_dir(opts.model, &resolved_dir);
+    if (!model_dir) {
+        fprintf(stderr, "mlxd run: cannot find model '%s'\n", opts.model);
+        return 1;
+    }
+
+    tokenizer_t *tok = tokenizer_load_dir(model_dir);
+    if (!tok) {
+        fprintf(stderr, "mlxd run: failed to load tokenizer from '%s'\n", model_dir);
+        free(resolved_dir);
+        return 1;
+    }
+
+    char *chat_template = read_chat_template(model_dir);
+
+    engine_t eng;
+    if (engine_init(&eng) != 0) {
+        fprintf(stderr, "mlxd run: failed to start engine thread\n");
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
+
+    engine_cmd_t *load_cmd = calloc(1, sizeof(*load_cmd));
+    if (!load_cmd) {
+        fprintf(stderr, "mlxd run: out of memory\n");
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
+    load_cmd->tag = CMD_LOAD;
+    load_cmd->load.model_path = strdup(model_dir);
+    if (!load_cmd->load.model_path) {
+        fprintf(stderr, "mlxd run: out of memory\n");
+        free(load_cmd);
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
+    engine_post(&eng, load_cmd);
+
+    if (wait_engine_load(&eng, 30000) != 0) {
+        fprintf(stderr, "mlxd run: timed out waiting for model load\n");
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
+
+    char *stdin_buf = NULL;
+    const char *prompt = opts.prompt;
+    if (!prompt) {
+        stdin_buf = slurp_stdin();
+        if (!stdin_buf || stdin_buf[0] == '\0') {
+            fprintf(stderr, "mlxd run: no prompt provided and stdin is empty\n");
+            free(stdin_buf);
+            engine_destroy(&eng);
+            tokenizer_free(tok);
+            free(chat_template);
+            free(resolved_dir);
+            return 1;
+        }
+        prompt = stdin_buf;
+    }
+
+    int32_t *ids = NULL;
+    int n_ids = -1;
+    const char *build_err = NULL;
+
+    if (chat_template) {
+        char *messages_json = cli_run_messages_json(prompt);
+        if (!messages_json) {
+            fprintf(stderr, "mlxd run: failed to build messages JSON\n");
+            free(stdin_buf);
+            engine_destroy(&eng);
+            tokenizer_free(tok);
+            free(chat_template);
+            free(resolved_dir);
+            return 1;
+        }
+        n_ids = gen_build_chat_prompt(tok, chat_template, messages_json, NULL,
+                                      &ids, &build_err);
+        free(messages_json);
+    } else {
+        n_ids = gen_build_completion_prompt(tok, prompt, &ids, &build_err);
+    }
+
+    free(stdin_buf);
+
+    if (n_ids < 0) {
+        fprintf(stderr, "mlxd run: failed to tokenize prompt: %s\n",
+                build_err ? build_err : "unknown error");
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
+
+    stream_t *s = stream_create(256);
+    if (!s) {
+        fprintf(stderr, "mlxd run: out of memory\n");
+        free(ids);
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
+
+    gen_params_t params = {
+        .sampling = SAMPLING_PARAMS_DEFAULT,
+        .max_tokens = opts.max_tokens <= 0 ? INT_MAX : opts.max_tokens,
+        .n = 1,
+        .stream = true,
+    };
+    if (opts.temperature_set)
+        params.sampling.temperature = opts.temperature;
+
+    engine_cmd_t *gen_cmd = calloc(1, sizeof(*gen_cmd));
+    if (!gen_cmd) {
+        fprintf(stderr, "mlxd run: out of memory\n");
+        stream_release(s);
+        free(ids);
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(chat_template);
+        free(resolved_dir);
+        return 1;
+    }
+    gen_cmd->tag = CMD_GENERATE;
+    gen_cmd->generate.params = params;
+    gen_cmd->generate.params.stop = NULL;
+    gen_cmd->generate.params.stop_count = 0;
+    gen_cmd->generate.token_ids = ids;
+    gen_cmd->generate.token_count = n_ids;
+    stream_retain(s);
+    gen_cmd->generate.stream = s;
+
+    atomic_store(&g_run_cancel, 0);
+    struct sigaction sa = {.sa_handler = run_sigint_handler};
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
+    engine_post(&eng, gen_cmd);
+
+    finish_reason_t reason = FINISH_STOP;
+    int rc = cli_run_consume(s, tok, stdout, opts.stream, &g_run_cancel,
+                             &reason, err, sizeof(err));
+
+    signal(SIGINT, SIG_DFL);
+
+    if (rc != 0) {
+        fprintf(stderr, "\nmlxd run: %s\n", err);
+    } else {
+        printf("\n");
+    }
+
+    stream_release(s);
+    engine_destroy(&eng);
+    tokenizer_free(tok);
+    free(chat_template);
+    free(resolved_dir);
+
+    if (rc != 0) return 1;
+    if (reason == FINISH_CANCELLED) return 130;
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        usage();
-        return 1;
-    }
+    cli_cmd_t cmd = cli_command(argc, argv);
 
-    const char *cmd = argv[1];
-
-    if (strcmp(cmd, "serve") == 0) {
-        return cmd_serve(argc, argv);
-    }
-    if (strcmp(cmd, "run") == 0) {
-        fprintf(stderr, "mlxd run: not yet implemented\n");
-        return 1;
-    }
-    if (strcmp(cmd, "pull") == 0) {
-        return cmd_pull(argc, argv);
-    }
-    if (strcmp(cmd, "list") == 0) {
-        return cmd_list();
-    }
-
-    if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
-        usage();
+    switch (cmd) {
+    case CLI_CMD_SERVE:   return cmd_serve(argc, argv);
+    case CLI_CMD_RUN:     return cmd_run(argc, argv);
+    case CLI_CMD_PULL:    return cmd_pull(argc, argv);
+    case CLI_CMD_LIST:    return cmd_list(argc, argv);
+    case CLI_CMD_HELP:    usage(); return 0;
+    case CLI_CMD_VERSION:
+        printf("mlxd %s\n", MLXD_VERSION);
         return 0;
+    case CLI_CMD_UNKNOWN:
+        fprintf(stderr, "mlxd: unknown command '%s'\n", argv[1]);
+        usage();
+        return 1;
+    case CLI_CMD_NONE:
+        usage();
+        return 1;
     }
 
-    fprintf(stderr, "mlxd: unknown command '%s'\n", cmd);
-    usage();
     return 1;
 }

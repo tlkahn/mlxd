@@ -28,7 +28,7 @@ model              - deps: core, mlxbridge
 engine             - deps: core, mlxbridge, model
 registry           - deps: core
 http               - deps: core, chat, model, engine, registry; links libuv + llhttp
-cli (main.c)       - deps: all
+cli (src/cli + main.c) - deps: all
 ```
 
 Dependency direction: arrows point upward. `core` and `mlxbridge` are leaves. `engine` does NOT include `chat`. Enforcement is by convention and code review (C has no module-level import control).
