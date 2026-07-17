@@ -347,7 +347,46 @@ static void test_run_consume_delayed_producer(void) {
     tokenizer_free(tok);
 }
 
+/* --- cli_resolve_run_prompt ----------------------------------------------- */
+
+static void test_resolve_run_prompt_positional_ignores_stdin(void) {
+    char *result = cli_resolve_run_prompt("hello world", NULL);
+    assert(result != NULL);
+    assert(strcmp(result, "hello world") == 0);
+    free(result);
+}
+
+static void test_resolve_run_prompt_empty_stdin_returns_null(void) {
+    FILE *f = fopen("/dev/null", "r");
+    assert(f != NULL);
+    char *result = cli_resolve_run_prompt(NULL, f);
+    assert(result == NULL);
+    fclose(f);
+}
+
+static void test_resolve_run_prompt_reads_stdin_when_no_positional(void) {
+    const char *input = "prompt from stdin";
+    FILE *f = fmemopen((void *)input, strlen(input), "r");
+    assert(f != NULL);
+    char *result = cli_resolve_run_prompt(NULL, f);
+    assert(result != NULL);
+    assert(strcmp(result, "prompt from stdin") == 0);
+    free(result);
+    fclose(f);
+}
+
+static void test_resolve_run_prompt_null_stdin_returns_null(void) {
+    char *result = cli_resolve_run_prompt(NULL, NULL);
+    assert(result == NULL);
+}
+
 int main(void) {
+    /* cli_resolve_run_prompt */
+    test_resolve_run_prompt_positional_ignores_stdin();
+    test_resolve_run_prompt_empty_stdin_returns_null();
+    test_resolve_run_prompt_reads_stdin_when_no_positional();
+    test_resolve_run_prompt_null_stdin_returns_null();
+
     /* cycle 8 */
     test_messages_json_plain();
     test_messages_json_special_chars();

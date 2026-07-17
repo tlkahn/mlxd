@@ -6,6 +6,30 @@
 #include <string.h>
 #include <yyjson/yyjson.h>
 
+char *cli_resolve_run_prompt(const char *positional, FILE *stdin_stream) {
+    if (positional)
+        return strdup(positional);
+    if (!stdin_stream)
+        return NULL;
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    for (;;) {
+        size_t n = fread(buf + len, 1, cap - len, stdin_stream);
+        len += n;
+        if (n == 0) break;
+        if (len == cap) {
+            cap *= 2;
+            char *tmp = realloc(buf, cap);
+            if (!tmp) { free(buf); return NULL; }
+            buf = tmp;
+        }
+    }
+    if (len == 0) { free(buf); return NULL; }
+    buf[len] = '\0';
+    return buf;
+}
+
 char *cli_run_messages_json(const char *prompt) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     if (!doc) return NULL;

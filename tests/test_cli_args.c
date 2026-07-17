@@ -285,6 +285,33 @@ static void test_run_temperature_zero(void) {
     assert(opts.temperature == 0.0f);
 }
 
+static void test_run_temperature_nan_rejected(void) {
+    char *argv[] = {"mlxd", "run", "m", "--temperature", "nan"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "temperature") != NULL);
+}
+
+static void test_run_temperature_inf_rejected(void) {
+    char *argv[] = {"mlxd", "run", "m", "--temperature", "inf"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "temperature") != NULL);
+}
+
+static void test_run_max_tokens_overflow_rejected(void) {
+    char *argv[] = {"mlxd", "run", "m", "--max-tokens", "99999999999999"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "max-tokens") != NULL);
+}
+
 /* --- Cycle 7: cli_parse_pull and cli_parse_list --------------------------- */
 
 static void test_pull_spec(void) {
@@ -380,6 +407,9 @@ int main(void) {
     /* review fix: negative temperature */
     test_run_temperature_negative();
     test_run_temperature_zero();
+    test_run_temperature_nan_rejected();
+    test_run_temperature_inf_rejected();
+    test_run_max_tokens_overflow_rejected();
 
     /* cycle 7: pull + list */
     test_pull_spec();

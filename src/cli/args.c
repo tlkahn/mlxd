@@ -1,5 +1,8 @@
 #include "cli/args.h"
 
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,8 +78,9 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
                 return -1;
             }
             char *end;
+            errno = 0;
             long v = strtol(argv[++i], &end, 10);
-            if (*end != '\0' || v < 0) {
+            if (*end != '\0' || v < 0 || v > INT_MAX || errno == ERANGE) {
                 snprintf(err, errsz, "invalid max-tokens '%s'", argv[i]);
                 return -1;
             }
@@ -88,7 +92,7 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
             }
             char *end;
             float v = strtof(argv[++i], &end);
-            if (*end != '\0') {
+            if (*end != '\0' || !isfinite(v)) {
                 snprintf(err, errsz, "invalid temperature '%s'", argv[i]);
                 return -1;
             }

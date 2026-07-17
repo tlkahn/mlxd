@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+char *cli_resolve_run_prompt(const char *positional, FILE *stdin_stream);
+
 char *cli_run_messages_json(const char *prompt);
 
 int cli_run_consume(stream_t *s, const tokenizer_t *tok, FILE *out, bool flush_each,

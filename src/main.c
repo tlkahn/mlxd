@@ -148,25 +148,6 @@ static int wait_engine_load(engine_t *eng, int timeout_ms) {
     return engine_loaded(eng) ? 0 : -1;
 }
 
-static char *slurp_stdin(void) {
-    size_t cap = 4096, len = 0;
-    char *buf = malloc(cap);
-    if (!buf) return NULL;
-    for (;;) {
-        size_t n = fread(buf + len, 1, cap - len, stdin);
-        len += n;
-        if (n == 0) break;
-        if (len == cap) {
-            cap *= 2;
-            char *tmp = realloc(buf, cap);
-            if (!tmp) { free(buf); return NULL; }
-            buf = tmp;
-        }
-    }
-    buf[len] = '\0';
-    return buf;
-}
-
 /* --- Subcommands ---------------------------------------------------------- */
 
 static int pull_progress(const registry_progress_t *p, void *ud) {
@@ -379,10 +360,10 @@ static int cmd_run(int argc, char **argv) {
     char *resolved_dir = NULL;
     tokenizer_t *tok = NULL;
     char *chat_template = NULL;
+    char *prompt_buf = NULL;
+    int32_t *ids = NULL;
     bool eng_inited = false;
     engine_t eng;
-    char *stdin_buf = NULL;
-    int32_t *ids = NULL;
     stream_t *s = NULL;
     finish_reason_t reason = FINISH_STOP;
 
@@ -399,6 +380,37 @@ static int cmd_run(int argc, char **argv) {
     }
 
     chat_template = read_chat_template(model_dir);
+
+    prompt_buf = cli_resolve_run_prompt(opts.prompt, stdin);
+    if (!prompt_buf) {
+        fprintf(stderr, "mlxd run: no prompt provided and stdin is empty\n");
+        goto cleanup;
+    }
+
+    int n_ids = -1;
+    const char *build_err = NULL;
+
+    if (chat_template) {
+        char *messages_json = cli_run_messages_json(prompt_buf);
+        if (!messages_json) {
+            fprintf(stderr, "mlxd run: failed to build messages JSON\n");
+            goto cleanup;
+        }
+        n_ids = gen_build_chat_prompt(tok, chat_template, messages_json, NULL,
+                                      &ids, &build_err);
+        free(messages_json);
+    } else {
+        n_ids = gen_build_completion_prompt(tok, prompt_buf, &ids, &build_err);
+    }
+
+    free(prompt_buf);
+    prompt_buf = NULL;
+
+    if (n_ids < 0) {
+        fprintf(stderr, "mlxd run: failed to tokenize prompt: %s\n",
+                build_err ? build_err : "unknown error");
+        goto cleanup;
+    }
 
     if (engine_init(&eng) != 0) {
         fprintf(stderr, "mlxd run: failed to start engine thread\n");
@@ -422,41 +434,6 @@ static int cmd_run(int argc, char **argv) {
 
     if (wait_engine_load(&eng, 30000) != 0) {
         fprintf(stderr, "mlxd run: timed out waiting for model load\n");
-        goto cleanup;
-    }
-
-    const char *prompt = opts.prompt;
-    if (!prompt) {
-        stdin_buf = slurp_stdin();
-        if (!stdin_buf || stdin_buf[0] == '\0') {
-            fprintf(stderr, "mlxd run: no prompt provided and stdin is empty\n");
-            goto cleanup;
-        }
-        prompt = stdin_buf;
-    }
-
-    int n_ids = -1;
-    const char *build_err = NULL;
-
-    if (chat_template) {
-        char *messages_json = cli_run_messages_json(prompt);
-        if (!messages_json) {
-            fprintf(stderr, "mlxd run: failed to build messages JSON\n");
-            goto cleanup;
-        }
-        n_ids = gen_build_chat_prompt(tok, chat_template, messages_json, NULL,
-                                      &ids, &build_err);
-        free(messages_json);
-    } else {
-        n_ids = gen_build_completion_prompt(tok, prompt, &ids, &build_err);
-    }
-
-    free(stdin_buf);
-    stdin_buf = NULL;
-
-    if (n_ids < 0) {
-        fprintf(stderr, "mlxd run: failed to tokenize prompt: %s\n",
-                build_err ? build_err : "unknown error");
         goto cleanup;
     }
 
@@ -509,7 +486,7 @@ static int cmd_run(int argc, char **argv) {
         printf("\n");
 
 cleanup:
-    free(stdin_buf);
+    free(prompt_buf);
     free(ids);
     if (s) stream_release(s);
     if (eng_inited) engine_destroy(&eng);
