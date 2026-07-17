@@ -1,0 +1,10 @@
+{
+  "model_type": "qwen3",
+  "vocab_size": 151936,
+  "hidden_size": 1024,
+  "num_hidden_layers": 4,
+  "num_attention_heads": 16,
+  "num_key_value_heads": 8,
+  "head_dim": 64,
+  "eos_token_id": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+}
