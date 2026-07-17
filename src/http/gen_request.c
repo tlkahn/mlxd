@@ -471,6 +471,14 @@ static void gen_on_async(uv_async_t *handle) {
     }
 }
 
+/* --- Graceful drain (loop thread) ----------------------------------------- */
+
+void gen_request_drain(void *ctx) {
+    gen_request_t *gr = ctx;
+    if (gr->state == GR_CLOSING) return;
+    stream_cancel(gr->stream);
+}
+
 /* --- Connection gone observer (loop thread) ------------------------------- */
 
 static void on_conn_gone(void *ctx) {
