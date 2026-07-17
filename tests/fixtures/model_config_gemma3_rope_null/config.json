@@ -1,0 +1,9 @@
+{
+  "model_type": "gemma3_text",
+  "vocab_size": 262144,
+  "hidden_size": 1152,
+  "num_hidden_layers": 26,
+  "max_position_embeddings": 32768,
+  "sliding_window_pattern": 6,
+  "rope_scaling": null
+}
