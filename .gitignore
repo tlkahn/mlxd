@@ -12,3 +12,4 @@ build/
 *.profdata
 .cache/
 tests/fixtures/gemma4/
+doc
