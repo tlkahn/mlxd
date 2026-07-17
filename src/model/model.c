@@ -387,10 +387,6 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
                 }
             }
         }
-        if (cfg->num_eos_tokens == 0) {
-            yyjson_val *eos = yyjson_obj_get(cfg_obj, "eos_token_id");
-            (void)parse_eos_value(cfg, eos);
-        }
         break;
 
     case MODEL_NEMOTRON_H:
@@ -466,10 +462,6 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
                     }
                 }
             }
-        }
-        if (cfg->num_eos_tokens == 0) {
-            yyjson_val *eos = yyjson_obj_get(cfg_obj, "eos_token_id");
-            (void)parse_eos_value(cfg, eos);
         }
         break;
 
@@ -876,8 +868,11 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         }
     }
 
-    /* eos_token_id (root) */
+    /* eos_token_id: union root then nested text_config (dedupe in add_eos) */
     if (parse_eos_value(cfg, yyjson_obj_get(root, "eos_token_id")))
+        goto fail;
+    if (cfg_obj != root &&
+        parse_eos_value(cfg, yyjson_obj_get(cfg_obj, "eos_token_id")))
         goto fail;
 
     if (apply_family_defaults(cfg, cfg_obj, has_text_config,

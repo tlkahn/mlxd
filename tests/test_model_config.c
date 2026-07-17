@@ -741,6 +741,36 @@ static void test_eos_tokens(void) {
     model_config_free(&cfg);
 }
 
+/* --- P2a: nested text_config EOS union ----------------------------------- */
+
+static void test_nested_text_config_eos(void) {
+    model_config_t cfg;
+
+    /* qwen3_5 VL-style: EOS only inside text_config, no root EOS */
+    int rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_nested_eos");
+    assert(rc == 0);
+    assert(cfg.num_eos_tokens == 1);
+    assert(eos_contains(&cfg, 151645));
+    model_config_free(&cfg);
+
+    /* union + dedupe: root=100, text_config=[100,200] => {100,200} */
+    rc = model_config_load(&cfg,
+                           MLXD_FIXTURES_DIR "/model_config_nested_eos_union");
+    assert(rc == 0);
+    assert(cfg.num_eos_tokens == 2);
+    assert(cfg.eos_token_ids[0] == 100);
+    assert(eos_contains(&cfg, 200));
+    model_config_free(&cfg);
+
+    /* lfm2 VL: nested EOS via text_config (safety net for refactor) */
+    rc = model_config_load(&cfg,
+                           MLXD_FIXTURES_DIR "/model_config_lfm2_vl_eos");
+    assert(rc == 0);
+    assert(eos_contains(&cfg, 99999));
+    model_config_free(&cfg);
+}
+
 /* --- A1 Cycle 11: generation_config.json --------------------------------- */
 
 static void test_generation_config(void) {
@@ -815,6 +845,7 @@ int main(void) {
     test_qwen3_5_head_dim_fallback();
     test_gemma3_rope_null();
     test_eos_tokens();
+    test_nested_text_config_eos();
     test_generation_config();
 
     printf("test_model_config: all passed\n");
