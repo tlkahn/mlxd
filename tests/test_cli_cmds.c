@@ -1,0 +1,139 @@
+#include "cli/cli.h"
+#include "cli/cmds.h"
+
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "yyjson/yyjson.h"
+
+/* --- Phase B: usage/version strings --------------------------------------- */
+
+static void test_usage_contains_subcommands(void) {
+    const char *u = cli_usage_str();
+    assert(strstr(u, "serve") != NULL);
+    assert(strstr(u, "run") != NULL);
+    assert(strstr(u, "pull") != NULL);
+    assert(strstr(u, "list") != NULL);
+}
+
+static void test_version_string(void) {
+    assert(strlen(MLXD_VERSION) > 0);
+    assert(strstr(MLXD_VERSION, ".") != NULL);
+}
+
+/* --- Phase B: cli_list_json ----------------------------------------------- */
+
+static void test_list_json_two_models(void) {
+    registry_model_info_t models[2] = {
+        {.id = "org/model-a", .path = "/cache/a", .size_bytes = 1024, .mtime = 1700000000},
+        {.id = "org/model-b", .path = "/cache/b", .size_bytes = 2048, .mtime = 1700000001},
+    };
+    char *json = cli_list_json(models, 2);
+    assert(json != NULL);
+
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(yyjson_is_arr(root));
+    assert(yyjson_arr_size(root) == 2);
+
+    yyjson_val *first = yyjson_arr_get_first(root);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(first, "id")), "org/model-a") == 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(first, "path")), "/cache/a") == 0);
+    assert(yyjson_get_uint(yyjson_obj_get(first, "size_bytes")) == 1024);
+    assert(yyjson_get_sint(yyjson_obj_get(first, "mtime")) == 1700000000);
+
+    yyjson_val *second = yyjson_arr_get(root, 1);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(second, "id")), "org/model-b") == 0);
+
+    yyjson_doc_free(doc);
+    free(json);
+}
+
+static void test_list_json_empty(void) {
+    char *json = cli_list_json(NULL, 0);
+    assert(json != NULL);
+
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(yyjson_is_arr(root));
+    assert(yyjson_arr_size(root) == 0);
+
+    yyjson_doc_free(doc);
+    free(json);
+}
+
+/* --- Phase F: cli_sigint_decide ------------------------------------------- */
+
+static void test_sigint_decide(void) {
+    assert(cli_sigint_decide(1) == SIGINT_STOP);
+    assert(cli_sigint_decide(2) == SIGINT_FORCE_EXIT);
+    assert(cli_sigint_decide(3) == SIGINT_FORCE_EXIT);
+}
+
+/* --- Phase F: cli_main dispatch ------------------------------------------- */
+
+static void test_main_help(void) {
+    char buf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(NULL, 1024, "w");
+    char *argv[] = {"mlxd", "--help"};
+    int rc = cli_main(2, argv, stdin, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    assert(rc == 0);
+    assert(strstr(buf, "serve") != NULL);
+}
+
+static void test_main_version(void) {
+    char buf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(NULL, 1024, "w");
+    char *argv[] = {"mlxd", "--version"};
+    int rc = cli_main(2, argv, stdin, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    assert(rc == 0);
+    assert(strstr(buf, MLXD_VERSION) != NULL);
+}
+
+static void test_main_unknown_command(void) {
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(NULL, 1024, "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+    char *argv[] = {"mlxd", "bogus"};
+    int rc = cli_main(2, argv, stdin, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    assert(rc == 1);
+    assert(strstr(errbuf, "bogus") != NULL);
+    assert(strstr(errbuf, "usage") != NULL || strstr(errbuf, "serve") != NULL);
+}
+
+static void test_main_no_args(void) {
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(NULL, 1024, "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+    char *argv[] = {"mlxd"};
+    int rc = cli_main(1, argv, stdin, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    assert(rc == 1);
+}
+
+int main(void) {
+    test_usage_contains_subcommands();
+    test_version_string();
+    test_list_json_two_models();
+    test_list_json_empty();
+    test_sigint_decide();
+    test_main_help();
+    test_main_version();
+    test_main_unknown_command();
+    test_main_no_args();
+    printf("test_cli_cmds: all tests passed\n");
+    return 0;
+}
