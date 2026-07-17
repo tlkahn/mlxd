@@ -108,7 +108,7 @@ static int shards_single(const char *model_dir, char ***out_paths,
     if (!p) return -1;
 
     struct stat st;
-    if (stat(p, &st) != 0) { free(p); return -1; }
+    if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) { free(p); return -1; }
 
     char **files = malloc(sizeof(char *));
     if (!files) { free(p); return -1; }
@@ -132,14 +132,22 @@ static int shards_glob(const char *model_dir, char ***out_paths,
         size_t len = strlen(ent->d_name);
         if (len < 13) continue;
         if (strcmp(ent->d_name + len - 12, ".safetensors") != 0) continue;
+
+        char *full = path_join(model_dir, ent->d_name);
+        if (!full) goto fail;
+
+        struct stat entry_st;
+        if (stat(full, &entry_st) != 0 || !S_ISREG(entry_st.st_mode)) {
+            free(full);
+            continue;
+        }
+
         if (n >= cap) {
             cap *= 2;
             char **tmp = realloc(files, cap * sizeof(char *));
-            if (!tmp) goto fail;
+            if (!tmp) { free(full); goto fail; }
             files = tmp;
         }
-        char *full = path_join(model_dir, ent->d_name);
-        if (!full) goto fail;
         files[n++] = full;
     }
     closedir(d);
@@ -248,20 +256,23 @@ static int merge_map(mlx_map_string_to_array dst,
     return 0;
 }
 
-static size_t compute_total_bytes(mlx_map_string_to_array params) {
-    size_t total = 0;
+static void map_stats(mlx_map_string_to_array params,
+                      size_t *out_count, size_t *out_bytes) {
+    size_t count = 0, total = 0;
     mlx_map_string_to_array_iterator it =
         mlx_map_string_to_array_iterator_new(params);
     const char *key = NULL;
     mlx_array val = mlx_array_new();
     while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
            key != NULL) {
+        count++;
         total += mlx_array_size(val) * mlx_array_itemsize(val);
         key = NULL;
     }
     mlx_array_free(val);
     mlx_map_string_to_array_iterator_free(it);
-    return total;
+    *out_count = count;
+    *out_bytes = total;
 }
 
 static int read_index_keys(const char *model_dir, char ***out_keys,
@@ -470,7 +481,8 @@ int weights_load(weights_t *w, const char *model_dir,
 
     for (size_t i = 0; i < shard_count; i++) {
         struct stat shard_st;
-        if (stat(shard_paths[i], &shard_st) != 0) {
+        if (stat(shard_paths[i], &shard_st) != 0 ||
+            !S_ISREG(shard_st.st_mode)) {
             if (err && errlen > 0)
                 snprintf(err, errlen, "shard file not found: %s",
                          shard_paths[i]);
@@ -528,8 +540,7 @@ int weights_load(weights_t *w, const char *model_dir,
     free(index_keys);
 
     w->params = merged;
-    w->count = mlxbridge_map_count(merged);
-    w->total_bytes = compute_total_bytes(merged);
+    map_stats(merged, &w->count, &w->total_bytes);
 
     log_info("weights: loaded %zu tensors (%zu bytes) from %zu shard(s)",
              w->count, w->total_bytes, shard_count);

@@ -10,6 +10,7 @@
  */
 
 #include <mlx/c/mlx.h>
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,14 +155,16 @@ static void quantize_and_replace(mlx_map_string_to_array m,
 
     CHECK(mlx_map_string_to_array_insert(m, name, qw));
 
+    const char *dot = strrchr(name, '.');
+    assert(dot);
+    int base_len = (int)(dot - name);
+
     char scales_name[512];
-    snprintf(scales_name, sizeof(scales_name), "%.*s.scales",
-             (int)(strrchr(name, '.') - name), name);
+    snprintf(scales_name, sizeof(scales_name), "%.*s.scales", base_len, name);
     CHECK(mlx_map_string_to_array_insert(m, scales_name, qs));
 
     char biases_name[512];
-    snprintf(biases_name, sizeof(biases_name), "%.*s.biases",
-             (int)(strrchr(name, '.') - name), name);
+    snprintf(biases_name, sizeof(biases_name), "%.*s.biases", base_len, name);
     CHECK(mlx_map_string_to_array_insert(m, biases_name, qb));
 
     mlx_array_free(qb);

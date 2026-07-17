@@ -14,7 +14,10 @@ bool mlxbridge_check(int ret, const char *context);
 #define MLXB_CHECK(call) mlxbridge_check((call), #call)
 
 /* All frees engine-thread-only.
-   Loads pinned to CPU stream internally (mlx_load_safetensors on GPU aborts). */
+   Loads pinned to CPU stream internally (mlx_load_safetensors on GPU aborts).
+   mlx_map_string_to_array_insert copies the underlying C++ array handle
+   (insert_or_assign in mlx-c map.cpp), so the caller retains ownership of
+   its mlx_array and must free it independently. */
 mlx_stream mlxbridge_cpu_stream(void);
 int    mlxbridge_load_safetensors(mlx_map_string_to_array *params,
                                   mlx_map_string_to_string *meta,

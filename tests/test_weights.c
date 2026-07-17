@@ -234,6 +234,62 @@ static void test_index_path_escape_rejected(void) {
     }
 }
 
+/* ---- M6: reject non-regular files ---- */
+
+static void test_glob_skips_directory(void) {
+    char tmpdir[] = "/tmp/mlxd_m6a_XXXXXX";
+    assert(mkdtemp(tmpdir) != NULL);
+
+    /* Create a directory whose name ends in .safetensors */
+    char dirpath[512];
+    snprintf(dirpath, sizeof(dirpath), "%s/fake.safetensors", tmpdir);
+    assert(mkdir(dirpath, 0755) == 0);
+
+    /* Create one real safetensors file */
+    write_file(tmpdir, "a.safetensors", "dummy");
+
+    char **paths = NULL;
+    size_t count = 0;
+    int rc = weights_enumerate_shards(tmpdir, &paths, &count, NULL);
+    assert(rc == 0);
+    assert(count == 1);
+    const char *base = strrchr(paths[0], '/');
+    assert(base);
+    assert(strcmp(base + 1, "a.safetensors") == 0);
+
+    weights_free_shard_paths(paths, count);
+    unlink_file(tmpdir, "a.safetensors");
+    rmdir(dirpath);
+    rmdir(tmpdir);
+}
+
+static void test_single_is_directory(void) {
+    char tmpdir[] = "/tmp/mlxd_m6b_XXXXXX";
+    assert(mkdtemp(tmpdir) != NULL);
+
+    /* model.safetensors is a directory, not a file */
+    char dirpath[512];
+    snprintf(dirpath, sizeof(dirpath), "%s/model.safetensors", tmpdir);
+    assert(mkdir(dirpath, 0755) == 0);
+
+    /* A real safetensors file that glob should find */
+    write_file(tmpdir, "x.safetensors", "dummy");
+
+    char **paths = NULL;
+    size_t count = 0;
+    int rc = weights_enumerate_shards(tmpdir, &paths, &count, NULL);
+    assert(rc == 0);
+    assert(count == 1);
+    const char *base = strrchr(paths[0], '/');
+    assert(base);
+    assert(strcmp(base + 1, "x.safetensors") == 0);
+
+    weights_free_shard_paths(paths, count);
+    unlink_file(tmpdir, "x.safetensors");
+    rmdir(dirpath);
+    rmdir(tmpdir);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -275,6 +331,12 @@ int main(void) {
 
     test_index_path_escape_rejected();
     printf("  test_index_path_escape_rejected: passed\n");
+
+    test_glob_skips_directory();
+    printf("  test_glob_skips_directory: passed\n");
+
+    test_single_is_directory();
+    printf("  test_single_is_directory: passed\n");
 
     printf("test_weights: all passed\n");
     return 0;
