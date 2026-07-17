@@ -2,9 +2,12 @@
 #include "cli/cmds.h"
 
 #include <assert.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "yyjson/yyjson.h"
 
@@ -366,6 +369,124 @@ static void test_main_no_args(void) {
     assert(rc == 1);
 }
 
+/* --- Coverage: cli_cmd_serve bad model ----------------------------------- */
+
+static void test_cmd_serve_bad_model(void) {
+    setenv("MLXD_CACHE_DIR", "/nonexistent", 1);
+    setenv("MLXD_HF_HUB_DIR", "/nonexistent", 1);
+
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(NULL, 1024, "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+
+    cli_args_t args = {0};
+    args.cmd = CLI_SERVE;
+    args.serve.host = "127.0.0.1";
+    args.serve.port = 0;
+    args.serve.model = "no/such-model";
+
+    int rc = cli_cmd_serve(&args, out, err_f);
+    fclose(out);
+    fclose(err_f);
+
+    assert(rc == 1);
+    assert(strstr(errbuf, "cannot resolve") != NULL);
+
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
+/* --- Coverage: SIGINT integration ---------------------------------------- */
+
+static void test_serve_sigint_graceful(void) {
+    int pipefd[2];
+    assert(pipe(pipefd) == 0);
+
+    pid_t child = fork();
+    assert(child >= 0);
+
+    if (child == 0) {
+        close(pipefd[0]);
+        FILE *out = fdopen(pipefd[1], "w");
+        FILE *err_f = fopen("/dev/null", "w");
+
+        cli_args_t args = {0};
+        args.cmd = CLI_SERVE;
+        args.serve.host = "127.0.0.1";
+        args.serve.port = 0;
+
+        int rc = cli_cmd_serve(&args, out, err_f);
+        fclose(out);
+        fclose(err_f);
+        _exit(rc);
+    }
+
+    close(pipefd[1]);
+    FILE *rd = fdopen(pipefd[0], "r");
+    char line[256];
+    assert(fgets(line, sizeof(line), rd) != NULL);
+    assert(strstr(line, "serving on") != NULL);
+
+    kill(child, SIGINT);
+
+    int status;
+    waitpid(child, &status, 0);
+    fclose(rd);
+
+    assert(WIFEXITED(status));
+    assert(WEXITSTATUS(status) == 0);
+}
+
+static void double_sigint(int sig) {
+    (void)sig;
+    raise(SIGINT);
+    raise(SIGINT);
+}
+
+static void test_serve_sigint_force_exit(void) {
+    int pipefd[2];
+    assert(pipe(pipefd) == 0);
+
+    pid_t child = fork();
+    assert(child >= 0);
+
+    if (child == 0) {
+        close(pipefd[0]);
+
+        struct sigaction usr = {0};
+        usr.sa_handler = double_sigint;
+        sigemptyset(&usr.sa_mask);
+        sigaction(SIGUSR1, &usr, NULL);
+
+        FILE *out = fdopen(pipefd[1], "w");
+        FILE *err_f = fopen("/dev/null", "w");
+
+        cli_args_t args = {0};
+        args.cmd = CLI_SERVE;
+        args.serve.host = "127.0.0.1";
+        args.serve.port = 0;
+
+        int rc = cli_cmd_serve(&args, out, err_f);
+        fclose(out);
+        fclose(err_f);
+        _exit(rc);
+    }
+
+    close(pipefd[1]);
+    FILE *rd = fdopen(pipefd[0], "r");
+    char line[256];
+    assert(fgets(line, sizeof(line), rd) != NULL);
+    assert(strstr(line, "serving on") != NULL);
+
+    kill(child, SIGUSR1);
+
+    int status;
+    waitpid(child, &status, 0);
+    fclose(rd);
+
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 130);
+}
+
 int main(void) {
     test_usage_contains_subcommands();
     test_usage_documents_options();
@@ -384,6 +505,9 @@ int main(void) {
     test_main_help();
     test_main_version();
     test_main_unknown_command();
+    test_cmd_serve_bad_model();
+    test_serve_sigint_graceful();
+    test_serve_sigint_force_exit();
     test_main_serve_help();
     test_main_no_args();
     printf("test_cli_cmds: all tests passed\n");
