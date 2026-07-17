@@ -885,6 +885,84 @@ static void test_user_cancel_emits_terminal(void) {
     engine_destroy(&eng);
 }
 
+/* ---- Stage 17: signal_shutdown flushes queued commands ------------------ */
+
+static void test_signal_shutdown_flushes_queued(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup("/fake");
+    engine_post(&eng, load);
+
+    stream_t *s_a = stream_create(1);
+    stream_retain(s_a);
+
+    int32_t ids_a[] = {10, 11, 12, 13};
+    engine_cmd_t *gen_a = calloc(1, sizeof(*gen_a));
+    gen_a->tag = CMD_GENERATE;
+    gen_a->generate.token_ids = malloc(sizeof(ids_a));
+    memcpy(gen_a->generate.token_ids, ids_a, sizeof(ids_a));
+    gen_a->generate.token_count = 4;
+    gen_a->generate.params.max_tokens = 4;
+    gen_a->generate.stream = s_a;
+    engine_post(&eng, gen_a);
+
+    for (int w = 0; w < 2000; w++) {
+        pthread_mutex_lock(&s_a->mtx);
+        int len = s_a->len;
+        pthread_mutex_unlock(&s_a->mtx);
+        if (len == s_a->cap) break;
+        struct timespec ws = {.tv_sec = 0, .tv_nsec = 1000000};
+        nanosleep(&ws, NULL);
+        assert(w < 1999);
+    }
+
+    stream_t *s_b = stream_create(4);
+    stream_retain(s_b);
+
+    int32_t ids_b[] = {20, 21};
+    engine_cmd_t *gen_b = calloc(1, sizeof(*gen_b));
+    gen_b->tag = CMD_GENERATE;
+    gen_b->generate.token_ids = malloc(sizeof(ids_b));
+    memcpy(gen_b->generate.token_ids, ids_b, sizeof(ids_b));
+    gen_b->generate.token_count = 2;
+    gen_b->generate.params.max_tokens = 2;
+    gen_b->generate.stream = s_b;
+    engine_post(&eng, gen_b);
+
+    engine_signal_shutdown(&eng);
+
+    chunk_t out;
+    bool b_got_done = false;
+    for (int w = 0; w < 2000 && !b_got_done; w++) {
+        if (stream_next(s_b, &out, 100)) {
+            if (out.tag == CHUNK_DONE) {
+                assert(out.done == FINISH_CANCELLED);
+                b_got_done = true;
+            }
+            if (out.tag == CHUNK_ERROR) free(out.error);
+        }
+    }
+    assert(b_got_done);
+
+    for (int w = 0; w < 200 && atomic_load(&s_b->refcount) > 1; w++) {
+        struct timespec ws = {.tv_sec = 0, .tv_nsec = 1000000};
+        nanosleep(&ws, NULL);
+    }
+    assert(atomic_load(&s_b->refcount) == 1);
+
+    engine_destroy(&eng);
+
+    chunk_t discard;
+    while (stream_next(s_a, &discard, 0)) {
+        if (discard.tag == CHUNK_ERROR) free(discard.error);
+    }
+    stream_release(s_a);
+    stream_release(s_b);
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(void) {
@@ -916,6 +994,7 @@ int main(void) {
     test_no_model_backpressure_shutdown();
     test_post_during_destroy_stress();
     test_user_cancel_emits_terminal();
+    test_signal_shutdown_flushes_queued();
     printf("test_engine: all passed\n");
     return 0;
 }

@@ -183,6 +183,22 @@ static engine_cmd_t *mailbox_dequeue(engine_t *eng) {
     return cmd;
 }
 
+/* ---- Mailbox drain ------------------------------------------------------- */
+
+static void mailbox_drain_cancel(engine_t *eng) {
+    pthread_mutex_lock(&eng->mailbox_mtx);
+    engine_cmd_t *head = eng->mailbox_head;
+    eng->mailbox_head = NULL;
+    eng->mailbox_tail = NULL;
+    pthread_mutex_unlock(&eng->mailbox_mtx);
+
+    while (head) {
+        engine_cmd_t *next = head->next;
+        cmd_cancel(head);
+        head = next;
+    }
+}
+
 /* ---- Engine thread ------------------------------------------------------- */
 
 static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
@@ -249,6 +265,7 @@ static void *engine_thread_main(void *arg) {
         switch (cmd->tag) {
         case CMD_STOP:
             free(cmd);
+            mailbox_drain_cancel(eng);
             return NULL;
         case CMD_LOAD:
             free(eng->loaded_model);
@@ -274,6 +291,7 @@ static void *engine_thread_main(void *arg) {
         }
     }
 
+    mailbox_drain_cancel(eng);
     return NULL;
 }
 
@@ -311,17 +329,7 @@ void engine_destroy(engine_t *eng) {
     engine_signal_shutdown(eng);
     pthread_join(eng->thread, NULL);
 
-    pthread_mutex_lock(&eng->mailbox_mtx);
-    engine_cmd_t *cmd = eng->mailbox_head;
-    eng->mailbox_head = NULL;
-    eng->mailbox_tail = NULL;
-    pthread_mutex_unlock(&eng->mailbox_mtx);
-
-    while (cmd) {
-        engine_cmd_t *next = cmd->next;
-        cmd_cancel(cmd);
-        cmd = next;
-    }
+    mailbox_drain_cancel(eng);
 
     free(eng->loaded_model);
     eng->loaded_model = NULL;

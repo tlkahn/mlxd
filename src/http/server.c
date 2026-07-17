@@ -344,6 +344,9 @@ static void on_stop_async(uv_async_t *handle) {
     drain_walk_ctx_t ctx = {.srv = srv, .gen_count = 0};
     uv_walk(&srv->loop, walk_drain_cb, &ctx);
 
+    if (srv->serve_ctx.engine)
+        engine_signal_shutdown(srv->serve_ctx.engine);
+
     if (ctx.gen_count > 0) {
         uint64_t deadline = srv->drain_deadline_ms ? srv->drain_deadline_ms : 5000;
         if (uv_timer_init(&srv->loop, &srv->drain_timer) == 0) {
