@@ -489,6 +489,25 @@ static void test_sliding_window_and_layers(void) {
     assert(model_layer_is_global(&cfg, 11) == true);
     model_config_free(&cfg);
 
+    /* mistral: sliding_window but no pattern - all layers are sliding, none global */
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_mistral");
+    assert(rc == 0);
+    assert(model_layer_is_global(&cfg, 0) == false);
+    assert(model_layer_is_global(&cfg, 4) == false);
+    assert(model_layer_is_global(&cfg, 5) == false);
+    assert(model_layer_is_global(&cfg, 11) == false);
+    model_config_free(&cfg);
+
+    /* gemma3 without explicit sliding_window_pattern key: family default fills 6 */
+    rc = model_config_load(&cfg,
+                           MLXD_FIXTURES_DIR "/model_config_gemma3_no_pattern");
+    assert(rc == 0);
+    assert(cfg.sliding_window_pattern == 6);
+    assert(model_layer_is_global(&cfg, 5) == true);
+    assert(model_layer_is_global(&cfg, 4) == false);
+    assert(model_layer_is_global(&cfg, 11) == true);
+    model_config_free(&cfg);
+
     /* too many layers */
     memset(&cfg, 0xAB, sizeof(cfg));
     rc = model_config_load(&cfg,
@@ -566,6 +585,31 @@ static void test_stage_e_dims(void) {
     model_config_free(&cfg);
 }
 
+/* --- LFM2: explicit rms_norm_eps takes precedence over norm_eps alias ---- */
+
+static void test_lfm2_norm_eps_precedence(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg,
+                               MLXD_FIXTURES_DIR "/model_config_lfm2_both_eps");
+    assert(rc == 0);
+    assert(cfg.rms_norm_eps == 1e-6f);
+    model_config_free(&cfg);
+}
+
+/* --- rope_parameters: nested blocks shadow flat keys --------------------- */
+
+static void test_rope_nested_shadows_flat(void) {
+    model_config_t cfg;
+    int rc =
+        model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_rope_both");
+    assert(rc == 0);
+    assert(cfg.rope_theta == 1000000.0f);
+    assert(cfg.partial_rotary_factor == 1.0f);
+    assert(cfg.rope_local_base_freq == 10000.0f);
+    assert(cfg.partial_rotary_factor_global == 0.5f);
+    model_config_free(&cfg);
+}
+
 /* --- A1 Cycle 10: EOS from config.json ----------------------------------- */
 
 static void test_eos_tokens(void) {
@@ -578,7 +622,7 @@ static void test_eos_tokens(void) {
     assert(cfg.num_eos_tokens == 2);
     model_config_free(&cfg);
 
-    /* array with duplicate */
+    /* array with duplicate 151643 - fixture carries the dup for dedup coverage */
     rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_eos_array");
     assert(rc == 0);
     assert(cfg.num_eos_tokens == 2);
@@ -669,6 +713,8 @@ int main(void) {
     test_nested_text_config();
     test_sliding_window_and_layers();
     test_stage_e_dims();
+    test_lfm2_norm_eps_precedence();
+    test_rope_nested_shadows_flat();
     test_eos_tokens();
     test_generation_config();
 

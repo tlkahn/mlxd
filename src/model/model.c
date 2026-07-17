@@ -205,14 +205,15 @@ bool model_layer_is_global(const model_config_t *cfg, int layer) {
         return true;
     if (cfg->has_explicit_layer_types && layer >= 0 && layer < MLXD_MAX_LAYERS)
         return cfg->layer_is_global[layer];
+    /* Deliberate deviation from mlx-serve which defaults pattern=6 globally,
+       mis-marking mistral layers as global. pattern=0 means all-sliding. */
     if (cfg->sliding_window_pattern <= 0)
-        return true;
+        return false;
     return (layer % cfg->sliding_window_pattern) ==
            (cfg->sliding_window_pattern - 1);
 }
 
-static void apply_family_defaults(model_config_t *cfg, yyjson_val *root,
-                                  yyjson_val *cfg_obj,
+static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
                                   bool has_text_config,
                                   bool sliding_window_key_present) {
     model_family_t fam = model_family_from_type(cfg->model_type);
@@ -239,6 +240,8 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *root,
             if (cfg->sliding_window == 0)
                 cfg->sliding_window = 1024;
         }
+        if (yyjson_obj_get(cfg_obj, "sliding_window_pattern") == NULL)
+            cfg->sliding_window_pattern = 6;
         if (cfg->rope_scaling_factor == 1.0f) {
             yyjson_val *rs = yyjson_obj_get(cfg_obj, "rope_scaling");
             if (!rs) {
@@ -322,7 +325,7 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *root,
             if (te && yyjson_is_bool(te))
                 cfg->tie_word_embeddings = yyjson_get_bool(te);
         }
-        {
+        if (yyjson_obj_get(cfg_obj, "rms_norm_eps") == NULL) {
             yyjson_val *ne = yyjson_obj_get(cfg_obj, "norm_eps");
             if (ne && yyjson_is_num(ne))
                 cfg->rms_norm_eps = (float)yyjson_get_num(ne);
@@ -498,8 +501,6 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *root,
     /* MoE-field discrimination: dense qwen3_5 + experts -> moe family. */
     if (cfg->family == MODEL_QWEN3_5 && cfg->num_experts > 0)
         cfg->family = MODEL_QWEN3_5_MOE;
-
-    (void)root;
 }
 
 static int parse_generation_config(model_config_t *cfg, const char *model_dir) {
@@ -564,7 +565,7 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
     cfg->rope_proportional_factor = 1.0f;
     cfg->partial_rotary_factor  = 1.0f;
     cfg->partial_rotary_factor_global = 1.0f;
-    cfg->sliding_window_pattern = 6;
+    cfg->sliding_window_pattern = 0;
     cfg->quant_group_size       = 64;
     cfg->quant_mode             = QUANT_MODE_AFFINE;
     cfg->linear_key_head_dim    = 128;
@@ -770,10 +771,13 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         }
     }
 
-    /* rope_parameters: gemma4 nested then qwen3_5 flat (flat last = overwrite) */
+    /* rope_parameters: gemma4 nested blocks take priority; flat keys (qwen3_5)
+       are only used when no nested sub-object is present. */
     yyjson_val *rp = yyjson_obj_get(cfg_obj, "rope_parameters");
     if (rp && yyjson_is_obj(rp)) {
         yyjson_val *fa = yyjson_obj_get(rp, "full_attention");
+        yyjson_val *sa = yyjson_obj_get(rp, "sliding_attention");
+        bool has_nested = (fa && yyjson_is_obj(fa)) || (sa && yyjson_is_obj(sa));
         if (fa && yyjson_is_obj(fa)) {
             if (get_f32(fa, "rope_theta", &cfg->rope_theta, cfg->rope_theta)) {
                 model_config_free(cfg);
@@ -799,7 +803,6 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
                 }
             }
         }
-        yyjson_val *sa = yyjson_obj_get(rp, "sliding_attention");
         if (sa && yyjson_is_obj(sa)) {
             if (get_f32(sa, "rope_theta", &cfg->rope_local_base_freq,
                         cfg->rope_local_base_freq)) {
@@ -808,13 +811,15 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
                 return -1;
             }
         }
-        /* qwen3_5 flat keys */
-        if (get_f32(rp, "rope_theta", &cfg->rope_theta, cfg->rope_theta) ||
-            get_f32(rp, "partial_rotary_factor", &cfg->partial_rotary_factor,
-                    cfg->partial_rotary_factor)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
+        if (!has_nested) {
+            if (get_f32(rp, "rope_theta", &cfg->rope_theta, cfg->rope_theta) ||
+                get_f32(rp, "partial_rotary_factor",
+                        &cfg->partial_rotary_factor,
+                        cfg->partial_rotary_factor)) {
+                model_config_free(cfg);
+                yyjson_doc_free(doc);
+                return -1;
+            }
         }
     } else if (rp && !yyjson_is_null(rp)) {
         model_config_free(cfg);
@@ -942,7 +947,7 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         }
     }
 
-    apply_family_defaults(cfg, root, cfg_obj, has_text_config,
+    apply_family_defaults(cfg, cfg_obj, has_text_config,
                           sliding_window_key_present);
 
     yyjson_doc_free(doc);

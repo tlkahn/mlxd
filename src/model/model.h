@@ -78,6 +78,8 @@ typedef struct {
     /* Sliding window */
     bool has_sliding_window;
     int  sliding_window;
+    /* gemma convention: layers (pattern-1), (2*pattern-1), ... are global;
+       0 = no global layers when sliding window is enabled. */
     int  sliding_window_pattern;
     bool has_explicit_layer_types;
     bool layer_is_global[MLXD_MAX_LAYERS];
