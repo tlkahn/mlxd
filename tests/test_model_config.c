@@ -610,6 +610,101 @@ static void test_rope_nested_shadows_flat(void) {
     model_config_free(&cfg);
 }
 
+/* --- PR61 Cycle 1: layer predicate ordering + gemma4 window default ------ */
+
+static void test_layer_predicate_and_gemma4_window(void) {
+    model_config_t cfg;
+    int rc;
+
+    /* gemma4 without explicit sliding_window key: silent fill */
+    rc = model_config_load(&cfg,
+                           MLXD_FIXTURES_DIR "/model_config_gemma4_no_window");
+    assert(rc == 0);
+    assert(cfg.has_sliding_window == true);
+    assert(cfg.sliding_window == 1024);
+    /* explicit layer_types map still governs per-layer predicate */
+    assert(model_layer_is_global(&cfg, 0) == false);
+    assert(model_layer_is_global(&cfg, 5) == true);
+    assert(model_layer_is_global(&cfg, 7) == true);
+    /* OOB: safe default = true */
+    assert(model_layer_is_global(&cfg, -1) == true);
+    assert(model_layer_is_global(&cfg, MLXD_MAX_LAYERS) == true);
+    model_config_free(&cfg);
+
+    /* LFM2: has_sliding_window=false but explicit layer_types present.
+       conv layers must report false (explicit map wins). */
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_lfm2");
+    assert(rc == 0);
+    assert(cfg.has_sliding_window == false);
+    assert(cfg.has_explicit_layer_types == true);
+    assert(model_layer_is_global(&cfg, 0) == false); /* conv */
+    assert(model_layer_is_global(&cfg, 1) == true);  /* full_attention */
+    assert(model_layer_is_global(&cfg, 2) == false); /* conv */
+    assert(model_layer_is_global(&cfg, 3) == true);  /* full_attention */
+    model_config_free(&cfg);
+}
+
+/* --- PR61 Cycle 3: strict wrong-type enforcement for family fields ------- */
+
+static void test_strict_wrong_type_family_fields(void) {
+    const char *bad[] = {
+        /* 3a: hidden_act non-string */
+        MLXD_FIXTURES_DIR "/model_config_hidden_act_wrong_type",
+        /* 3b: nemotron mamba field wrong type */
+        MLXD_FIXTURES_DIR "/model_config_nemotron_mamba_wrong_type",
+        /* 3b: nemotron time_step_limit wrong type */
+        MLXD_FIXTURES_DIR "/model_config_nemotron_tsl_wrong_type",
+        /* 3b: nemotron hybrid_override_pattern wrong type */
+        MLXD_FIXTURES_DIR "/model_config_nemotron_pattern_wrong_type",
+        /* 3c: lfm2 tie_embedding wrong type */
+        MLXD_FIXTURES_DIR "/model_config_lfm2_tie_wrong_type",
+        /* 3c: lfm2 norm_eps wrong type */
+        MLXD_FIXTURES_DIR "/model_config_lfm2_norm_wrong_type",
+        /* 3c: lfm2 conv_dim wrong type */
+        MLXD_FIXTURES_DIR "/model_config_lfm2_conv_dim_wrong_type",
+        /* 3c: lfm2 conv_L_cache wrong type */
+        MLXD_FIXTURES_DIR "/model_config_lfm2_conv_L_wrong_type",
+        /* 3d: generic layer_types non-array */
+        MLXD_FIXTURES_DIR "/model_config_layer_types_wrong_type",
+        /* 3d: generic layer_types non-string element */
+        MLXD_FIXTURES_DIR "/model_config_layer_types_elem_wrong_type",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        model_config_t cfg;
+        memset(&cfg, 0xAB, sizeof(cfg));
+        int rc = model_config_load(&cfg, bad[i]);
+        assert(rc == -1);
+        model_config_free(&cfg);
+    }
+}
+
+/* --- PR61 Cycle 2: qwen3.5 head_dim fallback ----------------------------- */
+
+static void test_qwen3_5_head_dim_fallback(void) {
+    model_config_t cfg;
+    int rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_no_head_dim");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_QWEN3_5);
+    assert(cfg.head_dim == 2048 / 16); /* hidden_size / num_attention_heads */
+    assert(cfg.query_pre_attn_scalar == cfg.head_dim);
+    model_config_free(&cfg);
+}
+
+/* --- PR61 Cycle 4: gemma3 rope_scaling null branch pinning --------------- */
+
+static void test_gemma3_rope_null(void) {
+    model_config_t cfg;
+    int rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_gemma3_rope_null");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_GEMMA3);
+    /* Generic parse skips null; gemma3 fallback fires on !yyjson_is_obj(rs)
+       and yields factor 8.0 - this IS the null-handling path. */
+    assert(cfg.rope_scaling_factor == 8.0f);
+    model_config_free(&cfg);
+}
+
 /* --- A1 Cycle 10: EOS from config.json ----------------------------------- */
 
 static void test_eos_tokens(void) {
@@ -715,6 +810,10 @@ int main(void) {
     test_stage_e_dims();
     test_lfm2_norm_eps_precedence();
     test_rope_nested_shadows_flat();
+    test_layer_predicate_and_gemma4_window();
+    test_strict_wrong_type_family_fields();
+    test_qwen3_5_head_dim_fallback();
+    test_gemma3_rope_null();
     test_eos_tokens();
     test_generation_config();
 

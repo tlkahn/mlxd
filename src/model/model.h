@@ -165,8 +165,9 @@ typedef struct {
 /* Map model_type string to family enum. NULL / unknown -> MODEL_FAMILY_UNKNOWN. */
 model_family_t model_family_from_type(const char *model_type);
 
-/* Global-attention layer predicate: explicit map when present, else gemma
- * sliding-window pattern convention. */
+/* Global-attention layer predicate. Priority: explicit layer_types map (OOB
+ * returns true), then !has_sliding_window (all global), then pattern modulo.
+ * NULL cfg or OOB with explicit map returns true (safe default). */
 bool model_layer_is_global(const model_config_t *cfg, int layer);
 
 /* Load model config from a directory (reads config.json + generation_config.json).

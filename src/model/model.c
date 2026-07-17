@@ -132,22 +132,26 @@ static int parse_eos_value(model_config_t *cfg, yyjson_val *v) {
         }
         return 0;
     }
-    /* Other types: ignore (mlx-serve parity for non-int/array). */
+    /* Other types (string, bool, null): ignore. Deliberate exception to the
+       strict wrong-type policy - matches mlx-serve which silently skips these. */
     return 0;
 }
 
-static void apply_hidden_act_string(model_config_t *cfg, yyjson_val *cfg_obj) {
+static int apply_hidden_act_string(model_config_t *cfg, yyjson_val *cfg_obj) {
     yyjson_val *v = yyjson_obj_get(cfg_obj, "hidden_act");
-    if (!v || !yyjson_is_str(v))
-        return;
+    if (!v)
+        return 0;
+    if (!yyjson_is_str(v))
+        return -1;
     const char *s = yyjson_get_str(v);
     if (strcmp(s, "silu") == 0)
         cfg->hidden_act = HIDDEN_ACT_SILU;
     else if (strcmp(s, "gelu_pytorch_tanh") == 0)
         cfg->hidden_act = HIDDEN_ACT_GELU_APPROX;
+    return 0;
 }
 
-static void set_llama_style_defaults(model_config_t *cfg, yyjson_val *cfg_obj) {
+static int set_llama_style_defaults(model_config_t *cfg, yyjson_val *cfg_obj) {
     cfg->weight_prefix        = "model";
     cfg->norm_has_offset      = false;
     cfg->scale_embeddings     = false;
@@ -157,9 +161,11 @@ static void set_llama_style_defaults(model_config_t *cfg, yyjson_val *cfg_obj) {
     cfg->rope_local_base_freq = cfg->rope_theta;
     if (yyjson_obj_get(cfg_obj, "head_dim") == NULL && cfg->num_attention_heads > 0)
         cfg->head_dim = cfg->hidden_size / cfg->num_attention_heads;
-    apply_hidden_act_string(cfg, cfg_obj);
+    if (apply_hidden_act_string(cfg, cfg_obj))
+        return -1;
     if (yyjson_obj_get(cfg_obj, "query_pre_attn_scalar") == NULL)
         cfg->query_pre_attn_scalar = cfg->head_dim;
+    return 0;
 }
 
 model_family_t model_family_from_type(const char *model_type) {
@@ -201,10 +207,13 @@ model_family_t model_family_from_type(const char *model_type) {
 bool model_layer_is_global(const model_config_t *cfg, int layer) {
     if (!cfg)
         return true;
+    if (cfg->has_explicit_layer_types) {
+        if (layer < 0 || layer >= MLXD_MAX_LAYERS)
+            return true;
+        return cfg->layer_is_global[layer];
+    }
     if (!cfg->has_sliding_window)
         return true;
-    if (cfg->has_explicit_layer_types && layer >= 0 && layer < MLXD_MAX_LAYERS)
-        return cfg->layer_is_global[layer];
     /* Deliberate deviation from mlx-serve which defaults pattern=6 globally,
        mis-marking mistral layers as global. pattern=0 means all-sliding. */
     if (cfg->sliding_window_pattern <= 0)
@@ -213,9 +222,9 @@ bool model_layer_is_global(const model_config_t *cfg, int layer) {
            (cfg->sliding_window_pattern - 1);
 }
 
-static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
-                                  bool has_text_config,
-                                  bool sliding_window_key_present) {
+static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
+                                 bool has_text_config,
+                                 bool sliding_window_key_present) {
     model_family_t fam = model_family_from_type(cfg->model_type);
     cfg->family        = fam;
 
@@ -247,6 +256,8 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
             if (!rs) {
                 cfg->rope_scaling_factor = 8.0f;
             } else if (!yyjson_is_obj(rs)) {
+                /* Reachable for JSON null (generic parse deliberately skips
+                   null rope_scaling; yyjson_obj_get returns a non-NULL val). */
                 cfg->rope_scaling_factor = 8.0f;
             } else if (yyjson_obj_get(rs, "factor") == NULL) {
                 cfg->rope_scaling_factor = 8.0f;
@@ -266,6 +277,11 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         cfg->has_qk_norm         = true;
         cfg->has_v_norm          = true;
         cfg->rope_scaling_factor = 1.0f;
+        if (!sliding_window_key_present) {
+            cfg->has_sliding_window = true;
+            if (cfg->sliding_window == 0)
+                cfg->sliding_window = 1024;
+        }
         if (yyjson_obj_get(cfg_obj, "query_pre_attn_scalar") == NULL)
             cfg->query_pre_attn_scalar = cfg->head_dim;
         ensure_gemma_terminators(cfg);
@@ -284,24 +300,30 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         cfg->attn_output_gate     = true;
         cfg->rope_scaling_factor  = 1.0f;
         cfg->rope_local_base_freq = cfg->rope_theta;
+        if (yyjson_obj_get(cfg_obj, "head_dim") == NULL &&
+            cfg->num_attention_heads > 0)
+            cfg->head_dim = cfg->hidden_size / cfg->num_attention_heads;
         if (yyjson_obj_get(cfg_obj, "query_pre_attn_scalar") == NULL)
             cfg->query_pre_attn_scalar = cfg->head_dim;
         break;
 
     case MODEL_QWEN3:
-        set_llama_style_defaults(cfg, cfg_obj);
+        if (set_llama_style_defaults(cfg, cfg_obj))
+            return -1;
         cfg->has_qk_norm = true;
         break;
 
     case MODEL_QWEN2:
-        set_llama_style_defaults(cfg, cfg_obj);
+        if (set_llama_style_defaults(cfg, cfg_obj))
+            return -1;
         if (yyjson_obj_get(cfg_obj, "attention_bias") == NULL)
             cfg->attention_bias = true;
         break;
 
     case MODEL_LLAMA:
     case MODEL_MISTRAL:
-        set_llama_style_defaults(cfg, cfg_obj);
+        if (set_llama_style_defaults(cfg, cfg_obj))
+            return -1;
         break;
 
     case MODEL_LFM2:
@@ -322,41 +344,43 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         cfg->tie_word_embeddings   = true;
         {
             yyjson_val *te = yyjson_obj_get(cfg_obj, "tie_embedding");
-            if (te && yyjson_is_bool(te))
+            if (te) {
+                if (!yyjson_is_bool(te))
+                    return -1;
                 cfg->tie_word_embeddings = yyjson_get_bool(te);
+            }
         }
         if (yyjson_obj_get(cfg_obj, "rms_norm_eps") == NULL) {
             yyjson_val *ne = yyjson_obj_get(cfg_obj, "norm_eps");
-            if (ne && yyjson_is_num(ne))
+            if (ne) {
+                if (!yyjson_is_num(ne))
+                    return -1;
                 cfg->rms_norm_eps = (float)yyjson_get_num(ne);
-        }
-        {
-            yyjson_val *cd = yyjson_obj_get(cfg_obj, "conv_dim");
-            if (cd && yyjson_is_int(cd)) {
-                int64_t n = yyjson_get_sint(cd);
-                if (n >= 0 && n <= INT_MAX)
-                    cfg->lfm_conv_dim = (int)n;
             }
         }
+        if (get_int_nonneg(cfg_obj, "conv_dim", &cfg->lfm_conv_dim,
+                           cfg->lfm_conv_dim))
+            return -1;
         {
-            /* HF LFM2 name for the conv kernel length. */
-            yyjson_val *cl = yyjson_obj_get(cfg_obj, "conv_L_cache");
-            if (cl && yyjson_is_int(cl)) {
-                int64_t n = yyjson_get_sint(cl);
-                if (n >= 1 && n <= INT_MAX)
-                    cfg->lfm_conv_kernel = (int)n;
-            }
+            int tmp = cfg->lfm_conv_kernel;
+            if (get_int_nonneg(cfg_obj, "conv_L_cache", &tmp, tmp))
+                return -1;
+            if (tmp > 0)
+                cfg->lfm_conv_kernel = tmp;
         }
         {
             yyjson_val *lt = yyjson_obj_get(cfg_obj, "layer_types");
+            if (lt && !yyjson_is_arr(lt) && !yyjson_is_null(lt))
+                return -1;
             if (yyjson_is_arr(lt)) {
                 size_t idx, max;
                 yyjson_val *item;
                 yyjson_arr_foreach(lt, idx, max, item) {
                     if (idx >= (size_t)MLXD_MAX_LAYERS)
                         break;
-                    if (yyjson_is_str(item) &&
-                        strcmp(yyjson_get_str(item), "conv") == 0)
+                    if (!yyjson_is_str(item))
+                        return -1;
+                    if (strcmp(yyjson_get_str(item), "conv") == 0)
                         cfg->layer_kinds[idx] = LAYER_KIND_GATED_CONV;
                     else
                         cfg->layer_kinds[idx] = LAYER_KIND_ATTENTION;
@@ -387,40 +411,38 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
             if (lne && yyjson_is_num(lne))
                 cfg->rms_norm_eps = (float)yyjson_get_num(lne);
         }
-        {
-            int tmp;
-            if (get_int_nonneg(cfg_obj, "mamba_num_heads", &tmp, 0) == 0)
-                cfg->mamba_num_heads = tmp;
-            if (get_int_nonneg(cfg_obj, "mamba_head_dim", &tmp, 0) == 0)
-                cfg->mamba_head_dim = tmp;
-            if (get_int_nonneg(cfg_obj, "n_groups", &tmp, cfg->mamba_n_groups) ==
-                0)
-                cfg->mamba_n_groups = tmp;
-            if (get_int_nonneg(cfg_obj, "ssm_state_size", &tmp,
-                               cfg->ssm_state_size) == 0)
-                cfg->ssm_state_size = tmp;
-            if (get_int_nonneg(cfg_obj, "conv_kernel", &tmp,
-                               cfg->mamba_conv_kernel) == 0)
-                cfg->mamba_conv_kernel = tmp;
-            if (get_int_nonneg(cfg_obj, "expand", &tmp, cfg->mamba_expand) == 0)
-                cfg->mamba_expand = tmp;
-            if (get_int_nonneg(cfg_obj, "chunk_size", &tmp,
-                               cfg->mamba_chunk_size) == 0)
-                cfg->mamba_chunk_size = tmp;
-        }
+        if (get_int_nonneg(cfg_obj, "mamba_num_heads", &cfg->mamba_num_heads,
+                           cfg->mamba_num_heads) ||
+            get_int_nonneg(cfg_obj, "mamba_head_dim", &cfg->mamba_head_dim,
+                           cfg->mamba_head_dim) ||
+            get_int_nonneg(cfg_obj, "n_groups", &cfg->mamba_n_groups,
+                           cfg->mamba_n_groups) ||
+            get_int_nonneg(cfg_obj, "ssm_state_size", &cfg->ssm_state_size,
+                           cfg->ssm_state_size) ||
+            get_int_nonneg(cfg_obj, "conv_kernel", &cfg->mamba_conv_kernel,
+                           cfg->mamba_conv_kernel) ||
+            get_int_nonneg(cfg_obj, "expand", &cfg->mamba_expand,
+                           cfg->mamba_expand) ||
+            get_int_nonneg(cfg_obj, "chunk_size", &cfg->mamba_chunk_size,
+                           cfg->mamba_chunk_size))
+            return -1;
         {
             yyjson_val *tsl = yyjson_obj_get(cfg_obj, "time_step_limit");
+            if (tsl && !yyjson_is_arr(tsl))
+                return -1;
             if (yyjson_is_arr(tsl) && yyjson_arr_size(tsl) >= 2) {
                 yyjson_val *a = yyjson_arr_get(tsl, 0);
                 yyjson_val *b = yyjson_arr_get(tsl, 1);
-                if (a && yyjson_is_num(a))
-                    cfg->time_step_min = (float)yyjson_get_num(a);
-                if (b && yyjson_is_num(b))
-                    cfg->time_step_max = (float)yyjson_get_num(b);
+                if (!yyjson_is_num(a) || !yyjson_is_num(b))
+                    return -1;
+                cfg->time_step_min = (float)yyjson_get_num(a);
+                cfg->time_step_max = (float)yyjson_get_num(b);
             }
         }
         {
             yyjson_val *pat = yyjson_obj_get(cfg_obj, "hybrid_override_pattern");
+            if (pat && !yyjson_is_str(pat))
+                return -1;
             if (yyjson_is_str(pat)) {
                 const char *s = yyjson_get_str(pat);
                 for (size_t i = 0; s[i] != '\0' && i < (size_t)MLXD_MAX_LAYERS;
@@ -452,7 +474,8 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         break;
 
     case MODEL_DEEPSEEK_V4:
-        set_llama_style_defaults(cfg, cfg_obj);
+        if (set_llama_style_defaults(cfg, cfg_obj))
+            return -1;
         cfg->hidden_act = HIDDEN_ACT_SILU;
         break;
 
@@ -473,16 +496,17 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         {
             yyjson_val *lne = yyjson_obj_get(cfg_obj, "layer_norm_eps");
             if (lne) {
-                if (!yyjson_is_num(lne)) {
-                    /* leave default; strict type checked below via flag */
-                } else {
+                if (!yyjson_is_num(lne) && !yyjson_is_null(lne))
+                    return -1;
+                if (yyjson_is_num(lne))
                     cfg->layer_norm_eps = (float)yyjson_get_num(lne);
-                }
             }
         }
         {
             yyjson_val *tvs = yyjson_obj_get(cfg_obj, "type_vocab_size");
             if (tvs) {
+                if (!yyjson_is_int(tvs) && !yyjson_is_null(tvs))
+                    return -1;
                 if (yyjson_is_int(tvs)) {
                     int64_t n = yyjson_get_sint(tvs);
                     if (n >= 0 && n <= INT_MAX)
@@ -494,13 +518,15 @@ static void apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
 
     case MODEL_FAMILY_UNKNOWN:
     default:
-        set_llama_style_defaults(cfg, cfg_obj);
+        if (set_llama_style_defaults(cfg, cfg_obj))
+            return -1;
         break;
     }
 
     /* MoE-field discrimination: dense qwen3_5 + experts -> moe family. */
     if (cfg->family == MODEL_QWEN3_5 && cfg->num_experts > 0)
         cfg->family = MODEL_QWEN3_5_MOE;
+    return 0;
 }
 
 static int parse_generation_config(model_config_t *cfg, const char *model_dir) {
@@ -592,24 +618,18 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         return -1;
 
     yyjson_val *root = yyjson_doc_get_root(doc);
-    if (!yyjson_is_obj(root)) {
-        yyjson_doc_free(doc);
-        return -1;
-    }
+    if (!yyjson_is_obj(root))
+        goto fail_doc;
 
     /* model_type is required */
     yyjson_val *mt     = yyjson_obj_get(root, "model_type");
     const char *mt_str = yyjson_get_str(mt);
-    if (!mt_str) {
-        yyjson_doc_free(doc);
-        return -1;
-    }
+    if (!mt_str)
+        goto fail_doc;
 
     cfg->model_type = dup_str(mt_str);
-    if (!cfg->model_type) {
-        yyjson_doc_free(doc);
-        return -1;
-    }
+    if (!cfg->model_type)
+        goto fail_doc;
 
     /* architectures: first element of JSON array, optional */
     yyjson_val *archs = yyjson_obj_get(root, "architectures");
@@ -618,11 +638,8 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         const char *a_str = yyjson_get_str(first);
         if (a_str) {
             cfg->architectures = dup_str(a_str);
-            if (!cfg->architectures) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (!cfg->architectures)
+                goto fail;
         }
     }
 
@@ -680,35 +697,24 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
                     cfg->sliding_window_pattern) ||
         get_f32(cfg_obj, "rope_local_base_freq", &cfg->rope_local_base_freq,
                 cfg->rope_local_base_freq) ||
-        get_bool(cfg_obj, "attention_bias", &cfg->attention_bias, false)) {
-        model_config_free(cfg);
-        yyjson_doc_free(doc);
-        return -1;
-    }
+        get_bool(cfg_obj, "attention_bias", &cfg->attention_bias, false))
+        goto fail;
 
     /* top_k_experts alias for num_experts_per_tok */
     {
         yyjson_val *tke = yyjson_obj_get(cfg_obj, "top_k_experts");
         if (tke && yyjson_is_int(tke)) {
             int64_t n = yyjson_get_sint(tke);
-            if (n < 0 || n > INT_MAX) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (n < 0 || n > INT_MAX)
+                goto fail;
             cfg->num_experts_per_tok = (int)n;
         } else if (tke && !yyjson_is_null(tke)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
+            goto fail;
         }
     }
 
-    if (cfg->num_hidden_layers > MLXD_MAX_LAYERS) {
-        model_config_free(cfg);
-        yyjson_doc_free(doc);
-        return -1;
-    }
+    if (cfg->num_hidden_layers > MLXD_MAX_LAYERS)
+        goto fail;
 
     /* sliding_window: int = enabled, null = disabled, other = -1 */
     bool        sliding_window_key_present = false;
@@ -719,43 +725,29 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
             cfg->has_sliding_window = false;
         } else if (yyjson_is_int(sw)) {
             int64_t n = yyjson_get_sint(sw);
-            if (n < 0 || n > INT_MAX) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (n < 0 || n > INT_MAX)
+                goto fail;
             cfg->sliding_window     = (int)n;
             cfg->has_sliding_window = true;
         } else {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
+            goto fail;
         }
     }
 
     /* rope_scaling object */
     yyjson_val *rs = yyjson_obj_get(cfg_obj, "rope_scaling");
     if (rs && !yyjson_is_null(rs)) {
-        if (!yyjson_is_obj(rs)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
-        }
+        if (!yyjson_is_obj(rs))
+            goto fail;
         yyjson_val *rtype = yyjson_obj_get(rs, "rope_type");
         if (!rtype)
             rtype = yyjson_obj_get(rs, "type");
         if (rtype) {
-            if (!yyjson_is_str(rtype)) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (!yyjson_is_str(rtype))
+                goto fail;
             cfg->rope_scaling_type = dup_str(yyjson_get_str(rtype));
-            if (!cfg->rope_scaling_type) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (!cfg->rope_scaling_type)
+                goto fail;
         }
         if (get_f32(rs, "factor", &cfg->rope_scaling_factor,
                     cfg->rope_scaling_factor) ||
@@ -764,11 +756,8 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
             get_f32(rs, "high_freq_factor", &cfg->rope_high_freq_factor,
                     cfg->rope_high_freq_factor) ||
             get_int_nonneg(rs, "original_max_position_embeddings",
-                           &cfg->rope_original_max_position_embeddings, 0)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
-        }
+                           &cfg->rope_original_max_position_embeddings, 0))
+            goto fail;
     }
 
     /* rope_parameters: gemma4 nested blocks take priority; flat keys (qwen3_5)
@@ -779,56 +768,41 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         yyjson_val *sa = yyjson_obj_get(rp, "sliding_attention");
         bool has_nested = (fa && yyjson_is_obj(fa)) || (sa && yyjson_is_obj(sa));
         if (fa && yyjson_is_obj(fa)) {
-            if (get_f32(fa, "rope_theta", &cfg->rope_theta, cfg->rope_theta)) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (get_f32(fa, "rope_theta", &cfg->rope_theta, cfg->rope_theta))
+                goto fail;
             if (get_f32(fa, "partial_rotary_factor",
                         &cfg->partial_rotary_factor_global,
-                        cfg->partial_rotary_factor_global)) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+                        cfg->partial_rotary_factor_global))
+                goto fail;
             yyjson_val *rt = yyjson_obj_get(fa, "rope_type");
             if (rt && yyjson_is_str(rt) &&
                 strcmp(yyjson_get_str(rt), "proportional") == 0) {
                 cfg->rope_proportional = true;
                 if (get_f32(fa, "factor", &cfg->rope_proportional_factor,
-                            cfg->rope_proportional_factor)) {
-                    model_config_free(cfg);
-                    yyjson_doc_free(doc);
-                    return -1;
-                }
+                            cfg->rope_proportional_factor))
+                    goto fail;
             }
         }
         if (sa && yyjson_is_obj(sa)) {
             if (get_f32(sa, "rope_theta", &cfg->rope_local_base_freq,
-                        cfg->rope_local_base_freq)) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+                        cfg->rope_local_base_freq))
+                goto fail;
         }
         if (!has_nested) {
             if (get_f32(rp, "rope_theta", &cfg->rope_theta, cfg->rope_theta) ||
                 get_f32(rp, "partial_rotary_factor",
                         &cfg->partial_rotary_factor,
-                        cfg->partial_rotary_factor)) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+                        cfg->partial_rotary_factor))
+                goto fail;
         }
     } else if (rp && !yyjson_is_null(rp)) {
-        model_config_free(cfg);
-        yyjson_doc_free(doc);
-        return -1;
+        goto fail;
     }
 
     /* layer_types -> layer_is_global (gemma4) */
     yyjson_val *lt = yyjson_obj_get(cfg_obj, "layer_types");
+    if (lt && !yyjson_is_arr(lt) && !yyjson_is_null(lt))
+        goto fail;
     if (yyjson_is_arr(lt)) {
         cfg->has_explicit_layer_types = true;
         size_t idx, max;
@@ -836,8 +810,9 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         yyjson_arr_foreach(lt, idx, max, item) {
             if (idx >= (size_t)MLXD_MAX_LAYERS)
                 break;
-            if (yyjson_is_str(item) &&
-                strcmp(yyjson_get_str(item), "full_attention") == 0)
+            if (!yyjson_is_str(item))
+                goto fail;
+            if (strcmp(yyjson_get_str(item), "full_attention") == 0)
                 cfg->layer_is_global[idx] = true;
             else
                 cfg->layer_is_global[idx] = false;
@@ -854,27 +829,18 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         get_f32(cfg_obj, "final_logit_softcapping",
                 &cfg->final_logit_softcapping, 0.0f) ||
         get_int_nonneg(cfg_obj, "hidden_size_per_layer_input",
-                       &cfg->hidden_size_per_layer_input, 0)) {
-        model_config_free(cfg);
-        yyjson_doc_free(doc);
-        return -1;
-    }
+                       &cfg->hidden_size_per_layer_input, 0))
+        goto fail;
 
     /* tie_word_embeddings: root then cfg_obj override */
     if (get_bool(root, "tie_word_embeddings", &cfg->tie_word_embeddings,
-                 false)) {
-        model_config_free(cfg);
-        yyjson_doc_free(doc);
-        return -1;
-    }
+                 false))
+        goto fail;
     if (cfg_obj != root) {
         yyjson_val *tw = yyjson_obj_get(cfg_obj, "tie_word_embeddings");
         if (tw) {
-            if (!yyjson_is_bool(tw)) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (!yyjson_is_bool(tw))
+                goto fail;
             cfg->tie_word_embeddings = yyjson_get_bool(tw);
         }
     }
@@ -882,73 +848,41 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
     /* max_position_embeddings root fallback when cfg_obj gave 0 */
     if (cfg->max_position_embeddings == 0 && cfg_obj != root) {
         if (get_dim_int(root, "max_position_embeddings",
-                        &cfg->max_position_embeddings, 0)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
-        }
+                        &cfg->max_position_embeddings, 0))
+            goto fail;
     }
 
     /* quantization (root-only) */
     yyjson_val *q = yyjson_obj_get(root, "quantization");
     if (q && !yyjson_is_null(q)) {
-        if (!yyjson_is_obj(q)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
-        }
+        if (!yyjson_is_obj(q))
+            goto fail;
         if (get_int_nonneg(q, "bits", &cfg->quant_bits, 0) ||
             get_int_nonneg(q, "group_size", &cfg->quant_group_size,
-                           cfg->quant_group_size)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
-        }
+                           cfg->quant_group_size))
+            goto fail;
         yyjson_val *mode = yyjson_obj_get(q, "mode");
         if (mode) {
-            if (!yyjson_is_str(mode)) {
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
-            }
+            if (!yyjson_is_str(mode))
+                goto fail;
             const char *ms = yyjson_get_str(mode);
             if (strcmp(ms, "affine") != 0) {
                 log_error("unsupported quantization mode '%s' "
                           "(only affine is supported)",
                           ms);
-                model_config_free(cfg);
-                yyjson_doc_free(doc);
-                return -1;
+                goto fail;
             }
             cfg->quant_mode = QUANT_MODE_AFFINE;
         }
     }
 
     /* eos_token_id (root) */
-    if (parse_eos_value(cfg, yyjson_obj_get(root, "eos_token_id"))) {
-        model_config_free(cfg);
-        yyjson_doc_free(doc);
-        return -1;
-    }
+    if (parse_eos_value(cfg, yyjson_obj_get(root, "eos_token_id")))
+        goto fail;
 
-    /* bert type_vocab_size strict wrong-type check (absent = 0) */
-    if (model_family_from_type(cfg->model_type) == MODEL_BERT) {
-        yyjson_val *tvs = yyjson_obj_get(cfg_obj, "type_vocab_size");
-        if (tvs && !yyjson_is_int(tvs) && !yyjson_is_null(tvs)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
-        }
-        yyjson_val *lne = yyjson_obj_get(cfg_obj, "layer_norm_eps");
-        if (lne && !yyjson_is_num(lne) && !yyjson_is_null(lne)) {
-            model_config_free(cfg);
-            yyjson_doc_free(doc);
-            return -1;
-        }
-    }
-
-    apply_family_defaults(cfg, cfg_obj, has_text_config,
-                          sliding_window_key_present);
+    if (apply_family_defaults(cfg, cfg_obj, has_text_config,
+                              sliding_window_key_present))
+        goto fail;
 
     yyjson_doc_free(doc);
 
@@ -956,6 +890,12 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
     (void)parse_generation_config(cfg, model_dir);
 
     return 0;
+
+fail:
+    model_config_free(cfg);
+fail_doc:
+    yyjson_doc_free(doc);
+    return -1;
 }
 
 void model_config_free(model_config_t *cfg) {
