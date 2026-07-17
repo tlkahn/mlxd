@@ -107,13 +107,21 @@ test-gpu: $(TEST_GPU_BINS)
 
 # --- Housekeeping -------------------------------------------------------------
 
+# --- Fixture generators -------------------------------------------------------
+
+tools/gen_tiny_qwen3_ckpt: tools/gen_tiny_qwen3_ckpt.c vendor/yyjson/yyjson.o
+	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< vendor/yyjson/yyjson.o $(ALL_LDFLAGS)
+
+fixtures-tiny-ckpt: tools/gen_tiny_qwen3_ckpt
+	./tools/gen_tiny_qwen3_ckpt
+
 # Regenerate src/model/tok_unicode_tables.{h,c} from Python's bundled UCD.
 # Both files are checked in; normal builds never run this.
 unicode-tables:
 	python3 tools/gen_unicode_tables.py
 
 clean:
-	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d
+	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d tools/gen_tiny_qwen3_ckpt
 	find src vendor -name '*.tsan.o' -delete
 	rm -rf build/tsan
 
@@ -127,7 +135,7 @@ compile_commands.json: Makefile
 test-leaks: tests/test_http_server
 	leaks --atExit -- ./tests/test_http_server
 
-.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage clean-coverage unicode-tables
+.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage clean-coverage unicode-tables fixtures-tiny-ckpt
 
 # --- Thread Sanitizer tests ---------------------------------------------------
 
