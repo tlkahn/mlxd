@@ -1,12 +1,16 @@
 #include "cli/cmds.h"
 #include "cli/cli.h"
 #include "engine/engine.h"
+#include "http/server.h"
+#include "model/chat_template.h"
 #include "model/detok.h"
 #include "model/tokenizer.h"
 #include "registry/registry.h"
 
 #include <inttypes.h>
+#include <signal.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <time.h>
 
@@ -291,11 +295,103 @@ int cli_cmd_run(const cli_args_t *args, FILE *in, FILE *out, FILE *err) {
 
 /* --- cli_cmd_serve -------------------------------------------------------- */
 
+static volatile sig_atomic_t g_sigint_count;
+static http_server_t *g_server;
+
+static void sigint_handler(int sig) {
+    (void)sig;
+    int count = ++g_sigint_count;
+    sigint_action_t action = cli_sigint_decide(count);
+    if (action == SIGINT_FORCE_EXIT)
+        _exit(130);
+    if (g_server)
+        http_server_stop(g_server);
+}
+
 int cli_cmd_serve(const cli_args_t *args, FILE *out, FILE *err) {
-    (void)args;
-    (void)out;
-    fprintf(err, "serve: not yet implemented\n");
-    return 1;
+    engine_t eng;
+    if (engine_init(&eng) != 0) {
+        fprintf(err, "serve: failed to init engine\n");
+        return 1;
+    }
+
+    tokenizer_t *tok = NULL;
+    char *chat_tmpl = NULL;
+    char *model_dir = NULL;
+    char *model_id = NULL;
+
+    if (args->serve.model) {
+        model_dir = registry_resolve(args->serve.model);
+        if (!model_dir) {
+            fprintf(err, "serve: cannot resolve model '%s'\n", args->serve.model);
+            engine_destroy(&eng);
+            return 1;
+        }
+
+        tok = tokenizer_load_dir(model_dir);
+        if (!tok) {
+            fprintf(err, "serve: failed to load tokenizer from '%s'\n", model_dir);
+            free(model_dir);
+            engine_destroy(&eng);
+            return 1;
+        }
+
+        chat_tmpl = chat_template_load(model_dir);
+
+        engine_cmd_t *load_cmd = calloc(1, sizeof(*load_cmd));
+        load_cmd->tag = CMD_LOAD;
+        load_cmd->load.model_path = strdup(model_dir);
+        engine_post(&eng, load_cmd);
+
+        model_id = strdup(args->serve.model);
+    }
+
+    http_server_config_t config = {
+        .host = args->serve.host,
+        .port = args->serve.port,
+        .engine = &eng,
+        .tokenizer = tok,
+        .chat_template = chat_tmpl,
+        .model_id = model_id,
+    };
+
+    http_server_t *srv = http_server_create(&config);
+    if (!srv) {
+        fprintf(err, "serve: failed to create HTTP server\n");
+        free(model_id);
+        free(chat_tmpl);
+        tokenizer_free(tok);
+        free(model_dir);
+        engine_destroy(&eng);
+        return 1;
+    }
+
+    g_server = srv;
+    g_sigint_count = 0;
+
+    struct sigaction sa = {0};
+    sa.sa_handler = sigint_handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+
+    fprintf(out, "mlxd serving on %s:%d\n", args->serve.host, http_server_port(srv));
+    fflush(out);
+
+    http_server_start(srv);
+
+    g_server = NULL;
+    struct sigaction dfl = {0};
+    dfl.sa_handler = SIG_DFL;
+    sigaction(SIGINT, &dfl, NULL);
+
+    http_server_destroy(srv);
+    engine_destroy(&eng);
+    tokenizer_free(tok);
+    free(chat_tmpl);
+    free(model_dir);
+    free(model_id);
+    return 0;
 }
 
 /* --- cli_main ------------------------------------------------------------- */
