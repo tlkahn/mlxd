@@ -6,10 +6,12 @@
 #include "registry/registry.h"
 
 #include <assert.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <yyjson/yyjson.h>
 
 #ifndef MLXD_FIXTURES_DIR
@@ -282,6 +284,69 @@ static void test_run_consume_cancel_flag(void) {
     tokenizer_free(tok);
 }
 
+/* --- Review fix: delayed producer exercises stream_next timeout path ----- */
+
+typedef struct {
+    stream_t *stream;
+    int32_t *ids;
+    int n_ids;
+    int delay_ms;
+} delayed_producer_ctx_t;
+
+static void *delayed_producer(void *arg) {
+    delayed_producer_ctx_t *ctx = arg;
+    usleep((useconds_t)ctx->delay_ms * 1000);
+    for (int i = 0; i < ctx->n_ids; i++) {
+        chunk_t c = {.tag = CHUNK_TOKEN, .token = {.id = ctx->ids[i], .logprob = 0.0f}};
+        stream_push(ctx->stream, c);
+    }
+    chunk_t done = {.tag = CHUNK_DONE, .done = FINISH_STOP};
+    stream_push(ctx->stream, done);
+    return NULL;
+}
+
+static void test_run_consume_delayed_producer(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *text = "hi";
+    int32_t *ids = NULL;
+    int n = tokenizer_encode_alloc(tok, text, strlen(text), false, &ids);
+    assert(n > 0);
+
+    stream_t *s = stream_create(n + 1);
+    assert(s != NULL);
+
+    delayed_producer_ctx_t ctx = {
+        .stream = s, .ids = ids, .n_ids = n, .delay_ms = 150
+    };
+    pthread_t thr;
+    int prc = pthread_create(&thr, NULL, delayed_producer, &ctx);
+    assert(prc == 0);
+
+    char *membuf = NULL;
+    size_t memlen = 0;
+    FILE *out = open_memstream(&membuf, &memlen);
+    assert(out != NULL);
+
+    _Atomic int cancel = 0;
+    finish_reason_t reason = FINISH_LENGTH;
+    char err[256] = {0};
+    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err));
+    fclose(out);
+
+    assert(rc == 0);
+    assert(reason == FINISH_STOP);
+    assert(memlen > 0);
+
+    pthread_join(thr, NULL);
+
+    free(membuf);
+    free(ids);
+    stream_release(s);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     /* cycle 8 */
     test_messages_json_plain();
@@ -306,6 +371,9 @@ int main(void) {
     test_run_consume_error();
     test_run_consume_cancelled();
     test_run_consume_cancel_flag();
+
+    /* review fix: delayed producer (exercises stream_next timeout path) */
+    test_run_consume_delayed_producer();
 
     printf("test_cli_io: all passed\n");
     return 0;

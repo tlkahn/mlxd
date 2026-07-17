@@ -90,7 +90,7 @@ static void test_serve_port_non_numeric(void) {
     char err[256] = {0};
     int rc = cli_parse_serve(6, argv, &opts, err, sizeof(err));
     assert(rc == -1);
-    assert(strstr(err, "port") != NULL || strstr(err, "invalid") != NULL);
+    assert(strstr(err, "invalid port") != NULL);
 }
 
 static void test_serve_port_zero(void) {
@@ -244,6 +244,47 @@ static void test_run_flags_before_prompt(void) {
     assert(strcmp(opts.prompt, "hello") == 0);
 }
 
+/* --- Review fix: extra positionals ---------------------------------------- */
+
+static void test_pull_extra_positional(void) {
+    char *argv[] = {"mlxd", "pull", "spec1", "spec2"};
+    cli_pull_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_pull(4, argv, &opts, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "unexpected") != NULL);
+}
+
+static void test_run_extra_positional(void) {
+    char *argv[] = {"mlxd", "run", "model", "prompt", "extra"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "unexpected") != NULL);
+}
+
+/* --- Review fix: negative temperature ------------------------------------- */
+
+static void test_run_temperature_negative(void) {
+    char *argv[] = {"mlxd", "run", "m", "--temperature", "-1"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "temperature must be >= 0") != NULL);
+}
+
+static void test_run_temperature_zero(void) {
+    char *argv[] = {"mlxd", "run", "m", "--temperature", "0"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(opts.temperature_set);
+    assert(opts.temperature == 0.0f);
+}
+
 /* --- Cycle 7: cli_parse_pull and cli_parse_list --------------------------- */
 
 static void test_pull_spec(void) {
@@ -331,6 +372,14 @@ int main(void) {
     test_run_unknown_flag();
     test_run_defaults();
     test_run_flags_before_prompt();
+
+    /* review fix: extra positionals */
+    test_pull_extra_positional();
+    test_run_extra_positional();
+
+    /* review fix: negative temperature */
+    test_run_temperature_negative();
+    test_run_temperature_zero();
 
     /* cycle 7: pull + list */
     test_pull_spec();

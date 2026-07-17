@@ -92,6 +92,10 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
                 snprintf(err, errsz, "invalid temperature '%s'", argv[i]);
                 return -1;
             }
+            if (v < 0.0f) {
+                snprintf(err, errsz, "temperature must be >= 0");
+                return -1;
+            }
             out->temperature = v;
             out->temperature_set = true;
         } else if (strcmp(argv[i], "--stream") == 0) {
@@ -104,6 +108,10 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
                 out->model = argv[i];
             else if (positional == 1)
                 out->prompt = argv[i];
+            else {
+                snprintf(err, errsz, "unexpected argument '%s'", argv[i]);
+                return -1;
+            }
             positional++;
         }
     }
@@ -128,8 +136,12 @@ int cli_parse_pull(int argc, char **argv, cli_pull_opts_t *out, char *err, size_
             snprintf(err, errsz, "unknown option '%s'", argv[i]);
             return -1;
         }
-        if (!out->spec)
+        if (!out->spec) {
             out->spec = argv[i];
+        } else {
+            snprintf(err, errsz, "unexpected argument '%s'", argv[i]);
+            return -1;
+        }
     }
     return 0;
 }

@@ -41,17 +41,25 @@ int cli_run_consume(stream_t *s, const tokenizer_t *tok, FILE *out, bool flush_e
             if (d) {
                 char *text = NULL;
                 size_t text_len = 0;
-                if (detok_feed(d, c.token.id, &text, &text_len) == 0 && text_len > 0) {
+                // detok_feed fails only on OOM (untestable without malloc hook)
+                if (detok_feed(d, c.token.id, &text, &text_len) != 0) {
+                    free(text);
+                    detok_free(d);
+                    d = NULL;
+                } else if (text_len > 0) {
                     fwrite(text, 1, text_len, out);
                     if (flush_each) fflush(out);
+                    free(text);
+                    break;
+                } else {
+                    free(text);
+                    break;
                 }
-                free(text);
-            } else {
-                const char *text = tokenizer_decode_token(tok, c.token.id);
-                if (text) {
-                    fputs(text, out);
-                    if (flush_each) fflush(out);
-                }
+            }
+            const char *raw = tokenizer_decode_token(tok, c.token.id);
+            if (raw) {
+                fputs(raw, out);
+                if (flush_each) fflush(out);
             }
             break;
         }

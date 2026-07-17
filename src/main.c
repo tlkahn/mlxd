@@ -228,6 +228,10 @@ static int cmd_list(int argc, char **argv) {
         if (json) {
             printf("%s\n", json);
             free(json);
+        } else {
+            fprintf(stderr, "mlxd list: out of memory\n");
+            registry_model_list_free(models, count);
+            return 1;
         }
     } else {
         printf("%-40s  %10s  %s\n", "MODEL", "SIZE", "MODIFIED");
@@ -371,79 +375,66 @@ static int cmd_run(int argc, char **argv) {
         return 1;
     }
 
+    int rc = 1;
     char *resolved_dir = NULL;
+    tokenizer_t *tok = NULL;
+    char *chat_template = NULL;
+    bool eng_inited = false;
+    engine_t eng;
+    char *stdin_buf = NULL;
+    int32_t *ids = NULL;
+    stream_t *s = NULL;
+    finish_reason_t reason = FINISH_STOP;
+
     const char *model_dir = resolve_model_dir(opts.model, &resolved_dir);
     if (!model_dir) {
         fprintf(stderr, "mlxd run: cannot find model '%s'\n", opts.model);
-        return 1;
+        goto cleanup;
     }
 
-    tokenizer_t *tok = tokenizer_load_dir(model_dir);
+    tok = tokenizer_load_dir(model_dir);
     if (!tok) {
         fprintf(stderr, "mlxd run: failed to load tokenizer from '%s'\n", model_dir);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
 
-    char *chat_template = read_chat_template(model_dir);
+    chat_template = read_chat_template(model_dir);
 
-    engine_t eng;
     if (engine_init(&eng) != 0) {
         fprintf(stderr, "mlxd run: failed to start engine thread\n");
-        tokenizer_free(tok);
-        free(chat_template);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
+    eng_inited = true;
 
     engine_cmd_t *load_cmd = calloc(1, sizeof(*load_cmd));
     if (!load_cmd) {
         fprintf(stderr, "mlxd run: out of memory\n");
-        engine_destroy(&eng);
-        tokenizer_free(tok);
-        free(chat_template);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
     load_cmd->tag = CMD_LOAD;
     load_cmd->load.model_path = strdup(model_dir);
     if (!load_cmd->load.model_path) {
         fprintf(stderr, "mlxd run: out of memory\n");
         free(load_cmd);
-        engine_destroy(&eng);
-        tokenizer_free(tok);
-        free(chat_template);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
     engine_post(&eng, load_cmd);
 
     if (wait_engine_load(&eng, 30000) != 0) {
         fprintf(stderr, "mlxd run: timed out waiting for model load\n");
-        engine_destroy(&eng);
-        tokenizer_free(tok);
-        free(chat_template);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
 
-    char *stdin_buf = NULL;
     const char *prompt = opts.prompt;
     if (!prompt) {
         stdin_buf = slurp_stdin();
         if (!stdin_buf || stdin_buf[0] == '\0') {
             fprintf(stderr, "mlxd run: no prompt provided and stdin is empty\n");
-            free(stdin_buf);
-            engine_destroy(&eng);
-            tokenizer_free(tok);
-            free(chat_template);
-            free(resolved_dir);
-            return 1;
+            goto cleanup;
         }
         prompt = stdin_buf;
     }
 
-    int32_t *ids = NULL;
     int n_ids = -1;
     const char *build_err = NULL;
 
@@ -451,12 +442,7 @@ static int cmd_run(int argc, char **argv) {
         char *messages_json = cli_run_messages_json(prompt);
         if (!messages_json) {
             fprintf(stderr, "mlxd run: failed to build messages JSON\n");
-            free(stdin_buf);
-            engine_destroy(&eng);
-            tokenizer_free(tok);
-            free(chat_template);
-            free(resolved_dir);
-            return 1;
+            goto cleanup;
         }
         n_ids = gen_build_chat_prompt(tok, chat_template, messages_json, NULL,
                                       &ids, &build_err);
@@ -466,26 +452,18 @@ static int cmd_run(int argc, char **argv) {
     }
 
     free(stdin_buf);
+    stdin_buf = NULL;
 
     if (n_ids < 0) {
         fprintf(stderr, "mlxd run: failed to tokenize prompt: %s\n",
                 build_err ? build_err : "unknown error");
-        engine_destroy(&eng);
-        tokenizer_free(tok);
-        free(chat_template);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
 
-    stream_t *s = stream_create(256);
+    s = stream_create(256);
     if (!s) {
         fprintf(stderr, "mlxd run: out of memory\n");
-        free(ids);
-        engine_destroy(&eng);
-        tokenizer_free(tok);
-        free(chat_template);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
 
     gen_params_t params = {
@@ -500,13 +478,7 @@ static int cmd_run(int argc, char **argv) {
     engine_cmd_t *gen_cmd = calloc(1, sizeof(*gen_cmd));
     if (!gen_cmd) {
         fprintf(stderr, "mlxd run: out of memory\n");
-        stream_release(s);
-        free(ids);
-        engine_destroy(&eng);
-        tokenizer_free(tok);
-        free(chat_template);
-        free(resolved_dir);
-        return 1;
+        goto cleanup;
     }
     gen_cmd->tag = CMD_GENERATE;
     gen_cmd->generate.params = params;
@@ -514,6 +486,7 @@ static int cmd_run(int argc, char **argv) {
     gen_cmd->generate.params.stop_count = 0;
     gen_cmd->generate.token_ids = ids;
     gen_cmd->generate.token_count = n_ids;
+    ids = NULL; /* ownership transferred to engine */
     stream_retain(s);
     gen_cmd->generate.stream = s;
 
@@ -525,20 +498,21 @@ static int cmd_run(int argc, char **argv) {
 
     engine_post(&eng, gen_cmd);
 
-    finish_reason_t reason = FINISH_STOP;
-    int rc = cli_run_consume(s, tok, stdout, opts.stream, &g_run_cancel,
-                             &reason, err, sizeof(err));
+    rc = cli_run_consume(s, tok, stdout, opts.stream, &g_run_cancel,
+                         &reason, err, sizeof(err));
 
     signal(SIGINT, SIG_DFL);
 
-    if (rc != 0) {
+    if (rc != 0)
         fprintf(stderr, "\nmlxd run: %s\n", err);
-    } else {
+    else
         printf("\n");
-    }
 
-    stream_release(s);
-    engine_destroy(&eng);
+cleanup:
+    free(stdin_buf);
+    free(ids);
+    if (s) stream_release(s);
+    if (eng_inited) engine_destroy(&eng);
     tokenizer_free(tok);
     free(chat_template);
     free(resolved_dir);
