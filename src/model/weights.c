@@ -27,25 +27,32 @@ static int cmp_str(const void *a, const void *b) {
     return strcmp(*(const char **)a, *(const char **)b);
 }
 
+/* Returns 0 = ok, 1 = index file absent, -2 = present but invalid */
 static int shards_from_index(const char *model_dir, char ***out_paths,
                              size_t *out_count) {
     char *idx_path = path_join(model_dir, "model.safetensors.index.json");
-    if (!idx_path) return -1;
+    if (!idx_path) return -2;
+
+    struct stat st;
+    if (stat(idx_path, &st) != 0) {
+        free(idx_path);
+        return 1;
+    }
 
     yyjson_doc *doc = yyjson_read_file(idx_path, 0, NULL, NULL);
     free(idx_path);
-    if (!doc) return -1;
+    if (!doc) return -2;
 
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *wm = yyjson_obj_get(root, "weight_map");
     if (!wm || !yyjson_is_obj(wm)) {
         yyjson_doc_free(doc);
-        return -1;
+        return -2;
     }
 
     size_t cap = 16, n = 0;
     char **files = malloc(cap * sizeof(char *));
-    if (!files) { yyjson_doc_free(doc); return -1; }
+    if (!files) { yyjson_doc_free(doc); return -2; }
 
     yyjson_obj_iter it;
     yyjson_obj_iter_init(wm, &it);
@@ -54,6 +61,12 @@ static int shards_from_index(const char *model_dir, char ***out_paths,
         val = yyjson_obj_iter_get_val(key);
         const char *fname = yyjson_get_str(val);
         if (!fname) continue;
+
+        size_t flen = strlen(fname);
+        if (flen < 13 || strchr(fname, '/') != NULL ||
+            strcmp(fname, "..") == 0 || strncmp(fname, "..", 2) == 0 ||
+            strcmp(fname + flen - 12, ".safetensors") != 0)
+            goto fail;
 
         bool dup = false;
         for (size_t i = 0; i < n; i++) {
@@ -75,7 +88,7 @@ static int shards_from_index(const char *model_dir, char ***out_paths,
     }
     yyjson_doc_free(doc);
 
-    if (n == 0) { free(files); return -1; }
+    if (n == 0) { free(files); return -2; }
 
     qsort(files, n, sizeof(char *), cmp_str);
     *out_paths = files;
@@ -86,7 +99,7 @@ fail:
     for (size_t i = 0; i < n; i++) free(files[i]);
     free(files);
     yyjson_doc_free(doc);
-    return -1;
+    return -2;
 }
 
 static int shards_single(const char *model_dir, char ***out_paths,
@@ -149,18 +162,23 @@ int weights_enumerate_shards(const char *model_dir, char ***paths,
                              size_t *count, bool *from_index) {
     if (!model_dir || !paths || !count) return -1;
 
-    if (shards_from_index(model_dir, paths, count) == 0) {
+    *paths = NULL;
+    *count = 0;
+    if (from_index) *from_index = false;
+
+    int idx_rc = shards_from_index(model_dir, paths, count);
+    if (idx_rc == 0) {
         if (from_index) *from_index = true;
         return 0;
     }
-    if (shards_single(model_dir, paths, count) == 0) {
-        if (from_index) *from_index = false;
+    if (idx_rc == -2)
+        return -2;
+
+    /* idx_rc == 1: index absent, fall through to single-file / glob */
+    if (shards_single(model_dir, paths, count) == 0)
         return 0;
-    }
-    if (shards_glob(model_dir, paths, count) == 0) {
-        if (from_index) *from_index = false;
+    if (shards_glob(model_dir, paths, count) == 0)
         return 0;
-    }
     return -1;
 }
 
@@ -198,21 +216,33 @@ int weights_tensor_name(char *buf, size_t n, const model_config_t *cfg,
 
 /* ---------- GPU / engine-thread helpers ---------- */
 
+/* dup_key: if non-NULL, receives the first duplicate key name on collision */
 static int merge_map(mlx_map_string_to_array dst,
-                     mlx_map_string_to_array src) {
+                     mlx_map_string_to_array src,
+                     const char **dup_key) {
     mlx_map_string_to_array_iterator it =
         mlx_map_string_to_array_iterator_new(src);
     const char *key = NULL;
     mlx_array val = mlx_array_new();
+    mlx_array probe = mlx_array_new();
     while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
            key != NULL) {
+        if (mlx_map_string_to_array_get(&probe, dst, key) == 0) {
+            if (dup_key) *dup_key = key;
+            mlx_array_free(probe);
+            mlx_array_free(val);
+            mlx_map_string_to_array_iterator_free(it);
+            return -1;
+        }
         if (mlx_map_string_to_array_insert(dst, key, val) != 0) {
+            mlx_array_free(probe);
             mlx_array_free(val);
             mlx_map_string_to_array_iterator_free(it);
             return -1;
         }
         key = NULL;
     }
+    mlx_array_free(probe);
     mlx_array_free(val);
     mlx_map_string_to_array_iterator_free(it);
     return 0;
@@ -234,6 +264,180 @@ static size_t compute_total_bytes(mlx_map_string_to_array params) {
     return total;
 }
 
+static int read_index_keys(const char *model_dir, char ***out_keys,
+                           size_t *out_count) {
+    char *idx_path = path_join(model_dir, "model.safetensors.index.json");
+    if (!idx_path) return -1;
+
+    yyjson_doc *doc = yyjson_read_file(idx_path, 0, NULL, NULL);
+    free(idx_path);
+    if (!doc) return -1;
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *wm = yyjson_obj_get(root, "weight_map");
+    if (!wm || !yyjson_is_obj(wm)) {
+        yyjson_doc_free(doc);
+        return -1;
+    }
+
+    size_t n_keys = yyjson_obj_size(wm);
+    char **keys = malloc(n_keys * sizeof(char *));
+    if (!keys) { yyjson_doc_free(doc); return -1; }
+
+    yyjson_obj_iter it;
+    yyjson_obj_iter_init(wm, &it);
+    yyjson_val *key;
+    size_t i = 0;
+    while ((key = yyjson_obj_iter_next(&it)) != NULL && i < n_keys) {
+        const char *kstr = yyjson_get_str(key);
+        if (!kstr) continue;
+        keys[i] = strdup(kstr);
+        if (!keys[i]) {
+            for (size_t j = 0; j < i; j++) free(keys[j]);
+            free(keys);
+            yyjson_doc_free(doc);
+            return -1;
+        }
+        i++;
+    }
+    yyjson_doc_free(doc);
+    *out_keys = keys;
+    *out_count = i;
+    return 0;
+}
+
+static bool map_has_key(mlx_map_string_to_array map, const char *key) {
+    mlx_array probe = mlx_array_new();
+    bool found = (mlx_map_string_to_array_get(&probe, map, key) == 0);
+    mlx_array_free(probe);
+    return found;
+}
+
+static bool map_has_prefix(mlx_map_string_to_array map, const char *prefix) {
+    size_t plen = strlen(prefix);
+    mlx_map_string_to_array_iterator it =
+        mlx_map_string_to_array_iterator_new(map);
+    const char *key = NULL;
+    mlx_array val = mlx_array_new();
+    bool found = false;
+    while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
+           key != NULL) {
+        if (strncmp(key, prefix, plen) == 0) { found = true; break; }
+        key = NULL;
+    }
+    mlx_array_free(val);
+    mlx_map_string_to_array_iterator_free(it);
+    return found;
+}
+
+static int weights_validate(mlx_map_string_to_array merged,
+                            const model_config_t *cfg,
+                            char **index_keys, size_t n_index_keys,
+                            char *err, size_t errlen) {
+    /* Index cross-check: every declared key must exist in merged */
+    if (index_keys) {
+        for (size_t i = 0; i < n_index_keys; i++) {
+            if (!map_has_key(merged, index_keys[i])) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "index declares tensor \"%s\" but it was not found in shards",
+                             index_keys[i]);
+                return -1;
+            }
+        }
+    }
+
+    /* Layer coverage */
+    const char *prefix = cfg->weight_prefix ? cfg->weight_prefix : "";
+    bool empty_prefix = (prefix[0] == '\0');
+
+    for (int i = 0; i < cfg->num_hidden_layers; i++) {
+        char layer_prefix[256];
+        int wr;
+        if (empty_prefix)
+            wr = snprintf(layer_prefix, sizeof(layer_prefix), "layers.%d.", i);
+        else
+            wr = snprintf(layer_prefix, sizeof(layer_prefix),
+                          "%s.layers.%d.", prefix, i);
+        if (wr < 0 || (size_t)wr >= sizeof(layer_prefix)) continue;
+
+        if (!map_has_prefix(merged, layer_prefix)) {
+            if (err && errlen > 0)
+                snprintf(err, errlen, "missing tensors for layer %d", i);
+            return -1;
+        }
+    }
+
+    if (cfg->num_hidden_layers > 0) {
+        char embed_name[256];
+        int wr;
+        if (empty_prefix)
+            wr = snprintf(embed_name, sizeof(embed_name), "embed_tokens.weight");
+        else
+            wr = snprintf(embed_name, sizeof(embed_name),
+                          "%s.embed_tokens.weight", prefix);
+        if (wr >= 0 && (size_t)wr < sizeof(embed_name)) {
+            if (!map_has_key(merged, embed_name)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen, "missing %s", embed_name);
+                return -1;
+            }
+        }
+    }
+
+    /* Quant dtype check */
+    if (cfg->quant_bits > 0) {
+        bool found_quant_triplet = false;
+        mlx_map_string_to_array_iterator it =
+            mlx_map_string_to_array_iterator_new(merged);
+        const char *key = NULL;
+        mlx_array val = mlx_array_new();
+        while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
+               key != NULL) {
+            size_t klen = strlen(key);
+            if (klen > 7 && strcmp(key + klen - 7, ".scales") == 0) {
+                char base[256];
+                size_t blen = klen - 7;
+                if (blen >= sizeof(base)) { key = NULL; continue; }
+                memcpy(base, key, blen);
+                base[blen] = '\0';
+
+                char wname[270];
+                snprintf(wname, sizeof(wname), "%s.weight", base);
+                mlx_array warr = mlx_array_new();
+                if (mlx_map_string_to_array_get(&warr, merged, wname) == 0) {
+                    mlx_dtype wdt = mlx_array_dtype(warr);
+                    if (wdt != MLX_UINT32) {
+                        if (err && errlen > 0)
+                            snprintf(err, errlen,
+                                     "quantized weight %s has dtype %d, expected uint32",
+                                     wname, wdt);
+                        mlx_array_free(warr);
+                        mlx_array_free(val);
+                        mlx_map_string_to_array_iterator_free(it);
+                        return -1;
+                    }
+                    found_quant_triplet = true;
+                }
+                mlx_array_free(warr);
+            }
+            key = NULL;
+        }
+        mlx_array_free(val);
+        mlx_map_string_to_array_iterator_free(it);
+
+        if (!found_quant_triplet) {
+            if (err && errlen > 0)
+                snprintf(err, errlen,
+                         "quantized config (bits=%d) but no quantized weights found (expected uint32 dtype with scales/biases)",
+                         cfg->quant_bits);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int weights_load(weights_t *w, const char *model_dir,
                  const model_config_t *cfg, char *err, size_t errlen) {
     if (!w || !model_dir || !cfg) return -1;
@@ -248,16 +452,33 @@ int weights_load(weights_t *w, const char *model_dir,
     char **shard_paths = NULL;
     size_t shard_count = 0;
     bool from_index = false;
-    if (weights_enumerate_shards(model_dir, &shard_paths, &shard_count,
-                                 &from_index) != 0) {
-        if (err && errlen > 0)
-            snprintf(err, errlen, "no safetensors files found in %s", model_dir);
+    int enum_rc = weights_enumerate_shards(model_dir, &shard_paths, &shard_count,
+                                           &from_index);
+    if (enum_rc != 0) {
+        if (err && errlen > 0) {
+            if (enum_rc == -2)
+                snprintf(err, errlen,
+                         "invalid model.safetensors.index.json in %s", model_dir);
+            else
+                snprintf(err, errlen,
+                         "no safetensors files found in %s", model_dir);
+        }
         return -1;
     }
 
     mlx_map_string_to_array merged = mlx_map_string_to_array_new();
 
     for (size_t i = 0; i < shard_count; i++) {
+        struct stat shard_st;
+        if (stat(shard_paths[i], &shard_st) != 0) {
+            if (err && errlen > 0)
+                snprintf(err, errlen, "shard file not found: %s",
+                         shard_paths[i]);
+            mlx_map_string_to_array_free(merged);
+            weights_free_shard_paths(shard_paths, shard_count);
+            return -1;
+        }
+
         mlx_map_string_to_array shard_params = mlx_map_string_to_array_new();
         mlx_map_string_to_string shard_meta = mlx_map_string_to_string_new();
 
@@ -271,9 +492,16 @@ int weights_load(weights_t *w, const char *model_dir,
             return -1;
         }
 
-        if (merge_map(merged, shard_params) != 0) {
-            if (err && errlen > 0)
-                snprintf(err, errlen, "failed merging shard %s", shard_paths[i]);
+        const char *dup_key = NULL;
+        if (merge_map(merged, shard_params, &dup_key) != 0) {
+            if (err && errlen > 0) {
+                if (dup_key)
+                    snprintf(err, errlen, "duplicate tensor \"%s\" in shard %s",
+                             dup_key, shard_paths[i]);
+                else
+                    snprintf(err, errlen, "failed merging shard %s",
+                             shard_paths[i]);
+            }
             mlxbridge_map_free(shard_params, shard_meta);
             mlx_map_string_to_array_free(merged);
             weights_free_shard_paths(shard_paths, shard_count);
@@ -283,8 +511,23 @@ int weights_load(weights_t *w, const char *model_dir,
     }
     weights_free_shard_paths(shard_paths, shard_count);
 
+    /* Index cross-check: read index keys if we loaded from index */
+    char **index_keys = NULL;
+    size_t n_index_keys = 0;
+    if (from_index)
+        read_index_keys(model_dir, &index_keys, &n_index_keys);
+
+    if (weights_validate(merged, cfg, index_keys, n_index_keys,
+                         err, errlen) != 0) {
+        for (size_t i = 0; i < n_index_keys; i++) free(index_keys[i]);
+        free(index_keys);
+        mlx_map_string_to_array_free(merged);
+        return -1;
+    }
+    for (size_t i = 0; i < n_index_keys; i++) free(index_keys[i]);
+    free(index_keys);
+
     w->params = merged;
-    w->meta = mlx_map_string_to_string_new();
     w->count = mlxbridge_map_count(merged);
     w->total_bytes = compute_total_bytes(merged);
 
@@ -303,7 +546,9 @@ int weights_get_triplet(weight_triplet_t *out, const weights_t *w,
     if (!w || !out || !base) return -1;
 
     char name[256];
-    snprintf(name, sizeof(name), "%s.weight", base);
+    int wr = snprintf(name, sizeof(name), "%s.weight", base);
+    if (wr < 0 || (size_t)wr >= sizeof(name)) return -1;
+
     mlx_array weight = mlx_array_new();
     if (mlxbridge_map_get(&weight, w->params, name) != 0) {
         mlx_array_free(weight);
@@ -318,11 +563,26 @@ int weights_get_triplet(weight_triplet_t *out, const weights_t *w,
     mlx_array biases = mlx_array_new();
     bool has_biases = (mlxbridge_map_get(&biases, w->params, name) == 0);
 
+    if (has_scales != has_biases) {
+        mlx_array_free(biases);
+        mlx_array_free(scales);
+        mlx_array_free(weight);
+        return -1;
+    }
+
     out->weight = weight;
     out->scales = scales;
     out->biases = biases;
     out->quantized = has_scales && has_biases;
     return 0;
+}
+
+void weights_triplet_free(weight_triplet_t *t) {
+    if (!t) return;
+    if (t->weight.ctx) mlx_array_free(t->weight);
+    if (t->scales.ctx) mlx_array_free(t->scales);
+    if (t->biases.ctx) mlx_array_free(t->biases);
+    memset(t, 0, sizeof(*t));
 }
 
 size_t weights_count(const weights_t *w) {
@@ -337,7 +597,5 @@ void weights_free(weights_t *w) {
     if (!w) return;
     if (w->params.ctx)
         mlx_map_string_to_array_free(w->params);
-    if (w->meta.ctx)
-        mlx_map_string_to_string_free(w->meta);
     memset(w, 0, sizeof(*w));
 }

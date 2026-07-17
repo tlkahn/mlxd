@@ -97,12 +97,11 @@ int mlxbridge_async_eval(mlx_array a) {
 }
 
 int mlxbridge_item_int32(int32_t *out, mlx_array a) {
+    if (!out) return -1;
     if (mlx_array_eval(a) != 0)
         return -1;
-    int val = 0;
-    if (mlx_array_item_int32(&val, a) != 0)
+    if (mlx_array_item_int32(out, a) != 0)
         return -1;
-    *out = (int32_t)val;
     return 0;
 }
 

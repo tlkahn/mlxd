@@ -1265,6 +1265,15 @@ static void test_memory_helpers(void) {
     assert(mlxbridge_clear_cache() == 0);
 }
 
+/* ---- Cycle 8 (review): mlxbridge_item_int32 null-check (L2) ---- */
+
+static void test_item_int32_null_out(void) {
+    mlx_array a = mlx_array_new_int(42);
+    int rc = mlxbridge_item_int32(NULL, a);
+    assert(rc == -1);
+    mlx_array_free(a);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -1351,6 +1360,9 @@ int main(void) {
 
     test_memory_helpers();
     printf("  test_memory_helpers: passed\n");
+
+    test_item_int32_null_out();
+    printf("  test_item_int32_null_out: passed\n");
 
     printf("test_mlxbridge_gpu: all passed\n");
     return 0;

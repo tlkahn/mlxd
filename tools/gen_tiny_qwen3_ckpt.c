@@ -85,6 +85,15 @@ static void insert_layer_norm(mlx_map_string_to_array m,
     insert(m, name, ones_bf16((int[]){HIDDEN}, 1, s));
 }
 
+static int cmp_str_ptr(const void *a, const void *b) {
+    return strcmp(*(const char **)a, *(const char **)b);
+}
+
+static void append_newline(const char *path) {
+    FILE *f = fopen(path, "ab");
+    if (f) { fputc('\n', f); fclose(f); }
+}
+
 static void write_config_json(const char *dir, bool quantized) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -118,6 +127,7 @@ static void write_config_json(const char *dir, bool quantized) {
         fprintf(stderr, "failed to write %s: %s\n", path, werr.msg);
         exit(1);
     }
+    append_newline(path);
     yyjson_mut_doc_free(doc);
 }
 
@@ -247,27 +257,42 @@ static void save_sharded(const char *dir, mlx_map_string_to_array m,
     yyjson_mut_val *wm = yyjson_mut_obj(idx_doc);
     yyjson_mut_obj_add_val(idx_doc, idx_root, "weight_map", wm);
 
+    /* Collect all keys, sort for deterministic shard assignment */
     mlx_map_string_to_array_iterator it =
         mlx_map_string_to_array_iterator_new(m);
     const char *key = NULL;
     mlx_array val = mlx_array_new();
-    int tensor_idx = 0;
+    size_t key_cap = 64, key_count = 0;
+    char **keys = malloc(key_cap * sizeof(char *));
     while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
            key != NULL) {
-        bool first_shard = (tensor_idx % 2 == 0);
-        const char *shard_name = first_shard
-            ? "model-00001-of-00002.safetensors"
-            : "model-00002-of-00002.safetensors";
-
-        mlx_map_string_to_array target = first_shard ? shard1 : shard2;
-        CHECK(mlx_map_string_to_array_insert(target, key, val));
-        yyjson_mut_obj_add_str(idx_doc, wm, key, shard_name);
-
-        tensor_idx++;
+        if (key_count >= key_cap) {
+            key_cap *= 2;
+            keys = realloc(keys, key_cap * sizeof(char *));
+        }
+        keys[key_count++] = strdup(key);
         key = NULL;
     }
     mlx_array_free(val);
     mlx_map_string_to_array_iterator_free(it);
+
+    qsort(keys, key_count, sizeof(char *), cmp_str_ptr);
+
+    for (size_t ki = 0; ki < key_count; ki++) {
+        bool first_shard = (ki % 2 == 0);
+        const char *shard_name = first_shard
+            ? "model-00001-of-00002.safetensors"
+            : "model-00002-of-00002.safetensors";
+
+        mlx_array tensor_val = mlx_array_new();
+        CHECK(mlx_map_string_to_array_get(&tensor_val, m, keys[ki]));
+
+        mlx_map_string_to_array target = first_shard ? shard1 : shard2;
+        CHECK(mlx_map_string_to_array_insert(target, keys[ki], tensor_val));
+        yyjson_mut_obj_add_str(idx_doc, wm, keys[ki], shard_name);
+
+        mlx_array_free(tensor_val);
+    }
 
     char path[512];
     mlx_map_string_to_string meta = mlx_map_string_to_string_new();
@@ -288,7 +313,11 @@ static void save_sharded(const char *dir, mlx_map_string_to_array m,
         fprintf(stderr, "failed to write %s: %s\n", path, werr.msg);
         exit(1);
     }
+    append_newline(path);
     yyjson_mut_doc_free(idx_doc);
+
+    for (size_t ki = 0; ki < key_count; ki++) free(keys[ki]);
+    free(keys);
 
     write_config_json(dir, true);
     printf("  wrote %s\n", dir);

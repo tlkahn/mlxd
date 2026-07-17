@@ -93,18 +93,14 @@ static void test_load_sharded(void) {
     assert(bdtype == MLX_FLOAT16 || bdtype == MLX_BFLOAT16 ||
            bdtype == MLX_FLOAT32);
 
-    mlx_array_free(tri.biases);
-    mlx_array_free(tri.scales);
-    mlx_array_free(tri.weight);
+    weights_triplet_free(&tri);
 
     weight_triplet_t norm_tri;
     rc = weights_get_triplet(&norm_tri, &w,
                              "model.layers.0.input_layernorm");
     assert(rc == 0);
     assert(norm_tri.quantized == false);
-    mlx_array_free(norm_tri.biases);
-    mlx_array_free(norm_tri.scales);
-    mlx_array_free(norm_tri.weight);
+    weights_triplet_free(&norm_tri);
 
     weights_free(&w);
     model_config_free(&cfg);
@@ -133,6 +129,283 @@ static void test_validation_deepseek_v4_rejected(void) {
     int rc = weights_load(&w, FIXTURES "/tiny_qwen3", &cfg, err, sizeof(err));
     assert(rc == -1);
     assert(strstr(err, "GGUF") != NULL);
+}
+
+/* ---- Cycle 4 (review): duplicate keys across shards (M7) ---- */
+
+static char *make_tmpdir(const char *tag) {
+    static char buf[256];
+    snprintf(buf, sizeof(buf), "/tmp/mlxd_%s_XXXXXX", tag);
+    assert(mkdtemp(buf) != NULL);
+    return buf;
+}
+
+static void write_test_safetensors(const char *dir, const char *fname,
+                                   const char *tensor_name) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, fname);
+
+    mlx_array a = mlx_array_new_float(1.0f);
+    assert(MLXB_CHECK(mlx_array_eval(a)));
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(m, tensor_name, a)));
+    mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+    assert(MLXB_CHECK(mlx_save_safetensors(path, m, meta)));
+    mlx_map_string_to_string_free(meta);
+    mlx_map_string_to_array_free(m);
+    mlx_array_free(a);
+}
+
+static void test_duplicate_key_across_shards(void) {
+    char *tmpdir = make_tmpdir("dupkey");
+
+    write_test_safetensors(tmpdir, "a.safetensors", "shared_tensor");
+    write_test_safetensors(tmpdir, "b.safetensors", "shared_tensor");
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 0;
+
+    weights_t w;
+    char err[512] = {0};
+    int rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "shared_tensor") != NULL);
+
+    char pa[512], pb[512];
+    snprintf(pa, sizeof(pa), "%s/a.safetensors", tmpdir);
+    snprintf(pb, sizeof(pb), "%s/b.safetensors", tmpdir);
+    unlink(pa);
+    unlink(pb);
+    rmdir(tmpdir);
+}
+
+/* ---- Cycle 5 (review): generic load-time validation (B1+M8) ---- */
+
+static void write_index_json(const char *dir, const char *const *keys,
+                              const char *const *shard_fnames, size_t n) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/model.safetensors.index.json", dir);
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fprintf(f, "{\"weight_map\": {");
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0) fprintf(f, ", ");
+        fprintf(f, "\"%s\": \"%s\"", keys[i], shard_fnames[i]);
+    }
+    fprintf(f, "}}\n");
+    fclose(f);
+}
+
+static void test_validate_index_missing_tensor(void) {
+    char *tmpdir = make_tmpdir("val_idx");
+
+    write_test_safetensors(tmpdir, "s.safetensors", "real_tensor");
+
+    const char *keys[] = {"real_tensor", "phantom_tensor"};
+    const char *fnames[] = {"s.safetensors", "s.safetensors"};
+    write_index_json(tmpdir, keys, fnames, 2);
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 0;
+
+    weights_t w;
+    char err[512] = {0};
+    int rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "phantom_tensor") != NULL);
+
+    char p1[512], p2[512];
+    snprintf(p1, sizeof(p1), "%s/s.safetensors", tmpdir);
+    snprintf(p2, sizeof(p2), "%s/model.safetensors.index.json", tmpdir);
+    unlink(p1); unlink(p2); rmdir(tmpdir);
+}
+
+static void write_config_json_layers(const char *dir, int layers, bool quant) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/config.json", dir);
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fprintf(f, "{\n");
+    fprintf(f, "  \"model_type\": \"qwen3\",\n");
+    fprintf(f, "  \"vocab_size\": 256,\n");
+    fprintf(f, "  \"hidden_size\": 64,\n");
+    fprintf(f, "  \"num_hidden_layers\": %d,\n", layers);
+    fprintf(f, "  \"num_attention_heads\": 4,\n");
+    fprintf(f, "  \"num_key_value_heads\": 2,\n");
+    fprintf(f, "  \"head_dim\": 16,\n");
+    fprintf(f, "  \"intermediate_size\": 128,\n");
+    fprintf(f, "  \"max_position_embeddings\": 512,\n");
+    fprintf(f, "  \"rms_norm_eps\": 1e-6,\n");
+    fprintf(f, "  \"rope_theta\": 1000000.0,\n");
+    fprintf(f, "  \"tie_word_embeddings\": false");
+    if (quant) {
+        fprintf(f, ",\n  \"quantization\": {\"bits\": 4, \"group_size\": 32, \"mode\": \"affine\"}");
+    }
+    fprintf(f, "\n}\n");
+    fclose(f);
+}
+
+static void test_validate_layer_coverage(void) {
+    char *tmpdir = make_tmpdir("val_lay");
+
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "cp %s/tiny_qwen3/model.safetensors %s/",
+             FIXTURES, tmpdir);
+    assert(system(cmd) == 0);
+
+    write_config_json_layers(tmpdir, 3, false);
+
+    model_config_t cfg = {0};
+    int rc = model_config_load(&cfg, tmpdir);
+    assert(rc == 0);
+    assert(cfg.num_hidden_layers == 3);
+
+    weights_t w;
+    char err[512] = {0};
+    rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "layer") != NULL || strstr(err, "missing") != NULL);
+
+    char p[512];
+    snprintf(p, sizeof(p), "%s/model.safetensors", tmpdir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/config.json", tmpdir);
+    unlink(p);
+    model_config_free(&cfg);
+    rmdir(tmpdir);
+}
+
+static void test_validate_quant_dtype(void) {
+    char *tmpdir = make_tmpdir("val_qdt");
+
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "cp %s/tiny_qwen3/model.safetensors %s/",
+             FIXTURES, tmpdir);
+    assert(system(cmd) == 0);
+
+    write_config_json_layers(tmpdir, 2, true);
+
+    model_config_t cfg = {0};
+    int rc = model_config_load(&cfg, tmpdir);
+    assert(rc == 0);
+    assert(cfg.quant_bits == 4);
+
+    weights_t w;
+    char err[512] = {0};
+    rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "dtype") != NULL || strstr(err, "quant") != NULL);
+
+    char p[512];
+    snprintf(p, sizeof(p), "%s/model.safetensors", tmpdir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/config.json", tmpdir);
+    unlink(p);
+    model_config_free(&cfg);
+    rmdir(tmpdir);
+}
+
+/* ---- Cycle 6 (review): tighten triplet contract (B3) ---- */
+
+static void test_triplet_partial_quant_rejected(void) {
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+
+    mlx_array w = mlx_array_new_float(1.0f);
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(m, "layer.weight", w)));
+    mlx_array s = mlx_array_new_float(0.5f);
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(m, "layer.scales", s)));
+
+    weights_t wt = {0};
+    wt.params = m;
+    wt.count = 2;
+
+    weight_triplet_t tri;
+    int rc = weights_get_triplet(&tri, &wt, "layer");
+    assert(rc == -1);
+
+    mlx_array_free(s);
+    mlx_array_free(w);
+    mlx_map_string_to_array_free(m);
+}
+
+static void test_triplet_overflow_rejected(void) {
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+    mlx_array w = mlx_array_new_float(1.0f);
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(m, "x.weight", w)));
+
+    weights_t wt = {0};
+    wt.params = m;
+    wt.count = 1;
+
+    char longbase[300];
+    memset(longbase, 'a', 299);
+    longbase[299] = '\0';
+
+    weight_triplet_t tri;
+    int rc = weights_get_triplet(&tri, &wt, longbase);
+    assert(rc == -1);
+
+    mlx_array_free(w);
+    mlx_map_string_to_array_free(m);
+}
+
+static void test_triplet_free_helper(void) {
+    weights_t w;
+    char err[256] = {0};
+    model_config_t cfg = {0};
+    int rc = model_config_load(&cfg, FIXTURES "/tiny_qwen3_sharded");
+    assert(rc == 0);
+    rc = weights_load(&w, FIXTURES "/tiny_qwen3_sharded", &cfg, err, sizeof(err));
+    assert(rc == 0);
+
+    weight_triplet_t tri;
+    rc = weights_get_triplet(&tri, &w, "model.layers.0.self_attn.q_proj");
+    assert(rc == 0);
+    assert(tri.quantized == true);
+
+    weights_triplet_free(&tri);
+
+    weight_triplet_t norm_tri;
+    rc = weights_get_triplet(&norm_tri, &w, "model.layers.0.input_layernorm");
+    assert(rc == 0);
+    assert(norm_tri.quantized == false);
+
+    weights_triplet_free(&norm_tri);
+
+    weights_free(&w);
+    model_config_free(&cfg);
+}
+
+/* ---- Cycle 7 (review): index lists absent shard file (L1) ---- */
+
+static void test_index_absent_shard_file(void) {
+    char *tmpdir = make_tmpdir("val_abs");
+
+    write_test_safetensors(tmpdir, "present.safetensors", "some_tensor");
+
+    const char *keys[] = {"some_tensor", "other_tensor"};
+    const char *fnames[] = {"present.safetensors", "missing.safetensors"};
+    write_index_json(tmpdir, keys, fnames, 2);
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 0;
+
+    weights_t w;
+    char err[512] = {0};
+    int rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "missing.safetensors") != NULL);
+
+    char p1[512], p2[512];
+    snprintf(p1, sizeof(p1), "%s/present.safetensors", tmpdir);
+    snprintf(p2, sizeof(p2), "%s/model.safetensors.index.json", tmpdir);
+    unlink(p1); unlink(p2); rmdir(tmpdir);
 }
 
 /* ---- Cycle 22: optional real model test ---- */
@@ -184,6 +457,30 @@ int main(void) {
 
     test_validation_deepseek_v4_rejected();
     printf("  test_validation_deepseek_v4_rejected: passed\n");
+
+    test_duplicate_key_across_shards();
+    printf("  test_duplicate_key_across_shards: passed\n");
+
+    test_validate_index_missing_tensor();
+    printf("  test_validate_index_missing_tensor: passed\n");
+
+    test_validate_layer_coverage();
+    printf("  test_validate_layer_coverage: passed\n");
+
+    test_validate_quant_dtype();
+    printf("  test_validate_quant_dtype: passed\n");
+
+    test_triplet_partial_quant_rejected();
+    printf("  test_triplet_partial_quant_rejected: passed\n");
+
+    test_triplet_overflow_rejected();
+    printf("  test_triplet_overflow_rejected: passed\n");
+
+    test_triplet_free_helper();
+    printf("  test_triplet_free_helper: passed\n");
+
+    test_index_absent_shard_file();
+    printf("  test_index_absent_shard_file: passed\n");
 
     test_real_model_optional();
 
