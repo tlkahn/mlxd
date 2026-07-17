@@ -1144,6 +1144,127 @@ static void test_error_handler(void) {
     mlx_stream_free(s);
 }
 
+/* ---- Cycle 12: cpu_stream + load_safetensors ---- */
+
+static void test_cpu_stream_and_load_safetensors(void) {
+    mlx_stream cpu = mlxbridge_cpu_stream();
+    assert(cpu.ctx != NULL);
+
+    mlx_device dev = mlx_device_new();
+    assert(MLXB_CHECK(mlx_stream_get_device(&dev, cpu)));
+    mlx_device_type dtype;
+    assert(MLXB_CHECK(mlx_device_get_type(&dtype, dev)));
+    assert(dtype == MLX_CPU);
+    mlx_device_free(dev);
+
+    float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    mlx_array arr = mlx_array_new_data(data, (int[]){2, 3}, 2, MLX_FLOAT32);
+    assert(MLXB_CHECK(mlx_array_eval(arr)));
+
+    mlx_map_string_to_array save_params = mlx_map_string_to_array_new();
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(save_params, "weight", arr)));
+    mlx_map_string_to_string save_meta = mlx_map_string_to_string_new();
+
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/mlxbridge_a2_test_%d.safetensors", getpid());
+    assert(MLXB_CHECK(mlx_save_safetensors(path, save_params, save_meta)));
+
+    mlx_map_string_to_array loaded_params = mlx_map_string_to_array_new();
+    mlx_map_string_to_string loaded_meta = mlx_map_string_to_string_new();
+    assert(mlxbridge_load_safetensors(&loaded_params, &loaded_meta, path) == 0);
+
+    mlx_array loaded = mlx_array_new();
+    assert(MLXB_CHECK(mlx_map_string_to_array_get(&loaded, loaded_params, "weight")));
+    assert(MLXB_CHECK(mlx_array_eval(loaded)));
+    assert(mlx_array_ndim(loaded) == 2);
+    assert(mlx_array_shape(loaded)[0] == 2);
+    assert(mlx_array_shape(loaded)[1] == 3);
+    const float *ld = mlx_array_data_float32(loaded);
+    for (int i = 0; i < 6; i++)
+        assert(ld[i] == data[i]);
+
+    unlink(path);
+    mlx_array_free(loaded);
+    mlx_map_string_to_string_free(loaded_meta);
+    mlx_map_string_to_array_free(loaded_params);
+    mlx_map_string_to_string_free(save_meta);
+    mlx_map_string_to_array_free(save_params);
+    mlx_array_free(arr);
+    mlx_stream_free(cpu);
+}
+
+/* ---- Cycle 13: map helpers ---- */
+
+static void test_map_helpers(void) {
+    float data[] = {10.0f, 20.0f};
+    mlx_array a = mlx_array_new_data(data, (int[]){2}, 1, MLX_FLOAT32);
+    mlx_array b = mlx_array_new_data((float[]){30.0f}, (int[]){1}, 1, MLX_FLOAT32);
+
+    mlx_map_string_to_array params = mlx_map_string_to_array_new();
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(params, "x", a)));
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(params, "y", b)));
+    mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+
+    assert(mlxbridge_map_count(params) == 2);
+
+    mlx_array got = mlx_array_new();
+    assert(mlxbridge_map_get(&got, params, "x") == 0);
+    assert(MLXB_CHECK(mlx_array_eval(got)));
+    assert(mlx_array_size(got) == 2);
+
+    mlx_array miss = mlx_array_new();
+    assert(mlxbridge_map_get(&miss, params, "nonexistent") == -1);
+
+    mlxbridge_map_free(params, meta);
+    mlx_array_free(miss);
+    mlx_array_free(got);
+    mlx_array_free(b);
+    mlx_array_free(a);
+}
+
+/* ---- Cycle 14: eval helpers ---- */
+
+static void test_eval_helpers(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+
+    mlx_array r = mlx_array_new();
+    assert(MLXB_CHECK(mlx_arange(&r, 0, 10, 1, MLX_INT32, s)));
+    mlx_array sum = mlx_array_new();
+    assert(MLXB_CHECK(mlx_sum(&sum, r, false, s)));
+
+    assert(mlxbridge_async_eval(sum) == 0);
+    assert(mlxbridge_synchronize(s) == 0);
+
+    int32_t val = 0;
+    assert(mlxbridge_item_int32(&val, sum) == 0);
+    assert(val == 45);
+
+    mlx_array_free(sum);
+    mlx_array_free(r);
+    mlx_stream_free(s);
+}
+
+/* ---- Cycle 15: memory helpers ---- */
+
+static void test_memory_helpers(void) {
+    size_t old_wired = 0;
+    assert(mlxbridge_set_wired_limit(&old_wired, 0) == 0);
+    size_t restore_wired = 0;
+    assert(mlxbridge_set_wired_limit(&restore_wired, old_wired) == 0);
+
+    size_t old_cache = 0;
+    assert(mlxbridge_set_cache_limit(&old_cache, 1024 * 1024) == 0);
+    size_t restore_cache = 0;
+    assert(mlxbridge_set_cache_limit(&restore_cache, old_cache) == 0);
+
+    size_t active = 0, peak = 0;
+    assert(mlxbridge_get_active_memory(&active) == 0);
+    assert(mlxbridge_get_peak_memory(&peak) == 0);
+    assert(peak >= active);
+
+    assert(mlxbridge_clear_cache() == 0);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -1218,6 +1339,18 @@ int main(void) {
 
     test_error_handler();
     printf("  test_error_handler: passed\n");
+
+    test_cpu_stream_and_load_safetensors();
+    printf("  test_cpu_stream_and_load_safetensors: passed\n");
+
+    test_map_helpers();
+    printf("  test_map_helpers: passed\n");
+
+    test_eval_helpers();
+    printf("  test_eval_helpers: passed\n");
+
+    test_memory_helpers();
+    printf("  test_memory_helpers: passed\n");
 
     printf("test_mlxbridge_gpu: all passed\n");
     return 0;
