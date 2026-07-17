@@ -18,6 +18,15 @@ static void test_usage_contains_subcommands(void) {
     assert(strstr(u, "list") != NULL);
 }
 
+static void test_usage_documents_options(void) {
+    const char *u = cli_usage_str();
+    assert(strstr(u, "--port") != NULL);
+    assert(strstr(u, "--json") != NULL);
+    assert(strstr(u, "--max-tokens") != NULL);
+    assert(strstr(u, "MODEL") != NULL);
+    assert(strstr(u, "PROMPT") != NULL);
+}
+
 static void test_version_string(void) {
     assert(strlen(MLXD_VERSION) > 0);
     assert(strstr(MLXD_VERSION, ".") != NULL);
@@ -359,6 +368,7 @@ static void test_main_no_args(void) {
 
 int main(void) {
     test_usage_contains_subcommands();
+    test_usage_documents_options();
     test_version_string();
     test_list_json_two_models();
     test_list_json_empty();

@@ -153,10 +153,17 @@ static const char usage_text[] =
     "usage: mlxd <command> [options]\n"
     "\n"
     "commands:\n"
-    "  serve   start OpenAI-compatible HTTP server\n"
-    "  run     one-shot or interactive text generation\n"
-    "  pull    download model from HuggingFace\n"
-    "  list    list locally available models\n";
+    "  serve [--model MODEL] [--host HOST] [--port PORT]\n"
+    "        start OpenAI-compatible HTTP server\n"
+    "\n"
+    "  run [--max-tokens N] [--temperature T] [--stream] MODEL [PROMPT]\n"
+    "        one-shot or interactive text generation\n"
+    "\n"
+    "  pull MODEL_SPEC\n"
+    "        download model from HuggingFace (e.g. org/model)\n"
+    "\n"
+    "  list [--json]\n"
+    "        list locally available models\n";
 
 const char *cli_usage_str(void) {
     return usage_text;
