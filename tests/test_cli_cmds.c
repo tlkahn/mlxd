@@ -182,6 +182,111 @@ static void test_cmd_list_empty_json(void) {
     unsetenv("MLXD_HF_HUB_DIR");
 }
 
+/* --- Phase D: cli_cmd_run ------------------------------------------------- */
+
+#define RUN_MODEL MLXD_FIXTURES_DIR "/run_model"
+
+static void test_cmd_run_oneshot(void) {
+    char buf[8192] = {0};
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+    FILE *in_f = fmemopen(NULL, 1, "r");
+
+    cli_args_t args = {0};
+    args.cmd = CLI_RUN;
+    args.run.model = RUN_MODEL;
+    args.run.prompt = "hello world";
+    args.run.max_tokens = 256;
+    args.run.temperature = 1.0f;
+    args.run.stream = false;
+
+    int rc = cli_cmd_run(&args, in_f, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    fclose(in_f);
+
+    assert(rc == 0);
+    assert(strstr(buf, "hello world") != NULL);
+}
+
+static void test_cmd_run_streaming(void) {
+    char buf[8192] = {0};
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+    FILE *in_f = fmemopen(NULL, 1, "r");
+
+    cli_args_t args = {0};
+    args.cmd = CLI_RUN;
+    args.run.model = RUN_MODEL;
+    args.run.prompt = "hello world";
+    args.run.max_tokens = 256;
+    args.run.temperature = 1.0f;
+    args.run.stream = true;
+
+    int rc = cli_cmd_run(&args, in_f, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    fclose(in_f);
+
+    assert(rc == 0);
+    assert(strstr(buf, "hello world") != NULL);
+}
+
+static void test_cmd_run_stdin(void) {
+    char buf[8192] = {0};
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(buf, sizeof(buf), "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+
+    const char *input = "hi there\n";
+    FILE *in_f = fmemopen((void *)input, strlen(input), "r");
+
+    cli_args_t args = {0};
+    args.cmd = CLI_RUN;
+    args.run.model = RUN_MODEL;
+    args.run.prompt = NULL;
+    args.run.max_tokens = 256;
+    args.run.temperature = 1.0f;
+    args.run.stream = false;
+
+    int rc = cli_cmd_run(&args, in_f, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    fclose(in_f);
+
+    assert(rc == 0);
+    assert(strstr(buf, "hi there") != NULL);
+}
+
+static void test_cmd_run_bad_model(void) {
+    setenv("MLXD_CACHE_DIR", "/nonexistent", 1);
+    setenv("MLXD_HF_HUB_DIR", "/nonexistent", 1);
+
+    char errbuf[4096] = {0};
+    FILE *out = fmemopen(NULL, 1024, "w");
+    FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
+    FILE *in_f = fmemopen(NULL, 1, "r");
+
+    cli_args_t args = {0};
+    args.cmd = CLI_RUN;
+    args.run.model = "no/such-model";
+    args.run.prompt = "hello";
+    args.run.max_tokens = 256;
+    args.run.temperature = 1.0f;
+
+    int rc = cli_cmd_run(&args, in_f, out, err_f);
+    fclose(out);
+    fclose(err_f);
+    fclose(in_f);
+
+    assert(rc != 0);
+
+    unsetenv("MLXD_CACHE_DIR");
+    unsetenv("MLXD_HF_HUB_DIR");
+}
+
 /* --- Phase F: cli_sigint_decide ------------------------------------------- */
 
 static void test_sigint_decide(void) {
@@ -249,6 +354,10 @@ int main(void) {
     test_cmd_list_json();
     test_cmd_list_empty();
     test_cmd_list_empty_json();
+    test_cmd_run_oneshot();
+    test_cmd_run_streaming();
+    test_cmd_run_stdin();
+    test_cmd_run_bad_model();
     test_sigint_decide();
     test_main_help();
     test_main_version();

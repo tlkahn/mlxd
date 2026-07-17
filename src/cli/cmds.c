@@ -1,5 +1,8 @@
 #include "cli/cmds.h"
 #include "cli/cli.h"
+#include "engine/engine.h"
+#include "model/detok.h"
+#include "model/tokenizer.h"
 #include "registry/registry.h"
 
 #include <inttypes.h>
@@ -121,9 +124,35 @@ int cli_cmd_pull(const cli_args_t *args, FILE *out, FILE *err) {
     return 0;
 }
 
+/* --- stdin slurp ---------------------------------------------------------- */
+
+static char *slurp_stdin(FILE *in) {
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+
+    for (;;) {
+        size_t n = fread(buf + len, 1, cap - len, in);
+        len += n;
+        if (n == 0) break;
+        if (len == cap) {
+            cap *= 2;
+            char *tmp = realloc(buf, cap);
+            if (!tmp) { free(buf); return NULL; }
+            buf = tmp;
+        }
+    }
+
+    while (len > 0 && buf[len - 1] == '\n')
+        len--;
+    buf[len] = '\0';
+    return buf;
+}
+
 /* --- cli_cmd_run ---------------------------------------------------------- */
 
 int cli_cmd_run(const cli_args_t *args, FILE *in, FILE *out, FILE *err) {
+    int rc = 1;
     const char *model_spec = args->run.model;
 
     char *model_dir = registry_resolve(model_spec);
@@ -132,13 +161,132 @@ int cli_cmd_run(const cli_args_t *args, FILE *in, FILE *out, FILE *err) {
         return 1;
     }
 
-    /* Defer full implementation to Phase D */
-    (void)in;
-    (void)out;
-    (void)args;
-    fprintf(err, "run: not yet implemented\n");
+    tokenizer_t *tok = tokenizer_load_dir(model_dir);
+    if (!tok) {
+        fprintf(err, "run: failed to load tokenizer from '%s'\n", model_dir);
+        free(model_dir);
+        return 1;
+    }
+
+    engine_t eng;
+    if (engine_init(&eng) != 0) {
+        fprintf(err, "run: failed to init engine\n");
+        tokenizer_free(tok);
+        free(model_dir);
+        return 1;
+    }
+
+    engine_cmd_t *load_cmd = calloc(1, sizeof(*load_cmd));
+    load_cmd->tag = CMD_LOAD;
+    load_cmd->load.model_path = strdup(model_dir);
+    engine_post(&eng, load_cmd);
+
+    char *prompt = NULL;
+    if (args->run.prompt) {
+        prompt = strdup(args->run.prompt);
+    } else {
+        prompt = slurp_stdin(in);
+    }
+    if (!prompt || prompt[0] == '\0') {
+        fprintf(err, "run: empty prompt\n");
+        free(prompt);
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(model_dir);
+        return 1;
+    }
+
+    int32_t *ids = NULL;
+    int id_count = tokenizer_encode_alloc(tok, prompt, strlen(prompt), false, &ids);
+    if (id_count < 0) {
+        fprintf(err, "run: tokenizer encode failed\n");
+        free(prompt);
+        engine_destroy(&eng);
+        tokenizer_free(tok);
+        free(model_dir);
+        return 1;
+    }
+
+    stream_t *s = stream_create(id_count + 16);
+    stream_retain(s);
+
+    engine_cmd_t *gen_cmd = calloc(1, sizeof(*gen_cmd));
+    gen_cmd->tag = CMD_GENERATE;
+    gen_cmd->generate.params.max_tokens = args->run.max_tokens;
+    gen_cmd->generate.params.sampling.temperature = args->run.temperature;
+    gen_cmd->generate.token_ids = ids;
+    gen_cmd->generate.token_count = id_count;
+    gen_cmd->generate.stream = s;
+    engine_post(&eng, gen_cmd);
+
+    if (args->run.stream) {
+        detok_t *dt = detok_create(tok);
+        chunk_t c;
+        while (stream_next(s, &c, -1)) {
+            if (c.tag == CHUNK_TOKEN) {
+                if (dt) {
+                    char *text = NULL;
+                    size_t text_len = 0;
+                    detok_feed(dt, c.token.id, &text, &text_len);
+                    if (text_len > 0)
+                        fwrite(text, 1, text_len, out);
+                    free(text);
+                }
+            } else if (c.tag == CHUNK_DONE) {
+                if (dt) {
+                    char *text = NULL;
+                    size_t text_len = 0;
+                    detok_flush(dt, &text, &text_len);
+                    if (text_len > 0)
+                        fwrite(text, 1, text_len, out);
+                    free(text);
+                }
+                rc = 0;
+                break;
+            } else if (c.tag == CHUNK_ERROR) {
+                fprintf(err, "run: %s\n", c.error);
+                free(c.error);
+                break;
+            }
+        }
+        fprintf(out, "\n");
+        detok_free(dt);
+    } else {
+        int32_t *out_ids = NULL;
+        int out_cap = 0, out_len = 0;
+        chunk_t c;
+        while (stream_next(s, &c, -1)) {
+            if (c.tag == CHUNK_TOKEN) {
+                if (out_len == out_cap) {
+                    out_cap = out_cap ? out_cap * 2 : 64;
+                    out_ids = realloc(out_ids, sizeof(int32_t) * (size_t)out_cap);
+                }
+                out_ids[out_len++] = c.token.id;
+            } else if (c.tag == CHUNK_DONE) {
+                rc = 0;
+                break;
+            } else if (c.tag == CHUNK_ERROR) {
+                fprintf(err, "run: %s\n", c.error);
+                free(c.error);
+                break;
+            }
+        }
+        if (rc == 0 && out_len > 0) {
+            char *text = tokenizer_decode(tok, out_ids, out_len);
+            if (text) {
+                fprintf(out, "%s\n", text);
+                free(text);
+            }
+        }
+        free(out_ids);
+    }
+
+    stream_release(s);
+    engine_destroy(&eng);
+    tokenizer_free(tok);
     free(model_dir);
-    return 1;
+    free(prompt);
+    return rc;
 }
 
 /* --- cli_cmd_serve -------------------------------------------------------- */
