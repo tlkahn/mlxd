@@ -252,8 +252,8 @@ static void test_cmd_run_stdin(void) {
     FILE *out = fmemopen(buf, sizeof(buf), "w");
     FILE *err_f = fmemopen(errbuf, sizeof(errbuf), "w");
 
-    const char *input = "hi there\n";
-    FILE *in_f = fmemopen((void *)input, strlen(input), "r");
+    char input[] = "hi there\n";
+    FILE *in_f = fmemopen(input, strlen(input), "r");
 
     cli_args_t args = {0};
     args.cmd = CLI_RUN;

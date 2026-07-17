@@ -54,7 +54,7 @@ typedef struct engine_cmd {
             gen_params_t  params;
             int32_t      *token_ids;
             int           token_count;
-            stream_t     *stream;
+            stream_t     *stream; /* ownership: caller retains; engine does NOT release */
         } generate;
         struct {
             char *model_path;

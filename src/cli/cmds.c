@@ -147,6 +147,7 @@ static char *slurp_stdin(FILE *in) {
         }
     }
 
+    /* strip all trailing newlines (matches shell $() semantics) */
     while (len > 0 && buf[len - 1] == '\n')
         len--;
     buf[len] = '\0';
@@ -298,6 +299,7 @@ int cli_cmd_run(const cli_args_t *args, FILE *in, FILE *out, FILE *err) {
 static volatile sig_atomic_t g_sigint_count;
 static http_server_t *g_server;
 
+/* async-signal-safe: only uv_async_send (documented safe) and _exit */
 static void sigint_handler(int sig) {
     (void)sig;
     int count = ++g_sigint_count;

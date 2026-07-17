@@ -16,7 +16,7 @@ static cli_cmd_t cli_error(cli_args_t *out, const char *msg) {
 }
 
 /* Parse a whole-string integer in [min, max]. Returns 0 on success. */
-static int parse_int(const char *s, long min, long max, int *out) {
+static int parse_int(const char *s, int min, int max, int *out) {
     char *end = NULL;
     errno = 0;
     long v = strtol(s, &end, 10);
