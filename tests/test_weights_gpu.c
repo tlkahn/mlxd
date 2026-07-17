@@ -408,6 +408,226 @@ static void test_index_absent_shard_file(void) {
     unlink(p1); unlink(p2); rmdir(tmpdir);
 }
 
+/* ---- Helper: copy safetensors map excluding specific keys ---- */
+
+static void save_map_excluding(const char *src_dir, const char *dst_dir,
+                                const char *dst_fname,
+                                const char *const *exclude_keys,
+                                size_t n_exclude) {
+    char src_path[512];
+    snprintf(src_path, sizeof(src_path), "%s/model.safetensors", src_dir);
+
+    mlx_map_string_to_array params = mlx_map_string_to_array_new();
+    mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+    assert(mlxbridge_load_safetensors(&params, &meta, src_path) == 0);
+
+    mlx_map_string_to_array filtered = mlx_map_string_to_array_new();
+    mlx_map_string_to_array_iterator it =
+        mlx_map_string_to_array_iterator_new(params);
+    const char *key = NULL;
+    mlx_array val = mlx_array_new();
+    while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
+           key != NULL) {
+        bool skip = false;
+        for (size_t i = 0; i < n_exclude; i++) {
+            if (strcmp(key, exclude_keys[i]) == 0) { skip = true; break; }
+        }
+        if (!skip)
+            assert(MLXB_CHECK(mlx_map_string_to_array_insert(filtered, key, val)));
+        key = NULL;
+    }
+    mlx_array_free(val);
+    mlx_map_string_to_array_iterator_free(it);
+
+    char dst_path[512];
+    snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, dst_fname);
+    mlx_map_string_to_string empty_meta = mlx_map_string_to_string_new();
+    assert(MLXB_CHECK(mlx_save_safetensors(dst_path, filtered, empty_meta)));
+
+    mlx_map_string_to_string_free(empty_meta);
+    mlx_map_string_to_array_free(filtered);
+    mlxbridge_map_free(params, meta);
+}
+
+/* ---- Helper: copy safetensors with additional tensors ---- */
+
+static void save_map_with_extra(const char *src_dir, const char *dst_dir,
+                                const char *dst_fname,
+                                const char *const *extra_keys,
+                                const mlx_array *extra_vals,
+                                size_t n_extra) {
+    char src_path[512];
+    snprintf(src_path, sizeof(src_path), "%s/model.safetensors", src_dir);
+
+    mlx_map_string_to_array params = mlx_map_string_to_array_new();
+    mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+    assert(mlxbridge_load_safetensors(&params, &meta, src_path) == 0);
+
+    for (size_t i = 0; i < n_extra; i++)
+        assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+            params, extra_keys[i], extra_vals[i])));
+
+    char dst_path[512];
+    snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, dst_fname);
+    mlx_map_string_to_string empty_meta = mlx_map_string_to_string_new();
+    assert(MLXB_CHECK(mlx_save_safetensors(dst_path, params, empty_meta)));
+
+    mlx_map_string_to_string_free(empty_meta);
+    mlxbridge_map_free(params, meta);
+}
+
+/* ---- Helper: copy safetensors, replacing a key's value ---- */
+
+static void save_map_replacing(const char *src_dir, const char *dst_dir,
+                                const char *dst_fname,
+                                const char *replace_key,
+                                mlx_array replace_val) {
+    char src_path[512];
+    snprintf(src_path, sizeof(src_path), "%s/model.safetensors", src_dir);
+
+    mlx_map_string_to_array params = mlx_map_string_to_array_new();
+    mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+    assert(mlxbridge_load_safetensors(&params, &meta, src_path) == 0);
+
+    mlx_map_string_to_array filtered = mlx_map_string_to_array_new();
+    mlx_map_string_to_array_iterator it =
+        mlx_map_string_to_array_iterator_new(params);
+    const char *key = NULL;
+    mlx_array val = mlx_array_new();
+    while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
+           key != NULL) {
+        if (strcmp(key, replace_key) == 0)
+            assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+                filtered, key, replace_val)));
+        else
+            assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+                filtered, key, val)));
+        key = NULL;
+    }
+    mlx_array_free(val);
+    mlx_map_string_to_array_iterator_free(it);
+
+    char dst_path[512];
+    snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, dst_fname);
+    mlx_map_string_to_string empty_meta = mlx_map_string_to_string_new();
+    assert(MLXB_CHECK(mlx_save_safetensors(dst_path, filtered, empty_meta)));
+
+    mlx_map_string_to_string_free(empty_meta);
+    mlx_map_string_to_array_free(filtered);
+    mlxbridge_map_free(params, meta);
+}
+
+/* ---- Cycle 3 (plan): strict expected-tensor validation ---- */
+
+static void test_validate_missing_expected_tensor(void) {
+    char *tmpdir = make_tmpdir("val_exp");
+
+    const char *exclude[] = {"model.layers.0.self_attn.q_proj.weight"};
+    save_map_excluding(FIXTURES "/tiny_qwen3", tmpdir,
+                       "model.safetensors", exclude, 1);
+
+    /* Copy config.json from fixture */
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "cp %s/tiny_qwen3/config.json %s/",
+             FIXTURES, tmpdir);
+    assert(system(cmd) == 0);
+
+    model_config_t cfg = {0};
+    assert(model_config_load(&cfg, tmpdir) == 0);
+
+    weights_t w;
+    char err[512] = {0};
+    int rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "q_proj") != NULL);
+
+    char p[512];
+    snprintf(p, sizeof(p), "%s/model.safetensors", tmpdir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/config.json", tmpdir);
+    unlink(p);
+    model_config_free(&cfg);
+    rmdir(tmpdir);
+}
+
+/* ---- Cycle 4 (plan): orphan scales detection ---- */
+
+static void test_validate_orphan_scales(void) {
+    char *tmpdir = make_tmpdir("val_orph");
+
+    /* Start with dense tiny_qwen3, add orphan .scales (no .biases, no uint32 base) */
+    mlx_array orphan = mlx_array_new_float(0.5f);
+    assert(MLXB_CHECK(mlx_array_eval(orphan)));
+    const char *extra_keys[] = {"model.layers.0.self_attn.q_proj.scales"};
+    const mlx_array extra_vals[] = {orphan};
+    save_map_with_extra(FIXTURES "/tiny_qwen3", tmpdir,
+                        "model.safetensors", extra_keys, extra_vals, 1);
+    mlx_array_free(orphan);
+
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "cp %s/tiny_qwen3/config.json %s/",
+             FIXTURES, tmpdir);
+    assert(system(cmd) == 0);
+
+    model_config_t cfg = {0};
+    assert(model_config_load(&cfg, tmpdir) == 0);
+
+    weights_t w;
+    char err[512] = {0};
+    int rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "q_proj") != NULL);
+
+    char p[512];
+    snprintf(p, sizeof(p), "%s/model.safetensors", tmpdir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/config.json", tmpdir);
+    unlink(p);
+    model_config_free(&cfg);
+    rmdir(tmpdir);
+}
+
+/* ---- Cycle 5 (plan): norm dtype validation ---- */
+
+static void test_validate_norm_dtype(void) {
+    char *tmpdir = make_tmpdir("val_ndt");
+
+    /* Replace input_layernorm.weight with uint32 array */
+    uint32_t ones[64];
+    for (int i = 0; i < 64; i++) ones[i] = 1;
+    int shape[] = {64};
+    mlx_array uint32_arr = mlx_array_new_data(ones, shape, 1, MLX_UINT32);
+    assert(MLXB_CHECK(mlx_array_eval(uint32_arr)));
+
+    save_map_replacing(FIXTURES "/tiny_qwen3", tmpdir,
+                       "model.safetensors",
+                       "model.layers.0.input_layernorm.weight",
+                       uint32_arr);
+    mlx_array_free(uint32_arr);
+
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "cp %s/tiny_qwen3/config.json %s/",
+             FIXTURES, tmpdir);
+    assert(system(cmd) == 0);
+
+    model_config_t cfg = {0};
+    assert(model_config_load(&cfg, tmpdir) == 0);
+
+    weights_t w;
+    char err[512] = {0};
+    int rc = weights_load(&w, tmpdir, &cfg, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "input_layernorm") != NULL);
+
+    char p[512];
+    snprintf(p, sizeof(p), "%s/model.safetensors", tmpdir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/config.json", tmpdir);
+    unlink(p);
+    model_config_free(&cfg);
+    rmdir(tmpdir);
+}
+
 /* ---- Cycle 22: optional real model test ---- */
 
 static void test_real_model_optional(void) {
@@ -481,6 +701,15 @@ int main(void) {
 
     test_index_absent_shard_file();
     printf("  test_index_absent_shard_file: passed\n");
+
+    test_validate_missing_expected_tensor();
+    printf("  test_validate_missing_expected_tensor: passed\n");
+
+    test_validate_orphan_scales();
+    printf("  test_validate_orphan_scales: passed\n");
+
+    test_validate_norm_dtype();
+    printf("  test_validate_norm_dtype: passed\n");
 
     test_real_model_optional();
 

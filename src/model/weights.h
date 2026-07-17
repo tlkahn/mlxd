@@ -8,6 +8,25 @@
 #include <stddef.h>
 
 /* CPU-testable, no mlx calls */
+
+typedef enum {
+    WEIGHT_KIND_EMBED = 0,
+    WEIGHT_KIND_MATMUL,
+    WEIGHT_KIND_NORM,
+} weight_kind_t;
+
+typedef struct {
+    char          name[256];
+    weight_kind_t kind;
+} weight_expected_t;
+
+/* Generate the list of expected tensor base names for a model config.
+   Returns count of entries written to out, 0 if the family has no strict
+   expected set (caller should fall back to generic checks), or -1 on error
+   (e.g. capacity too small). If out is NULL, returns the required count. */
+int weights_expected_names(const model_config_t *cfg,
+                           weight_expected_t *out, int capacity);
+
 int weights_enumerate_shards(const char *model_dir, char ***paths,
                              size_t *count, bool *from_index);
 void weights_free_shard_paths(char **paths, size_t count);

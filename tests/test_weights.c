@@ -290,6 +290,142 @@ static void test_single_is_directory(void) {
     rmdir(tmpdir);
 }
 
+/* ---- Cycle 1: expected tensor names for qwen3 ---- */
+
+static void test_expected_names_qwen3(void) {
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 2;
+    cfg.has_qk_norm = true;
+    cfg.tie_word_embeddings = false;
+
+    int count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 25);
+
+    weight_expected_t names[25];
+    int rc = weights_expected_names(&cfg, names, 25);
+    assert(rc == 25);
+
+    /* Verify embed_tokens */
+    bool found_embed = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "model.embed_tokens") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_EMBED);
+            found_embed = true;
+        }
+    }
+    assert(found_embed);
+
+    /* Verify a per-layer matmul */
+    bool found_q0 = false, found_q1 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "model.layers.0.self_attn.q_proj") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_MATMUL);
+            found_q0 = true;
+        }
+        if (strcmp(names[i].name, "model.layers.1.self_attn.q_proj") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_MATMUL);
+            found_q1 = true;
+        }
+    }
+    assert(found_q0 && found_q1);
+
+    /* Verify norms (with qk_norm) */
+    bool found_inorm = false, found_qnorm = false, found_knorm = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "model.layers.0.input_layernorm") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_NORM);
+            found_inorm = true;
+        }
+        if (strcmp(names[i].name, "model.layers.0.self_attn.q_norm") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_NORM);
+            found_qnorm = true;
+        }
+        if (strcmp(names[i].name, "model.layers.0.self_attn.k_norm") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_NORM);
+            found_knorm = true;
+        }
+    }
+    assert(found_inorm && found_qnorm && found_knorm);
+
+    /* Verify global norm */
+    bool found_gnorm = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "model.norm") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_NORM);
+            found_gnorm = true;
+        }
+    }
+    assert(found_gnorm);
+
+    /* Verify lm_head present (not tied) */
+    bool found_lmhead = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "lm_head") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_MATMUL);
+            found_lmhead = true;
+        }
+    }
+    assert(found_lmhead);
+
+    /* Capacity too small -> error */
+    weight_expected_t small[2];
+    assert(weights_expected_names(&cfg, small, 2) == -1);
+}
+
+/* ---- Cycle 2: expected name flag variants ---- */
+
+static void test_expected_names_tied(void) {
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 2;
+    cfg.has_qk_norm = true;
+    cfg.tie_word_embeddings = true;
+
+    int count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 24);
+
+    weight_expected_t names[24];
+    int rc = weights_expected_names(&cfg, names, 24);
+    assert(rc == 24);
+
+    for (int i = 0; i < rc; i++)
+        assert(strcmp(names[i].name, "lm_head") != 0);
+}
+
+static void test_expected_names_no_qk_norm(void) {
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 2;
+    cfg.has_qk_norm = false;
+    cfg.tie_word_embeddings = false;
+
+    /* 25 - 4 (2 layers * 2 qk norms) = 21 */
+    int count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 21);
+
+    weight_expected_t names[21];
+    int rc = weights_expected_names(&cfg, names, 21);
+    assert(rc == 21);
+
+    for (int i = 0; i < rc; i++) {
+        assert(strstr(names[i].name, "q_norm") == NULL);
+        assert(strstr(names[i].name, "k_norm") == NULL);
+    }
+}
+
+static void test_expected_names_non_qwen3(void) {
+    model_config_t cfg = {0};
+    cfg.family = MODEL_LLAMA;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 2;
+
+    assert(weights_expected_names(&cfg, NULL, 0) == 0);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -337,6 +473,18 @@ int main(void) {
 
     test_single_is_directory();
     printf("  test_single_is_directory: passed\n");
+
+    test_expected_names_qwen3();
+    printf("  test_expected_names_qwen3: passed\n");
+
+    test_expected_names_tied();
+    printf("  test_expected_names_tied: passed\n");
+
+    test_expected_names_no_qk_norm();
+    printf("  test_expected_names_no_qk_norm: passed\n");
+
+    test_expected_names_non_qwen3();
+    printf("  test_expected_names_non_qwen3: passed\n");
 
     printf("test_weights: all passed\n");
     return 0;
