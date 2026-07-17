@@ -275,6 +275,8 @@ static void test_family_from_type(void) {
     assert(model_family_from_type("mistral") == MODEL_MISTRAL);
     assert(model_family_from_type("lfm2") == MODEL_LFM2);
     assert(model_family_from_type("lfm2_vl") == MODEL_LFM2);
+    assert(model_family_from_type("lfm2_moe") == MODEL_LFM2);
+    assert(model_family_from_type("lfm2_audio") == MODEL_LFM2);
     assert(model_family_from_type("nemotron_h") == MODEL_NEMOTRON_H);
     assert(model_family_from_type("deepseek_v4") == MODEL_DEEPSEEK_V4);
     assert(model_family_from_type("bert") == MODEL_BERT);
@@ -857,6 +859,18 @@ static void test_generation_config(void) {
     model_config_free(&cfg2);
 }
 
+/* --- PR61 review pin: bert head_dim overwrite is oracle-correct ---------- */
+
+static void test_bert_explicit_head_dim_ignored(void) {
+    model_config_t cfg;
+    int rc =
+        model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_bert_head_dim");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_BERT);
+    assert(cfg.head_dim == 768 / 12);
+    model_config_free(&cfg);
+}
+
 int main(void) {
     test_happy_path();
     test_kv_heads_default();
@@ -887,6 +901,7 @@ int main(void) {
     test_nested_text_config_eos();
     test_generation_config();
     test_float_overflow();
+    test_bert_explicit_head_dim_ignored();
 
     printf("test_model_config: all passed\n");
     return 0;
