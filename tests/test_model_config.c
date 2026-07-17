@@ -489,6 +489,11 @@ static void test_sliding_window_and_layers(void) {
     assert(model_layer_is_global(&cfg, 11) == true);
     model_config_free(&cfg);
 
+    /* modulo path: OOB layer >= num_hidden_layers wraps via pattern */
+    assert(model_layer_is_global(&cfg, 29) == true);  /* 29 % 6 == 5 */
+    assert(model_layer_is_global(&cfg, 30) == false); /* 30 % 6 == 0 */
+    assert(model_layer_is_global(&cfg, 125) == true); /* 125 % 6 == 5 */
+
     /* mistral: sliding_window but no pattern - all layers are sliding, none global */
     rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_mistral");
     assert(rc == 0);
@@ -771,6 +776,40 @@ static void test_nested_text_config_eos(void) {
     model_config_free(&cfg);
 }
 
+/* --- PR61-R4 Cycle 1: get_f32 float overflow guard ----------------------- */
+
+static void test_float_overflow(void) {
+    model_config_t cfg;
+
+    /* get_f32 path: rope_theta 1e39 overflows float */
+    memset(&cfg, 0xAB, sizeof(cfg));
+    int rc = model_config_load(&cfg,
+                               MLXD_FIXTURES_DIR "/model_config_float_overflow");
+    assert(rc == -1);
+    model_config_free(&cfg);
+
+    /* direct eps: lfm2 norm_eps 1e39 */
+    memset(&cfg, 0xAB, sizeof(cfg));
+    rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_norm_eps_overflow");
+    assert(rc == -1);
+    model_config_free(&cfg);
+
+    /* direct eps: nemotron layer_norm_epsilon 1e39 */
+    memset(&cfg, 0xAB, sizeof(cfg));
+    rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_nemotron_eps_overflow");
+    assert(rc == -1);
+    model_config_free(&cfg);
+
+    /* direct eps: bert layer_norm_eps 1e39 */
+    memset(&cfg, 0xAB, sizeof(cfg));
+    rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_bert_eps_overflow");
+    assert(rc == -1);
+    model_config_free(&cfg);
+}
+
 /* --- A1 Cycle 11: generation_config.json --------------------------------- */
 
 static void test_generation_config(void) {
@@ -847,6 +886,7 @@ int main(void) {
     test_eos_tokens();
     test_nested_text_config_eos();
     test_generation_config();
+    test_float_overflow();
 
     printf("test_model_config: all passed\n");
     return 0;

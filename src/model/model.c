@@ -65,7 +65,8 @@ static int get_int_nonneg(yyjson_val *obj, const char *key, int *out, int def) {
     return 0;
 }
 
-/* Absent = def; accepts int or real via yyjson_is_num; wrong type = -1. */
+/* Absent = def; accepts int or real via yyjson_is_num; wrong type = -1.
+   Rejects values that overflow float (|v| > FLT_MAX -> Inf on cast). */
 static int get_f32(yyjson_val *obj, const char *key, float *out, float def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
     if (!v) {
@@ -74,7 +75,10 @@ static int get_f32(yyjson_val *obj, const char *key, float *out, float def) {
     }
     if (!yyjson_is_num(v))
         return -1;
-    *out = (float)yyjson_get_num(v);
+    float f = (float)yyjson_get_num(v);
+    if (!isfinite(f))
+        return -1;
+    *out = f;
     return 0;
 }
 
@@ -148,6 +152,8 @@ static int apply_hidden_act_string(model_config_t *cfg, yyjson_val *cfg_obj) {
         cfg->hidden_act = HIDDEN_ACT_SILU;
     else if (strcmp(s, "gelu_pytorch_tanh") == 0)
         cfg->hidden_act = HIDDEN_ACT_GELU_APPROX;
+    else
+        log_warn("unrecognized hidden_act '%s', keeping family default", s);
     return 0;
 }
 
@@ -193,6 +199,7 @@ model_family_t model_family_from_type(const char *model_type) {
         return MODEL_LLAMA;
     if (strcmp(model_type, "mistral") == 0)
         return MODEL_MISTRAL;
+    /* Prefix match: lfm2_vl, lfm2_audio etc. all map to MODEL_LFM2. */
     if (strncmp(model_type, "lfm2", 4) == 0)
         return MODEL_LFM2;
     if (strcmp(model_type, "nemotron_h") == 0)
@@ -355,7 +362,10 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
             if (ne) {
                 if (!yyjson_is_num(ne))
                     return -1;
-                cfg->rms_norm_eps = (float)yyjson_get_num(ne);
+                float eps = (float)yyjson_get_num(ne);
+                if (!isfinite(eps))
+                    return -1;
+                cfg->rms_norm_eps = eps;
             }
         }
         if (get_int_nonneg(cfg_obj, "conv_dim", &cfg->lfm_conv_dim,
@@ -404,8 +414,12 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         cfg->query_pre_attn_scalar = cfg->head_dim;
         if (yyjson_obj_get(cfg_obj, "rms_norm_eps") == NULL) {
             yyjson_val *lne = yyjson_obj_get(cfg_obj, "layer_norm_epsilon");
-            if (lne && yyjson_is_num(lne))
-                cfg->rms_norm_eps = (float)yyjson_get_num(lne);
+            if (lne && yyjson_is_num(lne)) {
+                float eps = (float)yyjson_get_num(lne);
+                if (!isfinite(eps))
+                    return -1;
+                cfg->rms_norm_eps = eps;
+            }
         }
         if (get_int_nonneg(cfg_obj, "mamba_num_heads", &cfg->mamba_num_heads,
                            cfg->mamba_num_heads) ||
@@ -422,6 +436,7 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
             get_int_nonneg(cfg_obj, "chunk_size", &cfg->mamba_chunk_size,
                            cfg->mamba_chunk_size))
             return -1;
+        /* time_step_limit: no isfinite guard - INFINITY is a valid max. */
         {
             yyjson_val *tsl = yyjson_obj_get(cfg_obj, "time_step_limit");
             if (tsl && !yyjson_is_arr(tsl))
@@ -490,8 +505,12 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
             if (lne) {
                 if (!yyjson_is_num(lne) && !yyjson_is_null(lne))
                     return -1;
-                if (yyjson_is_num(lne))
-                    cfg->layer_norm_eps = (float)yyjson_get_num(lne);
+                if (yyjson_is_num(lne)) {
+                    float eps = (float)yyjson_get_num(lne);
+                    if (!isfinite(eps))
+                        return -1;
+                    cfg->layer_norm_eps = eps;
+                }
             }
         }
         {
@@ -542,6 +561,9 @@ static int parse_generation_config(model_config_t *cfg, const char *model_dir) {
         if (t >= 0.0f && t <= 2.0f) {
             cfg->has_gen_temperature = true;
             cfg->gen_temperature     = t;
+        } else {
+            log_warn("generation_config: dropping temperature=%g (out of [0,2])",
+                     yyjson_get_num(v));
         }
     }
     if ((v = yyjson_obj_get(root, "top_p")) && yyjson_is_num(v)) {
@@ -549,6 +571,9 @@ static int parse_generation_config(model_config_t *cfg, const char *model_dir) {
         if (p > 0.0f && p <= 1.0f) {
             cfg->has_gen_top_p = true;
             cfg->gen_top_p     = p;
+        } else {
+            log_warn("generation_config: dropping top_p=%g (out of (0,1])",
+                     yyjson_get_num(v));
         }
     }
     if ((v = yyjson_obj_get(root, "top_k")) && yyjson_is_int(v)) {
@@ -556,6 +581,9 @@ static int parse_generation_config(model_config_t *cfg, const char *model_dir) {
         if (k > 0 && k <= 1000) {
             cfg->has_gen_top_k = true;
             cfg->gen_top_k     = (int)k;
+        } else {
+            log_warn("generation_config: dropping top_k=%lld (out of [1,1000])",
+                     (long long)k);
         }
     }
 
@@ -824,7 +852,9 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
                        &cfg->hidden_size_per_layer_input, 0))
         goto fail;
 
-    /* tie_word_embeddings: root then cfg_obj override */
+    /* tie_word_embeddings: cfg_obj wins over root. Net precedence is
+       cfg_obj > root > family default, matching HF multimodal convention
+       where root carries the field but text_config is authoritative. */
     if (get_bool(root, "tie_word_embeddings", &cfg->tie_word_embeddings,
                  false))
         goto fail;

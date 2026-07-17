@@ -70,8 +70,8 @@ typedef struct {
     float  rope_low_freq_factor;
     float  rope_high_freq_factor;
     int    rope_original_max_position_embeddings;
-    bool   rope_proportional;
-    float  rope_proportional_factor;
+    bool   rope_proportional;        /* gemma4: rope_parameters.full_attention.rope_type == "proportional" */
+    float  rope_proportional_factor; /* gemma4: rope_parameters.full_attention.factor */
     float  partial_rotary_factor;
     float  partial_rotary_factor_global;
 
@@ -167,7 +167,8 @@ model_family_t model_family_from_type(const char *model_type);
 
 /* Global-attention layer predicate. Priority: explicit layer_types map (OOB
  * returns true), then !has_sliding_window (all global), then pattern modulo.
- * NULL cfg or OOB with explicit map returns true (safe default). */
+ * NULL cfg or OOB with explicit map returns true (safe default).
+ * Total for any int layer: modulo path wraps; no bounds check needed. */
 bool model_layer_is_global(const model_config_t *cfg, int layer);
 
 /* Load model config from a directory (reads config.json + generation_config.json).
