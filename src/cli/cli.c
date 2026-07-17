@@ -52,12 +52,6 @@ static cli_cmd_t parse_serve(int argc, char **argv, cli_args_t *out) {
                 return cli_errorf(out, "%s requires a value", flag);
             if (parse_int(v, 0, 65535, &out->serve.port) != 0)
                 return cli_errorf(out, "invalid port '%s'", v);
-        } else if (strcmp(flag, "--threads") == 0) {
-            const char *v = flag_value(argc, argv, &i);
-            if (!v)
-                return cli_errorf(out, "%s requires a value", flag);
-            if (parse_int(v, 1, 1024, &out->serve.threads) != 0)
-                return cli_errorf(out, "invalid thread count '%s'", v);
         } else {
             return cli_errorf(out, "serve: unknown option '%s'", flag);
         }

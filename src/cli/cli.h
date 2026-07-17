@@ -22,7 +22,6 @@ typedef struct {
         const char *model;   /* NULL = start without a model */
         const char *host;    /* default 127.0.0.1 */
         int         port;    /* default 8080; 0 = ephemeral */
-        int         threads; /* 0 = default */
     } serve;
 
     struct {

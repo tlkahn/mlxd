@@ -57,19 +57,16 @@ static void test_serve_defaults(void) {
     assert(a.serve.model == NULL);
     assert(strcmp(a.serve.host, "127.0.0.1") == 0);
     assert(a.serve.port == 8080);
-    assert(a.serve.threads == 0);
 }
 
 static void test_serve_flags(void) {
     const char *argv[] = {"mlxd", "serve", "--model", "/m/dir",
-                          "--host", "0.0.0.0", "--port", "9000",
-                          "--threads", "4"};
-    cli_args_t a = parse(10, argv);
+                          "--host", "0.0.0.0", "--port", "9000"};
+    cli_args_t a = parse(8, argv);
     assert(a.cmd == CLI_SERVE);
     assert(strcmp(a.serve.model, "/m/dir") == 0);
     assert(strcmp(a.serve.host, "0.0.0.0") == 0);
     assert(a.serve.port == 9000);
-    assert(a.serve.threads == 4);
 }
 
 static void test_serve_missing_value(void) {
@@ -93,10 +90,11 @@ static void test_serve_bad_port(void) {
     assert(a.cmd == CLI_ERROR);
 }
 
-static void test_serve_bad_threads(void) {
-    const char *argv[] = {"mlxd", "serve", "--threads", "0"};
+static void test_serve_threads_rejected(void) {
+    const char *argv[] = {"mlxd", "serve", "--threads", "4"};
     cli_args_t a = parse(4, argv);
     assert(a.cmd == CLI_ERROR);
+    assert(strstr(a.err, "--threads") != NULL);
 }
 
 static void test_serve_unknown_flag(void) {
@@ -217,7 +215,7 @@ int main(void) {
     test_serve_flags();
     test_serve_missing_value();
     test_serve_bad_port();
-    test_serve_bad_threads();
+    test_serve_threads_rejected();
     test_serve_unknown_flag();
     test_run_defaults();
     test_run_full();
