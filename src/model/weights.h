@@ -21,11 +21,17 @@ typedef struct {
     weight_kind_t kind;
 } weight_expected_t;
 
+/* Typed extra-tensor entry; NULL-suffix-terminated array. */
 typedef struct {
     const char   *suffix;
     weight_kind_t kind;
 } weight_extra_t;
 
+/* Per-family descriptor for the expected-tensor emitter.
+   Emission order: embed_tokens, then per layer (matmuls, biases if
+   attention_bias, norms, qk-norms if has_qk_norm), global norm,
+   lm_head unless tie_word_embeddings, extras last (global scope).
+   embed_tokens / norm / lm_head globals are family-agnostic by design. */
 typedef struct {
     model_family_t     family;
     const char *const *layer_matmuls;

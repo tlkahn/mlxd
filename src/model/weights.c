@@ -2,6 +2,7 @@
 #include "core/log.h"
 #include "mlxbridge/mlxbridge.h"
 
+#include <assert.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -275,6 +276,10 @@ int weights_expected_names_from_desc(const weights_family_desc_t *desc,
                                      const model_config_t *cfg,
                                      weight_expected_t *out, int capacity) {
     if (!desc || !cfg) return -1;
+
+    assert(!cfg->has_qk_norm || (desc->layer_qk_norms && desc->layer_qk_norms[0]));
+    assert(!cfg->attention_bias || !desc->layer_biases ||
+           desc->layer_biases[0]);
 
     int pos = 0;
     char buf[256];

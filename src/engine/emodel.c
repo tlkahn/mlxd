@@ -48,8 +48,6 @@ int engine_model_check_supported(const model_config_t *cfg,
     }
 
 #undef REJECT
-
-    return 0;
 }
 
 int engine_model_load(engine_model_t *em, const char *model_dir,
