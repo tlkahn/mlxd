@@ -16,30 +16,36 @@ int engine_model_check_supported(const model_config_t *cfg,
     } \
 } while (0)
 
-    REJECT(cfg->family != MODEL_QWEN3,
-           "unsupported model family (only qwen3-dense supported)");
-    REJECT(cfg->attention_bias,
-           "attention_bias not supported");
-    REJECT(cfg->has_sliding_window,
-           "sliding window attention not supported");
-    REJECT(cfg->num_experts > 0,
-           "MoE models not supported");
-    REJECT(cfg->has_hybrid_layers,
-           "hybrid layer architectures not supported");
-    REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
-           "only SiLU activation supported");
-    REJECT(cfg->norm_has_offset,
-           "norm_has_offset not supported");
-    REJECT(cfg->scale_embeddings,
-           "scale_embeddings not supported");
-    REJECT(cfg->has_pre_ff_norm,
-           "pre-feedforward norm not supported");
-    REJECT(cfg->rope_scaling_type != NULL,
-           "RoPE scaling not supported");
-    REJECT(cfg->partial_rotary_factor != 1.0f,
-           "partial rotary embedding not supported");
-    REJECT(cfg->attn_output_gate,
-           "attention output gate not supported");
+    switch (cfg->family) {
+    case MODEL_QWEN3:
+        REJECT(cfg->attention_bias,
+               "attention_bias not supported");
+        REJECT(cfg->has_sliding_window,
+               "sliding window attention not supported");
+        REJECT(cfg->num_experts > 0,
+               "MoE models not supported");
+        REJECT(cfg->has_hybrid_layers,
+               "hybrid layer architectures not supported");
+        REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
+               "only SiLU activation supported");
+        REJECT(cfg->norm_has_offset,
+               "norm_has_offset not supported");
+        REJECT(cfg->scale_embeddings,
+               "scale_embeddings not supported");
+        REJECT(cfg->has_pre_ff_norm,
+               "pre-feedforward norm not supported");
+        REJECT(cfg->rope_scaling_type != NULL,
+               "RoPE scaling not supported");
+        REJECT(cfg->partial_rotary_factor != 1.0f,
+               "partial rotary embedding not supported");
+        REJECT(cfg->attn_output_gate,
+               "attention output gate not supported");
+        return 0;
+
+    default:
+        REJECT(true,
+               "unsupported model family (only qwen3-dense supported)");
+    }
 
 #undef REJECT
 
