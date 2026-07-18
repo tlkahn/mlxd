@@ -115,8 +115,8 @@ int gen_request_start(const gen_request_start_params_t *p, const char **err) {
 
     if (p->chat) {
         n_ids = gen_build_chat_prompt(p->ctx->tokenizer, p->ctx->chat_template,
-                                      p->messages_json, p->tools_json, NULL,
-                                      &ids, err);
+                                      p->messages_json, p->tools_json,
+                                      p->extra_json, &ids, err);
     } else {
         n_ids = gen_build_completion_prompt(p->ctx->tokenizer, p->prompt, &ids, err);
     }
