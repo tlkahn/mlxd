@@ -244,6 +244,56 @@ static void test_run_flags_before_prompt(void) {
     assert(strcmp(opts.prompt, "hello") == 0);
 }
 
+/* --- B4 cycle 2: --raw flag ----------------------------------------------- */
+
+static void test_run_raw_flag(void) {
+    char *argv[] = {"mlxd", "run", "m", "p", "--raw"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(opts.raw);
+}
+
+static void test_run_raw_default_false(void) {
+    char *argv[] = {"mlxd", "run", "m", "hello"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(4, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(!opts.raw);
+}
+
+/* --- B4 cycle 3: --token-ids flag ----------------------------------------- */
+
+static void test_run_token_ids_flag(void) {
+    char *argv[] = {"mlxd", "run", "m", "p", "--token-ids"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(opts.token_ids);
+}
+
+static void test_run_token_ids_default_false(void) {
+    char *argv[] = {"mlxd", "run", "m", "hello"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(4, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(!opts.token_ids);
+}
+
+static void test_run_raw_and_token_ids_together(void) {
+    char *argv[] = {"mlxd", "run", "m", "p", "--raw", "--token-ids"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(6, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(opts.raw);
+    assert(opts.token_ids);
+}
+
 /* --- Review fix: extra positionals ---------------------------------------- */
 
 static void test_pull_extra_positional(void) {
@@ -448,6 +498,15 @@ int main(void) {
     test_run_unknown_flag();
     test_run_defaults();
     test_run_flags_before_prompt();
+
+    /* B4 cycle 2: --raw flag */
+    test_run_raw_flag();
+    test_run_raw_default_false();
+
+    /* B4 cycle 3: --token-ids flag */
+    test_run_token_ids_flag();
+    test_run_token_ids_default_false();
+    test_run_raw_and_token_ids_together();
 
     /* review fix: extra positionals */
     test_pull_extra_positional();
