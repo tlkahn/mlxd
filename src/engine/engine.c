@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "engine/engine_internal.h"
 #include "engine/emodel.h"
 #include "engine/kvcache.h"
 #include "mlxbridge/mlxbridge.h"
@@ -159,22 +160,32 @@ static void stream_finish_cancelled(stream_t *s) {
     if (cb) cb(ctx);
 }
 
+/* Push ERROR(+kind) + DONE/STOP, or FINISH_CANCELLED if push fails under shutdown. */
+static void generate_fail(engine_t *eng, stream_t *s,
+                          const char *msg, gen_err_kind_t kind) {
+    bool ok = stream_push_error_kind(s, msg, kind);
+    if (ok)
+        ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
+    if (!ok && atomic_load(&eng->shutdown))
+        stream_finish_cancelled(s);
+}
+
 /* ---- Load-state helpers -------------------------------------------------- */
 
 load_state_t engine_load_state(const engine_t *eng) {
     return (load_state_t)atomic_load(&eng->load_state);
 }
 
-int engine_load_error(const engine_t *eng, char *buf, size_t n) {
+int engine_load_error(engine_t *eng, char *buf, size_t n) {
     if (!buf || n == 0) return -1;
-    pthread_mutex_lock((pthread_mutex_t *)&eng->load_mtx);
+    pthread_mutex_lock(&eng->load_mtx);
     size_t len = strlen(eng->load_error);
     if (len + 1 > n) {
-        pthread_mutex_unlock((pthread_mutex_t *)&eng->load_mtx);
+        pthread_mutex_unlock(&eng->load_mtx);
         return -1;
     }
     memcpy(buf, eng->load_error, len + 1);
-    pthread_mutex_unlock((pthread_mutex_t *)&eng->load_mtx);
+    pthread_mutex_unlock(&eng->load_mtx);
     return 0;
 }
 
@@ -292,22 +303,6 @@ static bool token_is_eos(const model_config_t *cfg, int32_t id) {
     return false;
 }
 
-/* Greedy argmax over last-axis of logits. logits: [1, vocab] (or [1,1,vocab]).
- * Exposed (non-static) so GPU tests can call it directly. */
-int greedy_next_id(mlx_array logits, mlx_stream s, int32_t *id_out) {
-    mlx_array tok = mlx_array_new();
-    if (!MLXB_CHECK(mlx_argmax_axis(&tok, logits, -1, false, s))) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    if (mlxbridge_item_int32(id_out, tok) != 0) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    mlx_array_free(tok);
-    return 0;
-}
-
 /* Lazy form: returns argmax array without materializing. Caller owns *tok_out. */
 static int greedy_next_token_lazy(mlx_array logits, mlx_stream s,
                                   mlx_array *tok_out) {
@@ -317,6 +312,22 @@ static int greedy_next_token_lazy(mlx_array logits, mlx_stream s,
         return -1;
     }
     *tok_out = tok;
+    return 0;
+}
+
+/* Greedy argmax over last-axis of logits. logits: [1, vocab] (or [1,1,vocab]).
+ * Exposed (non-static) so GPU tests can call it directly. */
+int greedy_next_id(mlx_array logits, mlx_stream s, int32_t *id_out) {
+    mlx_array tok = mlx_array_new();
+    if (greedy_next_token_lazy(logits, s, &tok) != 0) {
+        mlx_array_free(tok);
+        return -1;
+    }
+    if (mlxbridge_item_int32(id_out, tok) != 0) {
+        mlx_array_free(tok);
+        return -1;
+    }
+    mlx_array_free(tok);
     return 0;
 }
 
@@ -387,11 +398,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         snprintf(msg, sizeof(msg),
                  "prompt token count %d exceeds max_position_embeddings %d",
                  n, em->cfg.max_position_embeddings);
-        bool ok = stream_push_error_kind(s, msg, GEN_ERR_CONTEXT_LENGTH);
-        if (ok)
-            ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-        if (!ok && atomic_load(&eng->shutdown))
-            stream_finish_cancelled(s);
+        generate_fail(eng, s, msg, GEN_ERR_CONTEXT_LENGTH);
         goto out_free;
     }
 
@@ -403,11 +410,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
 
     if (kvcache_init(&kv, em->cfg.num_hidden_layers,
                      em->cfg.num_key_value_heads, em->cfg.head_dim) != 0) {
-        bool ok = stream_push_error(s, "kvcache init failed");
-        if (ok)
-            ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-        if (!ok && atomic_load(&eng->shutdown))
-            stream_finish_cancelled(s);
+        generate_fail(eng, s, "kvcache init failed", GEN_ERR_INTERNAL);
         goto out_free;
     }
     kv_inited = true;
@@ -427,11 +430,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         mlx_array ids = make_ids_array(token_ids + pos, chunk_len);
         if (model_forward(em, ids, &kv, false, NULL) != 0) {
             mlx_array_free(ids);
-            bool ok = stream_push_error(s, "prefill forward failed");
-            if (ok)
-                ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-            if (!ok && atomic_load(&eng->shutdown))
-                stream_finish_cancelled(s);
+            generate_fail(eng, s, "prefill forward failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
         mlx_array_free(ids);
@@ -444,11 +443,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         mlx_array last = make_ids_array(&token_ids[n - 1], 1);
         if (model_forward(em, last, &kv, true, &pending_logits) != 0) {
             mlx_array_free(last);
-            bool ok = stream_push_error(s, "seed forward failed");
-            if (ok)
-                ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-            if (!ok && atomic_load(&eng->shutdown))
-                stream_finish_cancelled(s);
+            generate_fail(eng, s, "seed forward failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
         mlx_array_free(last);
@@ -466,11 +461,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         mlx_array lazy_token = mlx_array_new();
         if (greedy_next_token_lazy(pending_logits, em->stream, &lazy_token) != 0) {
             mlx_array_free(lazy_token);
-            bool ok = stream_push_error(s, "greedy sample failed");
-            if (ok)
-                ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-            if (!ok && atomic_load(&eng->shutdown))
-                stream_finish_cancelled(s);
+            generate_fail(eng, s, "greedy sample failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
         mlx_array_free(pending_logits);
@@ -487,11 +478,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
-                bool ok = stream_push_error(s, "token reshape failed");
-                if (ok)
-                    ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-                if (!ok && atomic_load(&eng->shutdown))
-                    stream_finish_cancelled(s);
+                generate_fail(eng, s, "token reshape failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
             have_step = true;
@@ -499,11 +486,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
-                bool ok = stream_push_error(s, "decode forward failed");
-                if (ok)
-                    ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-                if (!ok && atomic_load(&eng->shutdown))
-                    stream_finish_cancelled(s);
+                generate_fail(eng, s, "decode forward failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
             have_next = true;
@@ -516,11 +499,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
-                bool ok = stream_push_error(s, "async_eval failed");
-                if (ok)
-                    ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-                if (!ok && atomic_load(&eng->shutdown))
-                    stream_finish_cancelled(s);
+                generate_fail(eng, s, "async_eval failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
         } else {
@@ -529,11 +508,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
-                bool ok = stream_push_error(s, "async_eval failed");
-                if (ok)
-                    ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-                if (!ok && atomic_load(&eng->shutdown))
-                    stream_finish_cancelled(s);
+                generate_fail(eng, s, "async_eval failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
         }
@@ -544,11 +519,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
             if (have_step) mlx_array_free(step_ids);
             if (have_next) mlx_array_free(next_logits);
             mlx_array_free(lazy_token);
-            bool ok = stream_push_error(s, "token materialize failed");
-            if (ok)
-                ok = stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP});
-            if (!ok && atomic_load(&eng->shutdown))
-                stream_finish_cancelled(s);
+            generate_fail(eng, s, "token materialize failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
         mlx_array_free(lazy_token);

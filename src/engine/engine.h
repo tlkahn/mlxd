@@ -113,8 +113,9 @@ void engine_signal_shutdown(engine_t *eng);
 
 /* Load-state observers. Safe from any thread. */
 load_state_t engine_load_state(const engine_t *eng);
-/* Copies under load_mtx into buf; returns 0, or -1 if buf too small / NULL. */
-int          engine_load_error(const engine_t *eng, char *buf, size_t n);
+/* Copies under load_mtx into buf; returns 0, or -1 if buf too small / NULL.
+   Non-const: takes load_mtx (synchronized reader). */
+int          engine_load_error(engine_t *eng, char *buf, size_t n);
 
 /* Compat shim: true once CMD_LOAD has reached LOAD_OK. */
 static inline bool engine_loaded(const engine_t *eng) {

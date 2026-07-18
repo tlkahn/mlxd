@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "engine/engine_internal.h"
 #include "mlxbridge/mlxbridge.h"
 
 #include <assert.h>
@@ -13,9 +14,6 @@
 #endif
 
 #define FIXTURES MLXD_FIXTURES_DIR
-
-/* greedy_next_id is implemented in engine.c (non-static for GPU tests). */
-int greedy_next_id(mlx_array logits, mlx_stream s, int32_t *id_out);
 
 static load_state_t poll_load_terminal(engine_t *eng, int timeout_ms) {
     for (int i = 0; i < timeout_ms; i++) {
