@@ -506,6 +506,13 @@ static void test_run_sampling_bad_values(void) {
     memset(err, 0, sizeof(err));
     assert(cli_parse_run(5, argv4, &opts, err, sizeof(err)) == -1);
     assert(strstr(err, "seed") != NULL);
+
+    /* seed negative */
+    char *argv5[] = {"mlxd", "run", "m", "--seed", "-5"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv5, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "seed") != NULL);
 }
 
 int main(void) {

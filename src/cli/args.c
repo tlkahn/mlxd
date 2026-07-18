@@ -132,6 +132,7 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
                 return -1;
             }
             char *end;
+            errno = 0;
             long v = strtol(argv[++i], &end, 10);
             if (*end != '\0' || errno == ERANGE) {
                 snprintf(err, errsz, "invalid top-k '%s'", argv[i]);
@@ -166,9 +167,14 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
                 return -1;
             }
             char *end;
+            errno = 0;
             long v = strtol(argv[++i], &end, 10);
             if (*end != '\0' || errno == ERANGE) {
                 snprintf(err, errsz, "invalid seed '%s'", argv[i]);
+                return -1;
+            }
+            if (v < 0 || v > INT_MAX) {
+                snprintf(err, errsz, "seed must be >= 0");
                 return -1;
             }
             out->seed = (int)v;
