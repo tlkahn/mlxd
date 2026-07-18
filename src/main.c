@@ -45,6 +45,7 @@ static void usage(void) {
             "  --stream                flush each token to stdout as generated\n"
             "  --raw                   force raw completion even when a chat template is present\n"
             "  --token-ids             print generated token IDs instead of text\n"
+            "  --no-think              disable thinking mode (sets enable_thinking=false in the chat template)\n"
             "  --                      end of options; remaining args are positional\n"
             "\n"
             "pull options:\n"
@@ -367,7 +368,7 @@ static int cmd_run(int argc, char **argv) {
     char err[256] = {0};
     if (cli_parse_run(argc, argv, &opts, err, sizeof(err)) != 0) {
         fprintf(stderr, "mlxd run: %s\n", err);
-        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--top-p F] [--top-k N] [--min-p F] [--seed N] [--stream] [--raw] [--token-ids] [--]\n");
+        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--top-p F] [--top-k N] [--min-p F] [--seed N] [--stream] [--raw] [--token-ids] [--no-think] [--]\n");
         return 1;
     }
 
@@ -413,7 +414,8 @@ static int cmd_run(int argc, char **argv) {
             goto cleanup;
         }
         n_ids = gen_build_chat_prompt(tok, chat_template, messages_json, NULL,
-                                      NULL, &ids, &build_err);
+                                      opts.no_think ? "{\"enable_thinking\":false}" : NULL,
+                                      &ids, &build_err);
         free(messages_json);
     } else {
         n_ids = gen_build_completion_prompt(tok, prompt_buf, &ids, &build_err);
