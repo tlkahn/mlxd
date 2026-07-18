@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -355,6 +356,73 @@ static void test_encode_codepoint_rejects(void) {
     assert(uc_encode_codepoint(UINT32_MAX, buf) == 0);
 }
 
+/* --- uc_normalize_nfc -------------------------------------------------------- */
+
+static void test_normalize_nfc_compose(void) {
+    size_t n;
+    /* e + combining acute -> precomposed e-acute */
+    char *r = uc_normalize_nfc("e\xcc\x81", 3, &n);
+    assert(r != NULL);
+    assert(n == 2);
+    assert(memcmp(r, "\xc3\xa9", 2) == 0);
+    assert(r[n] == '\0');
+    free(r);
+
+    /* ASCII unchanged */
+    r = uc_normalize_nfc("hello", 5, &n);
+    assert(r != NULL);
+    assert(n == 5);
+    assert(memcmp(r, "hello", 5) == 0);
+    free(r);
+
+    /* Already-composed is idempotent */
+    r = uc_normalize_nfc("\xc3\xa9", 2, &n);
+    assert(r != NULL);
+    assert(n == 2);
+    assert(memcmp(r, "\xc3\xa9", 2) == 0);
+    free(r);
+}
+
+static void test_normalize_empty(void) {
+    size_t n = 999;
+    char *r = uc_normalize_nfc("", 0, &n);
+    assert(r != NULL);
+    assert(n == 0);
+    free(r);
+}
+
+static void test_normalize_invalid_utf8(void) {
+    size_t n;
+    char *r = uc_normalize_nfc("\xff\xfe", 2, &n);
+    assert(r == NULL);
+}
+
+/* --- uc_normalize_nfkc ------------------------------------------------------- */
+
+static void test_normalize_nfkc_compat(void) {
+    size_t n;
+    /* U+FB01 LATIN SMALL LIGATURE FI -> "fi" under NFKC */
+    char *r = uc_normalize_nfkc("\xef\xac\x81", 3, &n);
+    assert(r != NULL);
+    assert(n == 2);
+    assert(memcmp(r, "fi", 2) == 0);
+    free(r);
+
+    /* NFC leaves the ligature intact */
+    r = uc_normalize_nfc("\xef\xac\x81", 3, &n);
+    assert(r != NULL);
+    assert(n == 3);
+    assert(memcmp(r, "\xef\xac\x81", 3) == 0);
+    free(r);
+
+    /* NFKC also does canonical composition */
+    r = uc_normalize_nfkc("e\xcc\x81", 3, &n);
+    assert(r != NULL);
+    assert(n == 2);
+    assert(memcmp(r, "\xc3\xa9", 2) == 0);
+    free(r);
+}
+
 /* --- uc_build_bytes_to_unicode ---------------------------------------------- */
 
 static void test_bytes_to_unicode_identity(void) {
@@ -420,6 +488,10 @@ int main(void) {
     test_uc_is_whitespace_cp_exact();
     test_encode_codepoint();
     test_encode_codepoint_rejects();
+    test_normalize_nfc_compose();
+    test_normalize_empty();
+    test_normalize_invalid_utf8();
+    test_normalize_nfkc_compat();
     test_bytes_to_unicode_identity();
     test_bytes_to_unicode_offset();
     test_bytes_to_unicode_roundtrip();

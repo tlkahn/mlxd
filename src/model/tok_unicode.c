@@ -3,7 +3,49 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include <CoreFoundation/CoreFoundation.h>
+
+static char *cf_normalize(const char *input, size_t len,
+                          CFStringNormalizationForm form, size_t *out_len) {
+    if (len == 0) {
+        *out_len = 0;
+        return calloc(1, 1);
+    }
+    CFStringRef src = CFStringCreateWithBytes(
+        kCFAllocatorDefault, (const UInt8 *)input, (CFIndex)len,
+        kCFStringEncodingUTF8, false);
+    if (!src) return NULL;
+
+    CFMutableStringRef mut = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, src);
+    CFRelease(src);
+    if (!mut) return NULL;
+
+    CFStringNormalize(mut, form);
+
+    CFIndex needed = 0;
+    CFStringGetBytes(mut, CFRangeMake(0, CFStringGetLength(mut)),
+                     kCFStringEncodingUTF8, 0, false, NULL, 0, &needed);
+    char *buf = malloc((size_t)needed + 1);
+    if (!buf) { CFRelease(mut); return NULL; }
+
+    CFStringGetBytes(mut, CFRangeMake(0, CFStringGetLength(mut)),
+                     kCFStringEncodingUTF8, 0, false, (UInt8 *)buf, needed, NULL);
+    buf[needed] = '\0';
+    CFRelease(mut);
+    *out_len = (size_t)needed;
+    return buf;
+}
+
+char *uc_normalize_nfc(const char *input, size_t len, size_t *out_len) {
+    return cf_normalize(input, len, kCFStringNormalizationFormC, out_len);
+}
+
+char *uc_normalize_nfkc(const char *input, size_t len, size_t *out_len) {
+    return cf_normalize(input, len, kCFStringNormalizationFormKC, out_len);
+}
 
 static bool in_ranges(uint32_t cp, const uc_range *r, size_t n) {
     size_t lo = 0, hi = n;

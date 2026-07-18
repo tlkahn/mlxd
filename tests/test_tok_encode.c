@@ -233,6 +233,76 @@ static void test_encoder_scratch_footprint(void) {
     tokenizer_free(tok);
 }
 
+/* --- Encode applies NFC normalization -------------------------------------------- */
+
+static void test_encode_nfc_normalizes(void) {
+    /* Byte-level BPE with NFC normalizer. Vocab covers the byte-level encoded
+     * characters for both decomposed "e\xcc\x81" and precomposed "\xc3\xa9".
+     * With NFC, both inputs must produce identical ids. */
+    const char *json =
+        "{\"normalizer\":{\"type\":\"NFC\"},"
+        "\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"type\":\"BPE\","
+        "\"vocab\":{\"e\":0,\"\xc3\x83\":1,\"\xc2\xa9\":2,\"\xc3\x83\xc2\xa9\":3},"
+        "\"merges\":[[\"\xc3\x83\",\"\xc2\xa9\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    int32_t *ids_decomp, *ids_precomp;
+    int n1 = tokenizer_encode_alloc(tok, "e\xcc\x81", 3, false, &ids_decomp);
+    int n2 = tokenizer_encode_alloc(tok, "\xc3\xa9", 2, false, &ids_precomp);
+    assert(n1 > 0 && n2 > 0);
+    assert(n1 == n2);
+    for (int i = 0; i < n1; i++) assert(ids_decomp[i] == ids_precomp[i]);
+    free(ids_decomp);
+    free(ids_precomp);
+    tokenizer_free(tok);
+}
+
+/* --- Encode applies NFKC normalization ------------------------------------------ */
+
+static void test_encode_nfkc_normalizes(void) {
+    /* U+FB01 (fi ligature) decomposes to "fi" under NFKC. Both inputs must
+     * produce identical ids. */
+    const char *json =
+        "{\"normalizer\":{\"type\":\"NFKC\"},"
+        "\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"type\":\"BPE\","
+        "\"vocab\":{\"f\":0,\"i\":1,\"fi\":2},"
+        "\"merges\":[[\"f\",\"i\"]]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    int32_t *ids_lig, *ids_plain;
+    int n1 = tokenizer_encode_alloc(tok, "\xef\xac\x81", 3, false, &ids_lig);
+    int n2 = tokenizer_encode_alloc(tok, "fi", 2, false, &ids_plain);
+    assert(n1 > 0 && n2 > 0);
+    assert(n1 == n2);
+    for (int i = 0; i < n1; i++) assert(ids_lig[i] == ids_plain[i]);
+    free(ids_lig);
+    free(ids_plain);
+    tokenizer_free(tok);
+}
+
+/* --- Invalid UTF-8 fallback: NFC tokenizer encodes raw when normalization fails - */
+
+static void test_encode_invalid_utf8_fallback(void) {
+    const char *json =
+        "{\"normalizer\":{\"type\":\"NFC\"},"
+        "\"pre_tokenizer\":{\"type\":\"ByteLevel\"},"
+        "\"model\":{\"type\":\"BPE\","
+        "\"vocab\":{\"a\":0,\"b\":1},"
+        "\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+
+    int32_t *ids;
+    int n = tokenizer_encode_alloc(tok, "a\xff" "b", 3, false, &ids);
+    assert(n >= 0);
+    free(ids);
+    tokenizer_free(tok);
+}
+
 /* --- Capstone: real GPT-2 vocab -------------------------------------------------- */
 
 static void test_gpt2_fixture_encode(void) {
@@ -278,6 +348,9 @@ int main(void) {
     test_wordpiece_custom_prefix();
     test_sentencepiece_encode();
     test_encoder_scratch_footprint();
+    test_encode_nfc_normalizes();
+    test_encode_nfkc_normalizes();
+    test_encode_invalid_utf8_fallback();
     test_gpt2_fixture_encode();
     printf("test_tok_encode: all tests passed\n");
     return 0;

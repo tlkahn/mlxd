@@ -2,6 +2,7 @@
 #define MLXD_TOK_UNICODE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct {
@@ -38,5 +39,14 @@ typedef struct {
 } uc_bytes_unicode_t;
 
 void uc_build_bytes_to_unicode(uc_bytes_unicode_t *t);
+
+/* NFC/NFKC normalization via CoreFoundation. Returns a malloc'd NUL-terminated
+ * UTF-8 string; caller frees. Byte length (excl. NUL) written to *out_len.
+ * Returns NULL on invalid UTF-8 (caller should fall back to raw input).
+ * Empty input returns non-NULL "" with *out_len = 0.
+ * Unlike other tok_unicode functions these allocate: normalization can change
+ * byte length unboundedly. */
+char *uc_normalize_nfc(const char *input, size_t len, size_t *out_len);
+char *uc_normalize_nfkc(const char *input, size_t len, size_t *out_len);
 
 #endif

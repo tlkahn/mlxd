@@ -17,6 +17,12 @@
  * larger is a malformed or hostile file, not a bigger model. */
 #define MLXD_TOK_MAX_ID ((1u << 22) - 1)
 
+typedef enum {
+    NORM_NONE = 0,
+    NORM_NFC,
+    NORM_NFKC,
+} norm_form_t;
+
 struct tokenizer {
     tokenizer_type_t   type;
     yyjson_doc        *doc; /* owns all borrowed vocab/merge strings */
@@ -37,6 +43,7 @@ struct tokenizer {
     int32_t            bos_id;
     int32_t            eos_id;
     int32_t            unk_id; /* vocab id of "<unk>", -1 if absent */
+    norm_form_t        norm_form;
     /* Normalizer prepends the SentencePiece dummy prefix U+2581. Set by the
      * loader; not yet consumed by the encode path (future stage). */
     bool               add_dummy_prefix;
@@ -179,15 +186,15 @@ static bool has_byte_level(yyjson_val *pt, bool *err) {
 }
 
 /* Recognize the normalizer(s): Prepend of U+2581 sets add_dummy_prefix;
- * Sequence recurses. Replace and BertNormalizer are accepted silently -
- * Replace's space-to-U+2581 rewrite is implemented implicitly by the
- * SentencePiece encoder, and BertNormalizer is the Zig-parity stance for
- * every BERT load. Known-but-unimplemented text normalizers (NFC, NFKC,
- * Lowercase, StripAccents) and unknown types load with a warning - a missed
- * normalizer degrades encode fidelity, it does not corrupt ids. Structural
- * malformation (a Sequence whose normalizers member is present but not an
- * array) sets *err and the caller must fail the load, mirroring
- * has_byte_level. */
+ * NFC/NFKC set norm_form (applied in encode); Sequence recurses. Replace
+ * and BertNormalizer are accepted silently - Replace's space-to-U+2581
+ * rewrite is implemented implicitly by the SentencePiece encoder, and
+ * BertNormalizer is the Zig-parity stance for every BERT load.
+ * Known-but-unimplemented text normalizers (Lowercase, StripAccents) and
+ * unknown types load with a warning - a missed normalizer degrades encode
+ * fidelity, it does not corrupt ids. Structural malformation (a Sequence
+ * whose normalizers member is present but not an array) sets *err and the
+ * caller must fail the load, mirroring has_byte_level. */
 static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok, bool *err) {
     if (!yyjson_is_obj(norm)) return;
     yyjson_val *t = yyjson_obj_get(norm, "type");
@@ -220,8 +227,15 @@ static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok, bool *err) {
     }
     if (strcmp(type, "Replace") == 0 || strcmp(type, "BertNormalizer") == 0)
         return;
-    if (strcmp(type, "NFC") == 0 || strcmp(type, "NFKC") == 0 ||
-        strcmp(type, "Lowercase") == 0 || strcmp(type, "StripAccents") == 0) {
+    if (strcmp(type, "NFC") == 0) {
+        tok->norm_form = NORM_NFC;
+        return;
+    }
+    if (strcmp(type, "NFKC") == 0) {
+        tok->norm_form = NORM_NFKC;
+        return;
+    }
+    if (strcmp(type, "Lowercase") == 0 || strcmp(type, "StripAccents") == 0) {
         log_warn("tokenizer: normalizer \"%s\" not implemented; encode may differ from HF",
                  type);
         return;
@@ -1405,10 +1419,8 @@ typedef struct {
     size_t      next;
 } special_site;
 
-int tokenizer_encode_alloc(const tokenizer_t *tok, const char *text, size_t len,
-                           bool parse_special, int32_t **out_ids) {
-    if (!tok || !out_ids || (!text && len > 0)) return -1;
-    if (len > (size_t)INT32_MAX) return -1;
+static int encode_alloc_impl(const tokenizer_t *tok, const char *text, size_t len,
+                             bool parse_special, int32_t **out_ids) {
     *out_ids = NULL;
 
     encode_scratch s;
@@ -1491,6 +1503,25 @@ fail:
     encode_scratch_free(&s);
     free(out.ids);
     return -1;
+}
+
+int tokenizer_encode_alloc(const tokenizer_t *tok, const char *text, size_t len,
+                           bool parse_special, int32_t **out_ids) {
+    if (!tok || !out_ids || (!text && len > 0)) return -1;
+    if (len > (size_t)INT32_MAX) return -1;
+
+    if (tok->norm_form != NORM_NONE && len > 0) {
+        size_t norm_len;
+        char  *norm = (tok->norm_form == NORM_NFC)
+                          ? uc_normalize_nfc(text, len, &norm_len)
+                          : uc_normalize_nfkc(text, len, &norm_len);
+        if (norm) {
+            int ret = encode_alloc_impl(tok, norm, norm_len, parse_special, out_ids);
+            free(norm);
+            return ret;
+        }
+    }
+    return encode_alloc_impl(tok, text, len, parse_special, out_ids);
 }
 
 int tokenizer_encode(const tokenizer_t *tok, const char *text, int32_t *out_ids, int max_ids) {
