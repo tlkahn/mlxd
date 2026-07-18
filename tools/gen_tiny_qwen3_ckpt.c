@@ -80,10 +80,10 @@ static void insert_layer(mlx_map_string_to_array m, mlx_array *key,
 
 static void insert_layer_norm(mlx_map_string_to_array m,
                                int layer, const char *suffix,
-                               mlx_stream s) {
+                               int size, mlx_stream s) {
     char name[256];
     snprintf(name, sizeof(name), "model.layers.%d.%s", layer, suffix);
-    insert(m, name, ones_bf16((int[]){HIDDEN}, 1, s));
+    insert(m, name, ones_bf16((int[]){size}, 1, s));
 }
 
 static int cmp_str_ptr(const void *a, const void *b) {
@@ -209,8 +209,8 @@ static mlx_map_string_to_array build_tensors(mlx_stream s) {
         insert_layer(m, &key, L, "self_attn.o_proj.weight",
                      (int[]){HIDDEN, HEADS * HEAD_DIM}, 2, s);
 
-        insert_layer_norm(m, L, "self_attn.q_norm.weight", s);
-        insert_layer_norm(m, L, "self_attn.k_norm.weight", s);
+        insert_layer_norm(m, L, "self_attn.q_norm.weight", HEAD_DIM, s);
+        insert_layer_norm(m, L, "self_attn.k_norm.weight", HEAD_DIM, s);
 
         insert_layer(m, &key, L, "mlp.gate_proj.weight",
                      (int[]){INTER, HIDDEN}, 2, s);
@@ -219,8 +219,8 @@ static mlx_map_string_to_array build_tensors(mlx_stream s) {
         insert_layer(m, &key, L, "mlp.down_proj.weight",
                      (int[]){HIDDEN, INTER}, 2, s);
 
-        insert_layer_norm(m, L, "input_layernorm.weight", s);
-        insert_layer_norm(m, L, "post_attention_layernorm.weight", s);
+        insert_layer_norm(m, L, "input_layernorm.weight", HIDDEN, s);
+        insert_layer_norm(m, L, "post_attention_layernorm.weight", HIDDEN, s);
     }
 
     mlx_array_free(key);
