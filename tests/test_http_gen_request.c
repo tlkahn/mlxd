@@ -718,6 +718,11 @@ static void test_normal_sse_completes(void) {
 }
 
 /* === B3.7: GEN_ERR_CONTEXT_LENGTH -> HTTP 400 + code ===================== */
+/* Maps error_kind only via fault injection: unload forces CHUNK_ERROR, then
+   fi_stream_next rewrites kind to GEN_ERR_CONTEXT_LENGTH. This validates the
+   HTTP finisher map (400 / invalid_request_error / context_length_exceeded),
+   not engine production of the kind. Engine production is covered by
+   test_oversized_prompt in test_engine_gpu.c. */
 
 static void test_context_length_nonstream_400(void) {
     mock_reset();
