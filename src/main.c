@@ -143,10 +143,20 @@ static const char *resolve_model_dir(const char *model_arg, char **resolved_out)
     return *resolved_out;
 }
 
-static int wait_engine_load(engine_t *eng, int timeout_ms) {
-    for (int i = 0; i < timeout_ms && !engine_loaded(eng); i++)
-        usleep(1000);
-    return engine_loaded(eng) ? 0 : -1;
+static bool run_cancel_pred(void *ud) {
+    (void)ud;
+    return atomic_load(&g_run_cancel) > 0;
+}
+
+/* Print load failure distinguishing timeout vs LOAD_FAILED. */
+static void print_load_failure(const char *prefix, engine_t *eng) {
+    char err[256] = {0};
+    if (engine_load_state(eng) == LOAD_FAILED &&
+        engine_load_error(eng, err, sizeof(err)) == 0 && err[0] != '\0') {
+        fprintf(stderr, "%s: load failed: %s\n", prefix, err);
+    } else {
+        fprintf(stderr, "%s: timed out waiting for model load\n", prefix);
+    }
 }
 
 /* --- Subcommands ---------------------------------------------------------- */
@@ -297,8 +307,8 @@ static int cmd_serve(int argc, char **argv) {
     }
     engine_post(&eng, cmd);
 
-    if (wait_engine_load(&eng, 30000) != 0) {
-        fprintf(stderr, "mlxd serve: timed out waiting for model load\n");
+    if (engine_wait_load(&eng, 30000) != 0) {
+        print_load_failure("mlxd serve", &eng);
         engine_destroy(&eng);
         tokenizer_free(tok);
         free(chat_template);
@@ -440,16 +450,13 @@ static int cmd_run(int argc, char **argv) {
     }
     engine_post(&eng, load_cmd);
 
-    for (int i = 0; i < 30000 && !engine_loaded(&eng); i++) {
+    if (engine_wait_load_until(&eng, 30000, run_cancel_pred, NULL) != 0) {
         if (atomic_load(&g_run_cancel) > 0) {
             reason = FINISH_CANCELLED;
             rc = 0;
             goto cleanup;
         }
-        usleep(1000);
-    }
-    if (!engine_loaded(&eng)) {
-        fprintf(stderr, "mlxd run: timed out waiting for model load\n");
+        print_load_failure("mlxd run", &eng);
         goto cleanup;
     }
 

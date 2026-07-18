@@ -2,10 +2,18 @@
 #define MLXD_ENGINE_H
 
 #include "core/types.h"
+#include "engine/emodel.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stddef.h>
+
+/* Exact strcmp sentinel for the CPU-only echo path. No I/O, no mlx. */
+#define MLXD_STUB_MODEL_PATH "stub"
+
+/* Prefill chunk size (tokens). Cancel/shutdown polled between chunks. */
+#define MLXD_PREFILL_CHUNK 512
 
 /* --- Stream (per-request token channel) ----------------------------------- */
 
@@ -66,6 +74,15 @@ typedef struct engine_cmd {
     struct engine_cmd *next;
 } engine_cmd_t;
 
+/* --- Load state ----------------------------------------------------------- */
+
+typedef enum {
+    LOAD_IDLE = 0,
+    LOAD_IN_PROGRESS,
+    LOAD_OK,
+    LOAD_FAILED,
+} load_state_t;
+
 /* --- Engine --------------------------------------------------------------- */
 
 typedef struct {
@@ -75,8 +92,11 @@ typedef struct {
     engine_cmd_t   *mailbox_head;
     engine_cmd_t   *mailbox_tail;
     atomic_bool     shutdown;
-    atomic_bool     loaded;
-    char           *loaded_model;
+    atomic_int      load_state;
+    pthread_mutex_t load_mtx;
+    char            load_error[256];
+    engine_model_t  model;        /* valid when LOAD_OK and !model.stub */
+    char           *loaded_model; /* retained path string for logging / unload */
     stream_t       *inflight;
 } engine_t;
 
@@ -91,10 +111,25 @@ void engine_destroy(engine_t *eng);
    libuv callbacks. engine_destroy still required for full cleanup. */
 void engine_signal_shutdown(engine_t *eng);
 
-/* True once the engine has processed a CMD_LOAD. Safe from any thread. */
+/* Load-state observers. Safe from any thread. */
+load_state_t engine_load_state(const engine_t *eng);
+/* Copies under load_mtx into buf; returns 0, or -1 if buf too small / NULL. */
+int          engine_load_error(const engine_t *eng, char *buf, size_t n);
+
+/* Compat shim: true once CMD_LOAD has reached LOAD_OK. */
 static inline bool engine_loaded(const engine_t *eng) {
-    return atomic_load(&eng->loaded);
+    return engine_load_state(eng) == LOAD_OK;
 }
+
+/* Poll until LOAD_OK / LOAD_FAILED / timeout.
+   Returns 0 on LOAD_OK, -1 on LOAD_FAILED or timeout.
+   On LOAD_FAILED, engine_load_error is populated. */
+int engine_wait_load(engine_t *eng, int timeout_ms);
+
+/* Like engine_wait_load, but also aborts early when cancel(ud) returns true
+   (return -1). Used by cmd_run for Ctrl-C during load. cancel may be NULL. */
+int engine_wait_load_until(engine_t *eng, int timeout_ms,
+                           bool (*cancel)(void *), void *ud);
 
 /* Post cmd for async processing. Concurrent posts during destroy are
    safe (re-checked under lock). After destroy returns, posts are

@@ -117,6 +117,7 @@ static char *fi_http_build_response(int status, const char *content_type,
 static char *fi_gen_sse_chunk(const gen_sse_chunk_params_t *p);
 static int   fi_detok_feed(detok_t *d, int32_t id, char **out, size_t *out_len);
 static int   fi_detok_flush(detok_t *d, char **out, size_t *out_len);
+static bool  fi_stream_next(stream_t *s, chunk_t *out, int timeout_ms);
 
 /* === Macro redirects + private copy of gen_request.c ====================== */
 
@@ -129,6 +130,7 @@ static int   fi_detok_flush(detok_t *d, char **out, size_t *out_len);
 #define gen_sse_chunk       fi_gen_sse_chunk
 #define detok_feed          fi_detok_feed
 #define detok_flush         fi_detok_flush
+#define stream_next         fi_stream_next
 #define gen_request_start   fi_gen_request_start
 #include "http/gen_request.c"
 #undef calloc
@@ -140,6 +142,7 @@ static int   fi_detok_flush(detok_t *d, char **out, size_t *out_len);
 #undef gen_sse_chunk
 #undef detok_feed
 #undef detok_flush
+#undef stream_next
 #undef gen_request_start
 
 /* === Fault-injection controls ============================================= */
@@ -155,6 +158,7 @@ static int  fi_fail_gen_sse_chunk_skip;
 static bool fi_fail_gen_sse_chunk;
 static bool fi_fail_detok_feed;
 static bool fi_fail_detok_flush;
+static bool fi_force_context_length;
 
 static void fi_reset(void) {
     fi_calloc_skip = 0;
@@ -168,6 +172,7 @@ static void fi_reset(void) {
     fi_fail_gen_sse_chunk = false;
     fi_fail_detok_feed = false;
     fi_fail_detok_flush = false;
+    fi_force_context_length = false;
 }
 
 /* === Fault-injection wrapper implementations ============================== */
@@ -235,6 +240,17 @@ static int fi_detok_flush(detok_t *d, char **out, size_t *out_len) {
     return detok_flush(d, out, out_len);
 }
 
+static bool fi_stream_next(stream_t *s, chunk_t *out, int timeout_ms) {
+    bool ok = stream_next(s, out, timeout_ms);
+    if (ok && fi_force_context_length && out->tag == CHUNK_ERROR) {
+        out->error_kind = GEN_ERR_CONTEXT_LENGTH;
+        free(out->error);
+        out->error = strdup(
+            "prompt token count 513 exceeds max_position_embeddings 512");
+    }
+    return ok;
+}
+
 /* === Test fixture ========================================================= */
 
 #define TRIVIAL_TMPL "{{ messages[0].content }}"
@@ -254,7 +270,7 @@ static test_fixture_t fixture_up(void) {
     engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
     assert(cmd);
     cmd->tag = CMD_LOAD;
-    cmd->load.model_path = strdup("gpt2");
+    cmd->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&f.eng, cmd);
     usleep(10000);
 
@@ -701,6 +717,73 @@ static void test_normal_sse_completes(void) {
     fixture_down(&f);
 }
 
+/* === B3.7: GEN_ERR_CONTEXT_LENGTH -> HTTP 400 + code ===================== */
+
+static void test_context_length_nonstream_400(void) {
+    mock_reset();
+    fi_reset();
+    test_fixture_t f = fixture_up();
+
+    /* Unload so engine emits CHUNK_ERROR; FI rewrites kind to CONTEXT_LENGTH. */
+    engine_cmd_t *unload = calloc(1, sizeof(*unload));
+    assert(unload);
+    unload->tag = CMD_UNLOAD;
+    engine_post(&f.eng, unload);
+    usleep(10000);
+
+    fi_force_context_length = true;
+
+    int rc = start_chat_nonstream(&f);
+    assert(rc == 0);
+
+    uv_run(&f.loop, UV_RUN_DEFAULT);
+
+    bool found = false;
+    for (int i = 0; i < mock_write_count; i++) {
+        if (!mock_writes[i].buf) continue;
+        if (strstr(mock_writes[i].buf, "HTTP/1.1 400") &&
+            strstr(mock_writes[i].buf, "context_length_exceeded")) {
+            found = true;
+            /* also check type */
+            assert(strstr(mock_writes[i].buf, "invalid_request_error"));
+        }
+    }
+    assert(found);
+
+    fixture_down(&f);
+}
+
+static void test_context_length_sse_code(void) {
+    mock_reset();
+    fi_reset();
+    test_fixture_t f = fixture_up();
+
+    engine_cmd_t *unload = calloc(1, sizeof(*unload));
+    assert(unload);
+    unload->tag = CMD_UNLOAD;
+    engine_post(&f.eng, unload);
+    usleep(10000);
+
+    fi_force_context_length = true;
+
+    int rc = start_chat_sse(&f, NULL);
+    assert(rc == 0);
+
+    uv_run(&f.loop, UV_RUN_DEFAULT);
+
+    bool found = false;
+    for (int i = 0; i < mock_write_count; i++) {
+        if (!mock_writes[i].buf) continue;
+        if (strstr(mock_writes[i].buf, "context_length_exceeded") &&
+            strstr(mock_writes[i].buf, "invalid_request_error")) {
+            found = true;
+        }
+    }
+    assert(found);
+
+    fixture_down(&f);
+}
+
 /* === T14: normal non-stream completes cleanly ============================= */
 
 static void test_normal_nonstream_completes(void) {
@@ -743,6 +826,8 @@ int main(void) {
     test_gr_calloc_oom();
     test_normal_sse_completes();
     test_normal_nonstream_completes();
+    test_context_length_nonstream_400();
+    test_context_length_sse_code();
     printf("test_http_gen_request: all passed\n");
     return 0;
 }

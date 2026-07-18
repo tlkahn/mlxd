@@ -12,6 +12,7 @@ typedef struct {
     model_config_t cfg;
     weights_t w;
     mlx_stream stream;
+    bool stub; /* true when loaded via MLXD_STUB_MODEL_PATH; no GPU state */
 } engine_model_t;
 
 int engine_model_check_supported(const model_config_t *cfg,

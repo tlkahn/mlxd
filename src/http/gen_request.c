@@ -259,21 +259,39 @@ static void emit_sse_chunk(gen_request_t *gr, const char *text, size_t len) {
     }
 }
 
-static void finish_error(gen_request_t *gr, char *msg);
+static void finish_error(gen_request_t *gr, char *msg, gen_err_kind_t kind);
+
+/* Map gen_err_kind_t -> (status, type, code). */
+static void error_kind_map(gen_err_kind_t kind, int *status,
+                           const char **type, const char **code) {
+    switch (kind) {
+    case GEN_ERR_CONTEXT_LENGTH:
+        *status = 400;
+        *type = "invalid_request_error";
+        *code = "context_length_exceeded";
+        break;
+    case GEN_ERR_INTERNAL:
+    default:
+        *status = 500;
+        *type = "server_error";
+        *code = NULL;
+        break;
+    }
+}
 
 static void finish_response(gen_request_t *gr, finish_reason_t reason) {
     char *flush_out = NULL;
     size_t flush_len = 0;
     if (detok_flush(gr->detok, &flush_out, &flush_len) != 0) {
         free(flush_out);
-        finish_error(gr, strdup("detokenizer flush error"));
+        finish_error(gr, strdup("detokenizer flush error"), GEN_ERR_INTERNAL);
         return;
     }
 
     if (!gr->sse && flush_out && flush_len > 0) {
         if (accum_append(gr, flush_out, flush_len) != 0) {
             free(flush_out);
-            finish_error(gr, strdup("out of memory"));
+            finish_error(gr, strdup("out of memory"), GEN_ERR_INTERNAL);
             return;
         }
     }
@@ -381,13 +399,18 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
     try_teardown(gr);
 }
 
-static void finish_error(gen_request_t *gr, char *msg) {
+static void finish_error(gen_request_t *gr, char *msg, gen_err_kind_t kind) {
+    int status = 500;
+    const char *type = "server_error";
+    const char *code = NULL;
+    error_kind_map(kind, &status, &type, &code);
+
     conn_t *conn = detach_conn(gr);
     if (conn) {
         if (gr->suppress_writes) {
             http_conn_close(conn);
         } else if (gr->sse) {
-            char *sse_err = gen_sse_error(msg);
+            char *sse_err = gen_sse_error_ex(msg, type, code);
             if (sse_err)
                 http_conn_write(conn, sse_err, strlen(sse_err), false);
             char *done = sse_done();
@@ -399,13 +422,13 @@ static void finish_error(gen_request_t *gr, char *msg) {
             yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
             if (doc) {
                 yyjson_mut_val *root = error_envelope_serialize(
-                    msg, "server_error", NULL, doc);
+                    msg, type, code, doc);
                 yyjson_mut_doc_set_root(doc, root);
                 char *json = yyjson_mut_write(doc, 0, NULL);
                 yyjson_mut_doc_free(doc);
                 if (json) {
                     size_t wire_len;
-                    char *wire = http_build_response(500, "application/json", json,
+                    char *wire = http_build_response(status, "application/json", json,
                                                      strlen(json), false, &wire_len);
                     free(json);
                     if (wire)
@@ -438,7 +461,7 @@ static void gen_on_async(uv_async_t *handle) {
             if (detok_feed(gr->detok, c.token.id, &piece, &piece_len) != 0) {
                 free(piece);
                 stream_cancel(gr->stream);
-                finish_error(gr, strdup("detokenizer error"));
+                finish_error(gr, strdup("detokenizer error"), GEN_ERR_INTERNAL);
                 return;
             }
             if (gr->sse) {
@@ -454,7 +477,7 @@ static void gen_on_async(uv_async_t *handle) {
                     accum_append(gr, piece, piece_len) != 0) {
                     free(piece);
                     stream_cancel(gr->stream);
-                    finish_error(gr, strdup("out of memory"));
+                    finish_error(gr, strdup("out of memory"), GEN_ERR_INTERNAL);
                     return;
                 }
             }
@@ -462,7 +485,7 @@ static void gen_on_async(uv_async_t *handle) {
             break;
         }
         case CHUNK_ERROR:
-            finish_error(gr, c.error);
+            finish_error(gr, c.error, c.error_kind);
             return;
         case CHUNK_DONE:
             finish_response(gr, c.done);

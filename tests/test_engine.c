@@ -297,6 +297,7 @@ static void test_generate_no_model(void) {
     assert(stream_next(s, &out, -1));
     assert(out.tag == CHUNK_ERROR);
     assert(strcmp(out.error, "model not loaded") == 0);
+    assert(out.error_kind == GEN_ERR_INTERNAL);
     free(out.error);
 
     assert(stream_next(s, &out, -1));
@@ -309,6 +310,101 @@ static void test_generate_no_model(void) {
     engine_destroy(&eng);
 }
 
+/* ---- B3.1: load-state enum ---------------------------------------------- */
+
+static load_state_t poll_load_terminal(engine_t *eng, int timeout_ms) {
+    for (int i = 0; i < timeout_ms; i++) {
+        load_state_t st = engine_load_state(eng);
+        if (st == LOAD_OK || st == LOAD_FAILED)
+            return st;
+        struct timespec ws = {.tv_sec = 0, .tv_nsec = 1000000};
+        nanosleep(&ws, NULL);
+    }
+    return engine_load_state(eng);
+}
+
+static void test_load_state_stub_ok(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    assert(engine_load_state(&eng) == LOAD_IDLE);
+    assert(!engine_loaded(&eng));
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
+    engine_post(&eng, load);
+
+    load_state_t st = poll_load_terminal(&eng, 2000);
+    assert(st == LOAD_OK);
+    assert(engine_loaded(&eng));
+
+    char err[256];
+    assert(engine_load_error(&eng, err, sizeof(err)) == 0);
+    assert(err[0] == '\0');
+
+    engine_destroy(&eng);
+    assert(engine_load_state(&eng) == LOAD_IDLE);
+}
+
+/* ---- B3.3: missing dir fails (CPU, no GPU) ------------------------------ */
+
+static void test_load_missing_dir_fails(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup("/no/such/dir");
+    engine_post(&eng, load);
+
+    load_state_t st = poll_load_terminal(&eng, 5000);
+    assert(st == LOAD_FAILED);
+    assert(!engine_loaded(&eng));
+
+    char err[256];
+    assert(engine_load_error(&eng, err, sizeof(err)) == 0);
+    assert(err[0] != '\0');
+    assert(strstr(err, "/no/such/dir") != NULL);
+
+    engine_destroy(&eng);
+}
+
+/* ---- B3.4: poller fail-fast --------------------------------------------- */
+
+static void test_wait_load_fail_fast(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup("/no/such/dir");
+    engine_post(&eng, load);
+
+    struct timespec t0;
+    clock_gettime(CLOCK_REALTIME, &t0);
+    int rc = engine_wait_load(&eng, 30000);
+    long elapsed = ms_elapsed(&t0);
+
+    assert(rc != 0);
+    assert(elapsed < 1000);
+    assert(engine_load_state(&eng) == LOAD_FAILED);
+
+    char err[256];
+    assert(engine_load_error(&eng, err, sizeof(err)) == 0);
+    assert(err[0] != '\0');
+    assert(strstr(err, "/no/such/dir") != NULL);
+
+    engine_destroy(&eng);
+}
+
+/* ---- B3.5: error_kind zero-init default --------------------------------- */
+
+static void test_error_kind_default_internal(void) {
+    chunk_t c = {.tag = CHUNK_ERROR, .error = strdup("x")};
+    assert(c.error_kind == GEN_ERR_INTERNAL);
+    free(c.error);
+}
+
 /* ---- Stage 10: CMD_LOAD then generate echoes tokens --------------------- */
 
 static void test_load_then_generate(void) {
@@ -317,7 +413,7 @@ static void test_load_then_generate(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     stream_t *s = stream_create(16);
@@ -355,7 +451,7 @@ static void test_generate_truncation(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     stream_t *s = stream_create(16);
@@ -393,7 +489,7 @@ static void test_cancel_mid_generate(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     stream_t *s = stream_create(1);
@@ -491,7 +587,7 @@ static void test_shutdown_cancels_inflight(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     stream_t *s = stream_create(4);
@@ -570,7 +666,7 @@ static void test_mpsc_stress(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     atomic_int completed = 0;
@@ -595,7 +691,7 @@ static void test_shutdown_ordering(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     stream_t *streams[10];
@@ -815,7 +911,7 @@ static void test_post_during_destroy_stress(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     struct destroy_stress_ctx ctxs[DESTROY_STRESS_PRODUCERS];
@@ -843,7 +939,7 @@ static void test_user_cancel_emits_terminal(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     stream_t *s = stream_create(1);
@@ -893,7 +989,7 @@ static void test_signal_shutdown_flushes_queued(void) {
 
     engine_cmd_t *load = calloc(1, sizeof(*load));
     load->tag = CMD_LOAD;
-    load->load.model_path = strdup("/fake");
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
     engine_post(&eng, load);
 
     stream_t *s_a = stream_create(1);
@@ -980,6 +1076,10 @@ int main(void) {
     test_spsc_stress();
     test_engine_start_stop();
     test_generate_no_model();
+    test_load_state_stub_ok();
+    test_load_missing_dir_fails();
+    test_wait_load_fail_fast();
+    test_error_kind_default_internal();
     test_load_then_generate();
     test_generate_truncation();
     test_cancel_mid_generate();

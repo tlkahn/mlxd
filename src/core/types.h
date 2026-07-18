@@ -151,8 +151,14 @@ typedef enum {
     CHUNK_ERROR,
 } chunk_tag_t;
 
+typedef enum {
+    GEN_ERR_INTERNAL = 0,
+    GEN_ERR_CONTEXT_LENGTH,
+} gen_err_kind_t;
+
 typedef struct {
-    chunk_tag_t tag;
+    chunk_tag_t    tag;
+    gen_err_kind_t error_kind; /* meaningful only when tag == CHUNK_ERROR; zero-init = INTERNAL */
     union {
         struct {
             int32_t id;
