@@ -3,6 +3,8 @@
         "lm_head.biases": "model-00001-of-00002.safetensors",
         "lm_head.scales": "model-00002-of-00002.safetensors",
         "lm_head.weight": "model-00001-of-00002.safetensors",
+        "model.embed_tokens.biases": "model-00002-of-00002.safetensors",
+        "model.embed_tokens.scales": "model-00001-of-00002.safetensors",
         "model.embed_tokens.weight": "model-00002-of-00002.safetensors",
         "model.layers.0.input_layernorm.weight": "model-00001-of-00002.safetensors",
         "model.layers.0.mlp.down_proj.biases": "model-00002-of-00002.safetensors",

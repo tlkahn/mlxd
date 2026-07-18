@@ -80,10 +80,10 @@ static void insert_layer(mlx_map_string_to_array m, mlx_array *key,
 
 static void insert_layer_norm(mlx_map_string_to_array m,
                                int layer, const char *suffix,
-                               mlx_stream s) {
+                               int size, mlx_stream s) {
     char name[256];
     snprintf(name, sizeof(name), "model.layers.%d.%s", layer, suffix);
-    insert(m, name, ones_bf16((int[]){HIDDEN}, 1, s));
+    insert(m, name, ones_bf16((int[]){size}, 1, s));
 }
 
 static int cmp_str_ptr(const void *a, const void *b) {
@@ -95,7 +95,7 @@ static void append_newline(const char *path) {
     if (f) { fputc('\n', f); fclose(f); }
 }
 
-static void write_config_json(const char *dir, bool quantized) {
+static void write_config_json_ex(const char *dir, bool quantized, bool tied) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -111,7 +111,7 @@ static void write_config_json(const char *dir, bool quantized) {
     yyjson_mut_obj_add_int(doc, root, "max_position_embeddings", 512);
     yyjson_mut_obj_add_real(doc, root, "rms_norm_eps", 1e-6);
     yyjson_mut_obj_add_real(doc, root, "rope_theta", 1000000.0);
-    yyjson_mut_obj_add_bool(doc, root, "tie_word_embeddings", false);
+    yyjson_mut_obj_add_bool(doc, root, "tie_word_embeddings", tied);
 
     if (quantized) {
         yyjson_mut_val *qcfg = yyjson_mut_obj(doc);
@@ -130,6 +130,10 @@ static void write_config_json(const char *dir, bool quantized) {
     }
     append_newline(path);
     yyjson_mut_doc_free(doc);
+}
+
+static void write_config_json(const char *dir, bool quantized) {
+    write_config_json_ex(dir, quantized, false);
 }
 
 static void quantize_and_replace(mlx_map_string_to_array m,
@@ -209,8 +213,8 @@ static mlx_map_string_to_array build_tensors(mlx_stream s) {
         insert_layer(m, &key, L, "self_attn.o_proj.weight",
                      (int[]){HIDDEN, HEADS * HEAD_DIM}, 2, s);
 
-        insert_layer_norm(m, L, "self_attn.q_norm.weight", s);
-        insert_layer_norm(m, L, "self_attn.k_norm.weight", s);
+        insert_layer_norm(m, L, "self_attn.q_norm.weight", HEAD_DIM, s);
+        insert_layer_norm(m, L, "self_attn.k_norm.weight", HEAD_DIM, s);
 
         insert_layer(m, &key, L, "mlp.gate_proj.weight",
                      (int[]){INTER, HIDDEN}, 2, s);
@@ -219,8 +223,8 @@ static mlx_map_string_to_array build_tensors(mlx_stream s) {
         insert_layer(m, &key, L, "mlp.down_proj.weight",
                      (int[]){HIDDEN, INTER}, 2, s);
 
-        insert_layer_norm(m, L, "input_layernorm.weight", s);
-        insert_layer_norm(m, L, "post_attention_layernorm.weight", s);
+        insert_layer_norm(m, L, "input_layernorm.weight", HIDDEN, s);
+        insert_layer_norm(m, L, "post_attention_layernorm.weight", HIDDEN, s);
     }
 
     mlx_array_free(key);
@@ -242,6 +246,7 @@ static void save_sharded(const char *dir, mlx_map_string_to_array m,
                           mlx_stream s) {
     mkdir(dir, 0755);
 
+    quantize_and_replace(m, "model.embed_tokens.weight", s);
     for (int L = 0; L < LAYERS; L++) {
         for (const char **sp = matmul_suffixes; *sp; sp++) {
             char name[256];
@@ -326,6 +331,45 @@ static void save_sharded(const char *dir, mlx_map_string_to_array m,
     printf("  wrote %s\n", dir);
 }
 
+static void save_tied(const char *dir, mlx_map_string_to_array src,
+                      mlx_stream s) {
+    mkdir(dir, 0755);
+
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+
+    mlx_map_string_to_array_iterator it =
+        mlx_map_string_to_array_iterator_new(src);
+    const char *key = NULL;
+    mlx_array val = mlx_array_new();
+    while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 &&
+           key != NULL) {
+        if (strncmp(key, "lm_head", 7) == 0) { key = NULL; continue; }
+        CHECK(mlx_map_string_to_array_insert(m, key, val));
+        key = NULL;
+    }
+    mlx_array_free(val);
+    mlx_map_string_to_array_iterator_free(it);
+
+    quantize_and_replace(m, "model.embed_tokens.weight", s);
+    for (int L = 0; L < LAYERS; L++) {
+        for (const char **sp = matmul_suffixes; *sp; sp++) {
+            char name[256];
+            snprintf(name, sizeof(name), "model.layers.%d.%s", L, *sp);
+            quantize_and_replace(m, name, s);
+        }
+    }
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/model.safetensors", dir);
+    mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+    CHECK(mlx_save_safetensors(path, m, meta));
+    mlx_map_string_to_string_free(meta);
+    mlx_map_string_to_array_free(m);
+
+    write_config_json_ex(dir, true, true);
+    printf("  wrote %s\n", dir);
+}
+
 int main(void) {
     const char *fixtures_dir = getenv("MLXD_FIXTURES_DIR");
     if (!fixtures_dir) fixtures_dir = MLXD_FIXTURES_DIR;
@@ -333,16 +377,21 @@ int main(void) {
     mlx_stream cpu = mlx_default_cpu_stream_new();
     mlx_map_string_to_array tensors = build_tensors(cpu);
 
-    char dense_dir[512], sharded_dir[512];
+    char dense_dir[512], sharded_dir[512], tied_dir[512];
     snprintf(dense_dir, sizeof(dense_dir), "%s/tiny_qwen3", fixtures_dir);
     snprintf(sharded_dir, sizeof(sharded_dir), "%s/tiny_qwen3_sharded", fixtures_dir);
+    snprintf(tied_dir, sizeof(tied_dir), "%s/tiny_qwen3_tied", fixtures_dir);
 
     printf("gen_tiny_qwen3_ckpt:\n");
     save_dense(dense_dir, tensors);
 
     save_sharded(sharded_dir, tensors, cpu);
-
     mlx_map_string_to_array_free(tensors);
+
+    mlx_map_string_to_array tensors2 = build_tensors(cpu);
+    save_tied(tied_dir, tensors2, cpu);
+    mlx_map_string_to_array_free(tensors2);
+
     mlx_stream_free(cpu);
 
     printf("  done.\n");
