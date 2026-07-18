@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #define VOCAB 8
 
@@ -268,53 +269,103 @@ static void test_seeded_reproducibility(void) {
 static void test_logprob_computation(void) {
     mlx_stream s = mlxbridge_gpu_stream();
 
-    /* Use kLogits; temp=0.7. Greedy pick => idx 2 (3.5).
-     * Expected logprob = log(softmax(logits/0.7)[2]).
-     * Compute reference on host. */
-    const float temp = 0.7f;
-    float scaled[VOCAB];
-    for (int i = 0; i < VOCAB; i++)
-        scaled[i] = kLogits[i] / temp;
-    float maxs = scaled[0];
+    /* Reference logprob from RAW (pre-temperature) logits.
+     * log(softmax(kLogits)[2]) = kLogits[2] - logsumexp(kLogits). */
+    float maxr = kLogits[0];
     for (int i = 1; i < VOCAB; i++)
-        if (scaled[i] > maxs) maxs = scaled[i];
+        if (kLogits[i] > maxr) maxr = kLogits[i];
     double sum_exp = 0;
     for (int i = 0; i < VOCAB; i++)
-        sum_exp += exp((double)(scaled[i] - maxs));
-    double logsumexp = (double)maxs + log(sum_exp);
-    float expected_lp = (float)((double)scaled[2] - logsumexp);
-
-    sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
-    sp.temperature = temp;
-    sp.top_k = 1;
+        sum_exp += exp((double)(kLogits[i] - maxr));
+    double logsumexp = (double)maxr + log(sum_exp);
+    float expected_lp = (float)((double)kLogits[2] - logsumexp);
 
     mlx_array logits = logits_1xv(kLogits);
     mlx_array nokey = mlx_array_new();
-    mlx_array tok = mlx_array_new();
-    mlx_array logprob_arr = mlx_array_new();
 
-    assert(sampler_sample_lazy(logits, &sp, nokey, true, s, &tok, &logprob_arr) == 0);
+    /* Non-greedy path: temperature=0.7, top_k=1 forces idx 2 */
+    {
+        sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+        sp.temperature = 0.7f;
+        sp.top_k = 1;
 
-    int32_t id;
-    assert(mlxbridge_item_int32(&id, tok) == 0);
-    assert(id == 2);
+        mlx_array tok = mlx_array_new();
+        mlx_array logprob_arr = mlx_array_new();
+        assert(sampler_sample_lazy(logits, &sp, nokey, true, s, &tok, &logprob_arr) == 0);
 
-    float lp;
-    assert(mlxbridge_item_float32(&lp, logprob_arr) == 0);
-    assert(fabsf(lp - expected_lp) < 1e-4f);
+        int32_t id;
+        assert(mlxbridge_item_int32(&id, tok) == 0);
+        assert(id == 2);
+
+        float lp;
+        assert(mlxbridge_item_float32(&lp, logprob_arr) == 0);
+        assert(fabsf(lp - expected_lp) < 1e-4f);
+
+        mlx_array_free(logprob_arr);
+        mlx_array_free(tok);
+    }
+
+    /* Greedy path: temperature=0 */
+    {
+        sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+        sp.temperature = 0.0f;
+
+        mlx_array tok = mlx_array_new();
+        mlx_array logprob_arr = mlx_array_new();
+        assert(sampler_sample_lazy(logits, &sp, nokey, true, s, &tok, &logprob_arr) == 0);
+
+        int32_t id;
+        assert(mlxbridge_item_int32(&id, tok) == 0);
+        assert(id == 2);
+
+        float lp;
+        assert(mlxbridge_item_float32(&lp, logprob_arr) == 0);
+        assert(fabsf(lp - expected_lp) < 1e-4f);
+
+        mlx_array_free(logprob_arr);
+        mlx_array_free(tok);
+    }
 
     /* want_logprob=false: logprob_arr untouched */
-    mlx_array tok2 = mlx_array_new();
-    mlx_array logprob2 = mlx_array_new();
-    assert(sampler_sample_lazy(logits, &sp, nokey, false, s, &tok2, &logprob2) == 0);
-    /* logprob2 should remain the empty placeholder (no eval possible on it) */
+    {
+        sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+        sp.temperature = 0.7f;
+        sp.top_k = 1;
 
-    mlx_array_free(logprob2);
-    mlx_array_free(tok2);
-    mlx_array_free(logprob_arr);
-    mlx_array_free(tok);
+        mlx_array tok2 = mlx_array_new();
+        mlx_array logprob2 = mlx_array_new();
+        assert(sampler_sample_lazy(logits, &sp, nokey, false, s, &tok2, &logprob2) == 0);
+
+        mlx_array_free(logprob2);
+        mlx_array_free(tok2);
+    }
+
     mlx_array_free(nokey);
     mlx_array_free(logits);
+    mlx_stream_free(s);
+}
+
+/* ---- Cycle 2 fix: sampler_key_init contract ---- */
+
+static void test_key_init_contract(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+
+    /* seed < 0: unseeded, key_next yields empty subkey */
+    sampler_key_t k;
+    assert(sampler_key_init(&k, -1) == 0);
+    assert(!k.seeded);
+    mlx_array subkey = mlx_array_new();
+    assert(sampler_key_next(&k, &subkey, s) == 0);
+    sampler_key_free(&k);
+    mlx_array_free(subkey);
+
+    /* sampler_key_free on a zeroed struct is safe (double-free guard) */
+    sampler_key_t k2;
+    memset(&k2, 0, sizeof(k2));
+    k2.key = mlx_array_new();
+    k2.seeded = false;
+    sampler_key_free(&k2);
+
     mlx_stream_free(s);
 }
 
@@ -355,6 +406,37 @@ static void test_combined_filters(void) {
     }
 
     sampler_key_free(&key);
+
+    /* Second block: min_p = 0.35 actually restricts.
+     * temp=2: scaled = {0.05, -1.0, 1.75, 0.5, 0.0, 1.45, -0.5, 0.25}
+     * min_p threshold on temp-scaled: max(1.75) + log(0.35) ~= 0.70
+     * idx 3 (0.5) < 0.70 -> killed.  Survivors: {2 (1.75), 5 (1.45)} only. */
+    {
+        sampling_params_t sp2 = SAMPLING_PARAMS_DEFAULT;
+        sp2.temperature = 2.0f;
+        sp2.top_k = 4;
+        sp2.top_p = 0.9f;
+        sp2.min_p = 0.35f;
+        sp2.seed = 78;
+
+        sampler_key_t key2;
+        assert(sampler_key_init(&key2, sp2.seed) == 0);
+
+        for (int i = 0; i < 32; i++) {
+            mlx_array subkey = mlx_array_new();
+            assert(sampler_key_next(&key2, &subkey, s) == 0);
+            mlx_array tok = mlx_array_new();
+            assert(sampler_sample_lazy(logits, &sp2, subkey, false, s, &tok, NULL) == 0);
+            int32_t id;
+            assert(mlxbridge_item_int32(&id, tok) == 0);
+            assert(id == 2 || id == 5);
+            mlx_array_free(tok);
+            mlx_array_free(subkey);
+        }
+
+        sampler_key_free(&key2);
+    }
+
     mlx_array_free(logits);
     mlx_stream_free(s);
 }
@@ -367,6 +449,7 @@ int main(void) {
     test_min_p_filter();
     test_logprob_computation();
     test_seeded_reproducibility();
+    test_key_init_contract();
     test_combined_filters();
     printf("test_sampler_gpu: all tests passed\n");
     return 0;

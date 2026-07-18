@@ -1,5 +1,4 @@
 #include "engine/engine.h"
-#include "engine/engine_internal.h"
 #include "engine/emodel.h"
 #include "engine/kvcache.h"
 #include "engine/sampler.h"
@@ -306,34 +305,6 @@ static bool token_is_eos(const model_config_t *cfg, int32_t id) {
     return false;
 }
 
-/* Lazy form: returns argmax array without materializing. Caller owns *tok_out. */
-static int greedy_next_token_lazy(mlx_array logits, mlx_stream s,
-                                  mlx_array *tok_out) {
-    mlx_array tok = mlx_array_new();
-    if (!MLXB_CHECK(mlx_argmax_axis(&tok, logits, -1, false, s))) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    *tok_out = tok;
-    return 0;
-}
-
-/* Greedy argmax over last-axis of logits. logits: [1, vocab] (or [1,1,vocab]).
- * Exposed (non-static) so GPU tests can call it directly. */
-int greedy_next_id(mlx_array logits, mlx_stream s, int32_t *id_out) {
-    mlx_array tok = mlx_array_new();
-    if (greedy_next_token_lazy(logits, s, &tok) != 0) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    if (mlxbridge_item_int32(id_out, tok) != 0) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    mlx_array_free(tok);
-    return 0;
-}
-
 static mlx_array make_ids_array(const int32_t *ids, int n) {
     int shape[] = {1, n};
     return mlx_array_new_data(ids, shape, 2, MLX_INT32);
@@ -401,7 +372,10 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     bool kv_inited = false;
     mlx_array pending_logits = mlx_array_new();
     sampler_key_t skey;
-    sampler_key_init(&skey, sp->seed);
+    if (sampler_key_init(&skey, sp->seed) != 0) {
+        generate_fail(eng, s, "sampler key init failed", GEN_ERR_INTERNAL);
+        goto out_free;
+    }
 
     if (n > em->cfg.max_position_embeddings) {
         char msg[160];

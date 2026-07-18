@@ -1,6 +1,6 @@
 #include "engine/engine.h"
-#include "engine/engine_internal.h"
 #include "engine/emodel.h"
+#include "engine/sampler.h"
 #include "mlxbridge/mlxbridge.h"
 
 #include <assert.h>
@@ -100,32 +100,38 @@ static void test_oversized_prompt(void) {
 static void test_greedy_argmax(void) {
     mlx_stream s = mlxbridge_gpu_stream();
 
-    /* logits [1, 8] with unique max at index 5 */
     float data[8] = {0.1f, -1.0f, 0.5f, 0.2f, -0.3f, 2.5f, 1.0f, 0.0f};
     int shape[] = {1, 8};
-    mlx_array logits_f32 = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
-    mlx_array logits = mlx_array_new();
-    assert(MLXB_CHECK(mlx_astype(&logits, logits_f32, MLX_BFLOAT16, s)));
+    mlx_array logits = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
+    mlx_array nokey = mlx_array_new();
 
+    sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+    sp.temperature = 0.0f;
+
+    mlx_array tok = mlx_array_new();
+    assert(sampler_sample_lazy(logits, &sp, nokey, false, s, &tok, NULL) == 0);
     int32_t id = -1;
-    assert(greedy_next_id(logits, s, &id) == 0);
+    assert(mlxbridge_item_int32(&id, tok) == 0);
     assert(id == 5);
 
+    mlx_array_free(tok);
+    mlx_array_free(nokey);
     mlx_array_free(logits);
-    mlx_array_free(logits_f32);
 }
 
-/* ---- B3.9/B3.10: deterministic generate --------------------------------- */
+/* ---- Stream helpers ----------------------------------------------------- */
 
-static int collect_tokens(stream_t *s, int32_t *out_ids, int max_ids,
-                          finish_reason_t *reason_out) {
+static int collect_tokens_lp(stream_t *s, int32_t *out_ids, float *out_lps,
+                             int max_ids, finish_reason_t *reason_out) {
     int n = 0;
     chunk_t c;
     *reason_out = FINISH_STOP;
     while (stream_next(s, &c, 30000)) {
         if (c.tag == CHUNK_TOKEN) {
-            if (n < max_ids)
+            if (n < max_ids) {
                 out_ids[n] = c.token.id;
+                if (out_lps) out_lps[n] = c.token.logprob;
+            }
             n++;
         } else if (c.tag == CHUNK_DONE) {
             *reason_out = c.done;
@@ -138,6 +144,13 @@ static int collect_tokens(stream_t *s, int32_t *out_ids, int max_ids,
     }
     return n;
 }
+
+static int collect_tokens(stream_t *s, int32_t *out_ids, int max_ids,
+                          finish_reason_t *reason_out) {
+    return collect_tokens_lp(s, out_ids, NULL, max_ids, reason_out);
+}
+
+/* ---- B3.9/B3.10: deterministic generate --------------------------------- */
 
 static void test_generate_deterministic(void) {
     engine_t eng;
@@ -355,30 +368,6 @@ static void test_shutdown_mid_generate_real(void) {
 }
 
 /* ---- C2.11: engine logprob ---- */
-
-static int collect_tokens_lp(stream_t *s, int32_t *out_ids, float *out_lps,
-                             int max_ids, finish_reason_t *reason_out) {
-    int n = 0;
-    chunk_t c;
-    *reason_out = FINISH_STOP;
-    while (stream_next(s, &c, 30000)) {
-        if (c.tag == CHUNK_TOKEN) {
-            if (n < max_ids) {
-                out_ids[n] = c.token.id;
-                out_lps[n] = c.token.logprob;
-            }
-            n++;
-        } else if (c.tag == CHUNK_DONE) {
-            *reason_out = c.done;
-            break;
-        } else if (c.tag == CHUNK_ERROR) {
-            fprintf(stderr, "unexpected error: %s\n", c.error);
-            free(c.error);
-            return -1;
-        }
-    }
-    return n;
-}
 
 static void test_generate_logprobs(void) {
     engine_t eng;
@@ -627,6 +616,7 @@ static void test_generate_multi_eos(void) {
 
     /* Inject only the later id (kOracle[5] = 184): should stop at position 5 */
     eng.model->cfg.eos_token_ids[0] = (uint32_t)kOracle[5];
+    eng.model->cfg.eos_token_ids[1] = 0;
     eng.model->cfg.num_eos_tokens = 1;
     {
         stream_t *s = stream_create(32);

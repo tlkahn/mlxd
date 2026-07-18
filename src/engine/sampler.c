@@ -47,6 +47,8 @@ int sampler_key_init(sampler_key_t *k, int seed) {
     k->key = mlx_array_new();
     if (!MLXB_CHECK(mlx_random_key(&k->key, (uint64_t)seed))) {
         mlx_array_free(k->key);
+        k->key = mlx_array_new();
+        k->seeded = false;
         return -1;
     }
     k->seeded = true;
@@ -206,6 +208,22 @@ out:
     return mask_neg_inf(mask, logits, s, out);
 }
 
+/* Pre-temperature log-probs: log(softmax(logits)) from raw logits.
+ * Deliberate divergence from mlx-serve which scales first; matches mlx-lm. */
+static int compute_raw_log_probs(mlx_array logits, mlx_stream s, mlx_array *lp_out) {
+    mlx_array lse = mlx_array_new();
+    mlx_array lp = mlx_array_new();
+    if (!MLXB_CHECK(mlx_logsumexp_axis(&lse, logits, -1, true, s)) ||
+        !MLXB_CHECK(mlx_subtract(&lp, logits, lse, s))) {
+        mlx_array_free(lse);
+        mlx_array_free(lp);
+        return -1;
+    }
+    mlx_array_free(lse);
+    *lp_out = lp;
+    return 0;
+}
+
 static int compute_logprob_at(mlx_array log_probs, mlx_array tok, mlx_stream s,
                               mlx_array *logprob_out) {
     mlx_array tok_idx = mlx_array_new();
@@ -240,17 +258,13 @@ int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array
             return -1;
         }
         if (want_logprob && logprob_out) {
-            mlx_array lse = mlx_array_new();
             mlx_array log_probs = mlx_array_new();
-            if (!MLXB_CHECK(mlx_logsumexp_axis(&lse, logits, -1, true, s)) ||
-                !MLXB_CHECK(mlx_subtract(&log_probs, logits, lse, s))) {
-                mlx_array_free(lse);
+            if (compute_raw_log_probs(logits, s, &log_probs) != 0) {
                 mlx_array_free(log_probs);
                 mlx_array_free(tok);
                 mlx_array_free(scaled);
                 return -1;
             }
-            mlx_array_free(lse);
             if (compute_logprob_at(log_probs, tok, s, logprob_out) != 0) {
                 mlx_array_free(log_probs);
                 mlx_array_free(tok);
@@ -275,17 +289,13 @@ int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array
             goto fail;
     }
 
-    /* Compute log-probs from temp-scaled logits BEFORE filtering (pre-filter semantics) */
+    /* Pre-temperature, pre-filter log-probs from raw logits (matches mlx-lm) */
     mlx_array log_probs = mlx_array_new();
     if (want_logprob && logprob_out) {
-        mlx_array lse = mlx_array_new();
-        if (!MLXB_CHECK(mlx_logsumexp_axis(&lse, scaled, -1, true, s)) ||
-            !MLXB_CHECK(mlx_subtract(&log_probs, scaled, lse, s))) {
-            mlx_array_free(lse);
+        if (compute_raw_log_probs(logits, s, &log_probs) != 0) {
             mlx_array_free(log_probs);
             goto fail;
         }
-        mlx_array_free(lse);
     }
 
     /* filters: top_k, then top_p, then min_p (spec order) */
