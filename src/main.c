@@ -487,7 +487,7 @@ static int cmd_run(int argc, char **argv) {
     engine_post(&eng, gen_cmd);
 
     rc = cli_run_consume(s, tok, stdout, opts.stream, &g_run_cancel,
-                         &reason, err, sizeof(err));
+                         &reason, err, sizeof(err), false);
 
     if (rc != 0)
         fprintf(stderr, "\nmlxd run: %s\n", err);

@@ -57,8 +57,8 @@ char *cli_run_messages_json(const char *prompt) {
 
 int cli_run_consume(stream_t *s, const tokenizer_t *tok, FILE *out, bool flush_each,
                     const _Atomic int *cancel_flag, finish_reason_t *reason,
-                    char *err, size_t errsz) {
-    detok_t *d = detok_create(tok);
+                    char *err, size_t errsz, bool token_ids) {
+    detok_t *d = token_ids ? NULL : detok_create(tok);
     bool cancel_sent = false;
     struct timespec grace_deadline = {0, 0};
 
@@ -89,6 +89,11 @@ int cli_run_consume(stream_t *s, const tokenizer_t *tok, FILE *out, bool flush_e
 
         switch (c.tag) {
         case CHUNK_TOKEN: {
+            if (token_ids) {
+                fprintf(out, "%d\n", c.token.id);
+                if (flush_each) fflush(out);
+                break;
+            }
             if (d) {
                 char *text = NULL;
                 size_t text_len = 0;
