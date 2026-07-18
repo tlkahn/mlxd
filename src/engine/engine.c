@@ -390,7 +390,10 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     int n = cmd->generate.token_count;
     int max_new = cmd->generate.params.max_tokens;
     const int32_t *token_ids = cmd->generate.token_ids;
-    const sampling_params_t *sp = &cmd->generate.params.sampling;
+    sampling_params_t resolved_sp = sampling_resolve(
+        &cmd->generate.params.sampling, cmd->generate.params.sampling_set,
+        em ? &em->cfg : NULL);
+    const sampling_params_t *sp = &resolved_sp;
     bool want_lp = cmd->generate.params.logprobs;
 
     kvcache_t kv;

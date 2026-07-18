@@ -2,6 +2,34 @@
 
 #include <math.h>
 
+sampling_params_t sampling_resolve(const sampling_params_t *req, unsigned set_mask,
+                                   const model_config_t *cfg) {
+    sampling_params_t out = SAMPLING_PARAMS_DEFAULT;
+
+    if (set_mask & SAMPLING_SET_TEMPERATURE)
+        out.temperature = req->temperature;
+    else if (cfg && cfg->has_gen_temperature)
+        out.temperature = cfg->gen_temperature;
+
+    if (set_mask & SAMPLING_SET_TOP_P)
+        out.top_p = req->top_p;
+    else if (cfg && cfg->has_gen_top_p)
+        out.top_p = cfg->gen_top_p;
+
+    if (set_mask & SAMPLING_SET_TOP_K)
+        out.top_k = req->top_k;
+    else if (cfg && cfg->has_gen_top_k)
+        out.top_k = cfg->gen_top_k;
+
+    if (set_mask & SAMPLING_SET_MIN_P)
+        out.min_p = req->min_p;
+
+    if (set_mask & SAMPLING_SET_SEED)
+        out.seed = req->seed;
+
+    return out;
+}
+
 /* Below this, sampling degenerates to argmax (matches mlx-serve's cutoff). */
 #define SAMPLER_GREEDY_TEMP 0.01f
 

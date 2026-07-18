@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "engine/sampler.h"
 
 #include <assert.h>
 #include <pthread.h>
@@ -1163,6 +1164,59 @@ static void test_signal_shutdown_flushes_queued(void) {
     stream_release(s_b);
 }
 
+/* ---- C2.13: sampling_resolve precedence ---- */
+
+static void test_sampling_resolve(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    /* Case 1: request sets temperature, cfg has gen_temperature -> request wins */
+    cfg.has_gen_temperature = true;
+    cfg.gen_temperature = 0.5f;
+    cfg.has_gen_top_p = true;
+    cfg.gen_top_p = 0.8f;
+    cfg.has_gen_top_k = true;
+    cfg.gen_top_k = 20;
+
+    sampling_params_t req = {.temperature = 0.9f, .top_p = 0.7f, .top_k = 50,
+                             .min_p = 0.1f, .seed = 42};
+    unsigned mask = SAMPLING_SET_TEMPERATURE | SAMPLING_SET_SEED;
+
+    sampling_params_t out = sampling_resolve(&req, mask, &cfg);
+    assert(out.temperature == 0.9f);
+    assert(out.top_p == 0.8f);
+    assert(out.top_k == 20);
+    assert(out.min_p == 0.0f);
+    assert(out.seed == 42);
+
+    /* Case 2: nothing set on request, cfg has defaults */
+    out = sampling_resolve(&req, 0, &cfg);
+    assert(out.temperature == 0.5f);
+    assert(out.top_p == 0.8f);
+    assert(out.top_k == 20);
+    assert(out.min_p == 0.0f);
+    assert(out.seed == -1);
+
+    /* Case 3: cfg has nothing (no gen_* flags) -> SAMPLING_PARAMS_DEFAULT */
+    model_config_t empty_cfg;
+    memset(&empty_cfg, 0, sizeof(empty_cfg));
+    out = sampling_resolve(&req, 0, &empty_cfg);
+    assert(out.temperature == 1.0f);
+    assert(out.top_p == 1.0f);
+    assert(out.top_k == -1);
+    assert(out.min_p == 0.0f);
+    assert(out.seed == -1);
+
+    /* Case 4: NULL cfg -> SAMPLING_PARAMS_DEFAULT */
+    out = sampling_resolve(&req, 0, NULL);
+    assert(out.temperature == 1.0f);
+
+    /* Case 5: min_p and seed never come from gen config (not parsed in model.c) */
+    out = sampling_resolve(&req, SAMPLING_SET_MIN_P, &cfg);
+    assert(out.min_p == 0.1f);
+    assert(out.seed == -1);
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(void) {
@@ -1204,6 +1258,7 @@ int main(void) {
     test_post_during_destroy_stress();
     test_user_cancel_emits_terminal();
     test_signal_shutdown_flushes_queued();
+    test_sampling_resolve();
     printf("test_engine: all passed\n");
     return 0;
 }

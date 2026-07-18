@@ -779,6 +779,72 @@ static void test_chat_request_parse_stop_non_string_element(void) {
     yyjson_doc_free(doc);
 }
 
+/* --- Cycle 12 (C2): sampling_set bitmask + top_k/min_p extension fields --- */
+
+static void test_parse_sampling_set_mask(void) {
+    /* Chat request with all sampling fields set */
+    const char *json_all =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"temperature\":0.8,\"top_p\":0.95,\"top_k\":40,\"min_p\":0.05,\"seed\":42}";
+    yyjson_doc *doc = yyjson_read(json_all, strlen(json_all), 0);
+    assert(doc);
+    chat_completion_request_t req;
+    const char *err = NULL;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling.temperature == 0.8f);
+    assert(req.params.sampling.top_p == 0.95f);
+    assert(req.params.sampling.top_k == 40);
+    assert(fabsf(req.params.sampling.min_p - 0.05f) < 1e-6f);
+    assert(req.params.sampling.seed == 42);
+    assert(req.params.sampling_set ==
+           (SAMPLING_SET_TEMPERATURE | SAMPLING_SET_TOP_P | SAMPLING_SET_TOP_K |
+            SAMPLING_SET_MIN_P | SAMPLING_SET_SEED));
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* Chat request with only temperature set - other mask bits clear */
+    const char *json_temp =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"temperature\":0.5}";
+    doc = yyjson_read(json_temp, strlen(json_temp), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling.temperature == 0.5f);
+    assert(req.params.sampling_set == SAMPLING_SET_TEMPERATURE);
+    assert(req.params.sampling.top_p == 1.0f);
+    assert(req.params.sampling.top_k == -1);
+    assert(req.params.sampling.min_p == 0.0f);
+    assert(req.params.sampling.seed == -1);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* No sampling fields set at all */
+    const char *json_none =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    doc = yyjson_read(json_none, strlen(json_none), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling_set == 0);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* Completion request with top_k and min_p */
+    const char *json_comp =
+        "{\"model\":\"m\",\"prompt\":\"hi\",\"max_tokens\":5,"
+        "\"top_k\":50,\"min_p\":0.1,\"seed\":7}";
+    doc = yyjson_read(json_comp, strlen(json_comp), 0);
+    assert(doc);
+    completion_request_t creq;
+    assert(completion_request_parse(&creq, yyjson_doc_get_root(doc), &err) == 0);
+    assert(creq.params.sampling.top_k == 50);
+    assert(fabsf(creq.params.sampling.min_p - 0.1f) < 1e-6f);
+    assert(creq.params.sampling.seed == 7);
+    assert(creq.params.sampling_set ==
+           (SAMPLING_SET_TOP_K | SAMPLING_SET_MIN_P | SAMPLING_SET_SEED));
+    completion_request_free(&creq);
+    yyjson_doc_free(doc);
+}
+
 int main(void) {
     test_helper_reads_and_parses_error_envelope();
     test_error_envelope_serialize();
@@ -804,6 +870,7 @@ int main(void) {
     test_chat_request_parse_toolchoice_missing_function();
     test_parse_free_after_early_error_is_safe();
     test_chat_request_parse_stop_non_string_element();
+    test_parse_sampling_set_mask();
     printf("test_openai: all passed\n");
     return 0;
 }

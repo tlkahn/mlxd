@@ -164,6 +164,8 @@ static void test_generate_deterministic(void) {
         memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
         gen->generate.token_count = 2;
         gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
         gen->generate.stream = s;
         engine_post(&eng, gen);
 
@@ -184,6 +186,8 @@ static void test_generate_deterministic(void) {
         memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
         gen->generate.token_count = 2;
         gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
         gen->generate.stream = s;
         engine_post(&eng, gen);
 
@@ -231,6 +235,8 @@ static void test_generate_eos_finish_stop(void) {
     memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
     gen->generate.token_count = 2;
     gen->generate.params.max_tokens = 8; /* > stop_at+1 so length is not the reason */
+    gen->generate.params.sampling.temperature = 0.0f;
+    gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
     gen->generate.stream = s;
     engine_post(&eng, gen);
 
@@ -398,6 +404,7 @@ static void test_generate_logprobs(void) {
         gen->generate.params.logprobs = true;
         gen->generate.params.sampling = SAMPLING_PARAMS_DEFAULT;
         gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
         gen->generate.stream = s;
         engine_post(&eng, gen);
 
@@ -428,6 +435,7 @@ static void test_generate_logprobs(void) {
         gen->generate.params.logprobs = false;
         gen->generate.params.sampling = SAMPLING_PARAMS_DEFAULT;
         gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
         gen->generate.stream = s;
         engine_post(&eng, gen);
 
@@ -478,6 +486,9 @@ static void test_generate_seeded_sampling(void) {
         gen->generate.params.sampling.top_p = 1.0f;
         gen->generate.params.sampling.top_k = -1;
         gen->generate.params.sampling.min_p = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE | SAMPLING_SET_SEED |
+                                            SAMPLING_SET_TOP_P | SAMPLING_SET_TOP_K |
+                                            SAMPLING_SET_MIN_P;
         gen->generate.stream = s;
         engine_post(&eng, gen);
 

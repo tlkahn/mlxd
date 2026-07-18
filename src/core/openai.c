@@ -288,12 +288,26 @@ static int parse_messages(chat_completion_request_t *req, yyjson_val *msgs, cons
  * onto an already-defaulted gen_params. top_k/min_p are not on the wire. */
 static void parse_sampling(gen_params_t *params, yyjson_val *root) {
     yyjson_val *v;
-    if ((v = yyjson_obj_get(root, "temperature")) && yyjson_is_num(v))
+    if ((v = yyjson_obj_get(root, "temperature")) && yyjson_is_num(v)) {
         params->sampling.temperature = (float)yyjson_get_num(v);
-    if ((v = yyjson_obj_get(root, "top_p")) && yyjson_is_num(v))
+        params->sampling_set |= SAMPLING_SET_TEMPERATURE;
+    }
+    if ((v = yyjson_obj_get(root, "top_p")) && yyjson_is_num(v)) {
         params->sampling.top_p = (float)yyjson_get_num(v);
-    if ((v = yyjson_obj_get(root, "seed")) && yyjson_is_int(v))
+        params->sampling_set |= SAMPLING_SET_TOP_P;
+    }
+    if ((v = yyjson_obj_get(root, "top_k")) && yyjson_is_int(v)) {
+        params->sampling.top_k = (int)yyjson_get_sint(v);
+        params->sampling_set |= SAMPLING_SET_TOP_K;
+    }
+    if ((v = yyjson_obj_get(root, "min_p")) && yyjson_is_num(v)) {
+        params->sampling.min_p = (float)yyjson_get_num(v);
+        params->sampling_set |= SAMPLING_SET_MIN_P;
+    }
+    if ((v = yyjson_obj_get(root, "seed")) && yyjson_is_int(v)) {
         params->sampling.seed = (int)yyjson_get_sint(v);
+        params->sampling_set |= SAMPLING_SET_SEED;
+    }
 }
 
 int chat_completion_request_parse(chat_completion_request_t *req, yyjson_val *root,

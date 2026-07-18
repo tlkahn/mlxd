@@ -2,6 +2,7 @@
 #define MLXD_ENGINE_SAMPLER_H
 
 #include "core/types.h"
+#include "model/model.h"
 #include "mlxbridge/mlxbridge.h"
 
 /* Stage C sampler pipeline. All functions are lazy (no eval) and run on the
@@ -31,6 +32,12 @@ int sampler_apply_top_p(mlx_array logits, float p, mlx_stream s, mlx_array *out)
  * min_p <= 0 (disabled) returns the logits unchanged (lazy copy).
  * Caller owns *out. */
 int sampler_apply_min_p(mlx_array logits, float mp, mlx_stream s, mlx_array *out);
+
+/* Resolve sampling parameters: request-set fields (sampling_set mask) win,
+ * then model generation_config defaults, then SAMPLING_PARAMS_DEFAULT.
+ * Pure function - no GPU access. */
+sampling_params_t sampling_resolve(const sampling_params_t *req, unsigned set_mask,
+                                   const model_config_t *cfg);
 
 /* Full pipeline: temperature scale, top_k, top_p, min_p, categorical.
  * temperature < 0.01 short-circuits to argmax (greedy limit).
