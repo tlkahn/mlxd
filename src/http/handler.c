@@ -154,6 +154,24 @@ static void handle_chat_completions(const http_request_t *req,
     yyjson_val *tools_val = yyjson_obj_get(root, "tools");
     char *tools_json = tools_val ? yyjson_val_write(tools_val, 0, NULL) : NULL;
 
+    const char *extra_json = NULL;
+    yyjson_val *et = yyjson_obj_get(root, "enable_thinking");
+    if (et) {
+        if (yyjson_is_bool(et)) {
+            extra_json = yyjson_get_bool(et)
+                ? "{\"enable_thinking\":true}"
+                : "{\"enable_thinking\":false}";
+        } else {
+            respond_json_error(resp, 400, "invalid_request_error", NULL,
+                               "enable_thinking must be a boolean");
+            free(messages_json);
+            free(tools_json);
+            chat_completion_request_free(&creq);
+            yyjson_doc_free(doc);
+            return;
+        }
+    }
+
     gen_request_start_params_t p = {
         .ctx = sctx,
         .conn = req->ctx,
@@ -164,6 +182,7 @@ static void handle_chat_completions(const http_request_t *req,
         .params = creq.params,
         .messages_json = messages_json,
         .tools_json = tools_json,
+        .extra_json = extra_json,
     };
 
     const char *err = NULL;
