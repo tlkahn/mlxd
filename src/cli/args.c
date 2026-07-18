@@ -287,3 +287,7 @@ void run_opts_apply_sampling(const cli_run_opts_t *opts, gen_params_t *params) {
         params->sampling_set |= SAMPLING_SET_SEED;
     }
 }
+
+const char *cli_run_extra_json(const cli_run_opts_t *opts) {
+    return opts->no_think ? "{\"enable_thinking\":false}" : NULL;
+}

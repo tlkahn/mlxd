@@ -577,6 +577,22 @@ static void test_run_opts_apply_sampling_explicit_temp(void) {
     assert(!(params.sampling_set & SAMPLING_SET_TOP_P));
 }
 
+/* --- #74 review: cli_run_extra_json helper ------------------------------- */
+
+static void test_cli_run_extra_json_no_think(void) {
+    cli_run_opts_t opts = {0};
+    opts.no_think = true;
+    const char *json = cli_run_extra_json(&opts);
+    assert(json != NULL);
+    assert(strcmp(json, "{\"enable_thinking\":false}") == 0);
+}
+
+static void test_cli_run_extra_json_default(void) {
+    cli_run_opts_t opts = {0};
+    const char *json = cli_run_extra_json(&opts);
+    assert(json == NULL);
+}
+
 /* --- #72: --no-think flag ------------------------------------------------- */
 
 static void test_run_no_think(void) {
@@ -683,6 +699,10 @@ int main(void) {
     /* Cycle 7 (review): run_opts_apply_sampling */
     test_run_opts_apply_sampling_defaults();
     test_run_opts_apply_sampling_explicit_temp();
+
+    /* #74 review: cli_run_extra_json helper */
+    test_cli_run_extra_json_no_think();
+    test_cli_run_extra_json_default();
 
     /* #72: --no-think flag */
     test_run_no_think();

@@ -62,4 +62,6 @@ int cli_parse_list(int argc, char **argv, cli_list_opts_t *out, char *err, size_
 
 void run_opts_apply_sampling(const cli_run_opts_t *opts, gen_params_t *params);
 
+const char *cli_run_extra_json(const cli_run_opts_t *opts);
+
 #endif

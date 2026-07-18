@@ -414,7 +414,7 @@ static int cmd_run(int argc, char **argv) {
             goto cleanup;
         }
         n_ids = gen_build_chat_prompt(tok, chat_template, messages_json, NULL,
-                                      opts.no_think ? "{\"enable_thinking\":false}" : NULL,
+                                      cli_run_extra_json(&opts),
                                       &ids, &build_err);
         free(messages_json);
     } else {
