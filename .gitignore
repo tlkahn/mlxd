@@ -14,4 +14,7 @@ build/
 *.profdata
 .cache/
 tests/fixtures/gemma4/
-doc
+doc/*
+!doc/plans/
+doc/plans/*
+!doc/plans/engine-inference-core.md
