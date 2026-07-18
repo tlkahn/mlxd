@@ -1025,6 +1025,37 @@ static void test_completion_logprobs_rejected(void) {
     yyjson_doc_free(doc);
 }
 
+/* --- C3 cycle 2: top_k accepts integral doubles on the wire ------------- */
+
+static void test_parse_top_k_integral_double(void) {
+    const char *err = NULL;
+
+    /* top_k: 40.0 (integral double) should be accepted as 40 */
+    const char *json_int_double =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"top_k\":40.0}";
+    yyjson_doc *doc = yyjson_read(json_int_double, strlen(json_int_double), 0);
+    assert(doc);
+    chat_completion_request_t req;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling.top_k == 40);
+    assert(req.params.sampling_set & SAMPLING_SET_TOP_K);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* top_k: 40.5 (non-integral) should be silently ignored */
+    const char *json_frac =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"top_k\":40.5}";
+    doc = yyjson_read(json_frac, strlen(json_frac), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(!(req.params.sampling_set & SAMPLING_SET_TOP_K));
+    assert(req.params.sampling.top_k == -1);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+}
+
 int main(void) {
     test_helper_reads_and_parses_error_envelope();
     test_error_envelope_serialize();
@@ -1055,6 +1086,7 @@ int main(void) {
     test_sampling_params_validate_top_k();
     test_chat_top_logprobs_rejected();
     test_completion_logprobs_rejected();
+    test_parse_top_k_integral_double();
     printf("  test_completion_logprobs_rejected: passed\n");
     printf("test_openai: all passed\n");
     return 0;

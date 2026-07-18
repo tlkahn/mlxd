@@ -1,5 +1,6 @@
 #include "core/openai.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -324,9 +325,12 @@ static void parse_sampling(gen_params_t *params, yyjson_val *root) {
         params->sampling.top_p = (float)yyjson_get_num(v);
         params->sampling_set |= SAMPLING_SET_TOP_P;
     }
-    if ((v = yyjson_obj_get(root, "top_k")) && yyjson_is_int(v)) {
-        params->sampling.top_k = (int)yyjson_get_sint(v);
-        params->sampling_set |= SAMPLING_SET_TOP_K;
+    if ((v = yyjson_obj_get(root, "top_k")) && yyjson_is_num(v)) {
+        double d = yyjson_get_num(v);
+        if (d == (double)(int)d && d >= INT_MIN && d <= INT_MAX) {
+            params->sampling.top_k = (int)d;
+            params->sampling_set |= SAMPLING_SET_TOP_K;
+        }
     }
     if ((v = yyjson_obj_get(root, "min_p")) && yyjson_is_num(v)) {
         params->sampling.min_p = (float)yyjson_get_num(v);
