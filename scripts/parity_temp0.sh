@@ -1,4 +1,7 @@
 #!/bin/sh
+# Temp-0 TEXT parity smoke test: compares decoded text output between
+# mlx-serve (oracle) and mlxd at temperature 0. A true token-id parity
+# gate is deferred because the oracle cannot emit raw token IDs.
 set -eu
 
 CKPT="${1:-}"
@@ -38,21 +41,28 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ ! -x "$REPO_DIR/mlxd" ]; then
-    echo "building mlxd..."
-    if ! make -C "$REPO_DIR" mlxd >/dev/null; then
-        echo "FAIL: mlxd build failed" >&2
-        exit 1
-    fi
+echo "building mlxd..."
+if ! make -C "$REPO_DIR" mlxd >/dev/null 2>&1; then
+    echo "FAIL: mlxd build failed" >&2
+    exit 1
+fi
+
+# --- Fail fast if port is already in use ---
+
+if python3 -c 'import socket,sys; s=socket.socket(); s.settimeout(0.5); sys.exit(0 if s.connect_ex(("127.0.0.1",int(sys.argv[1])))==0 else 1)' "$PORT" 2>/dev/null; then
+    echo "FAIL: port $PORT already in use; set MLXD_PARITY_PORT to a free port" >&2
+    exit 1
 fi
 
 # --- Start oracle ---
 
+WORK=$(mktemp -d)
 cleanup() {
     if [ -n "${ORACLE_PID:-}" ]; then
         kill "$ORACLE_PID" 2>/dev/null || true
         wait "$ORACLE_PID" 2>/dev/null || true
     fi
+    rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -74,27 +84,27 @@ if [ "$TRIES" -ge 120 ]; then
     exit 1
 fi
 
-# --- Oracle tokens ---
+# --- Oracle text (via temp file, no command substitution) ---
 
 BODY=$(python3 -c 'import json,sys; print(json.dumps({"prompt": sys.argv[1], "temperature": 0, "max_tokens": int(sys.argv[2]), "stream": False}))' "$PROMPT" "$MAX_TOKENS")
-ORACLE_TEXT=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
+curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
     -H "Content-Type: application/json" \
     -d "$BODY" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['text'], end='')")
+    -o "$WORK/resp.json"
+python3 -c 'import sys,json; f=open(sys.argv[1],"rb"); d=json.load(f); open(sys.argv[2],"wb").write(d["choices"][0]["text"].encode("utf-8"))' \
+    "$WORK/resp.json" "$WORK/oracle.txt"
 
-# --- mlxd tokens ---
+# --- mlxd text (via temp file, no command substitution) ---
 
-MLXD_TEXT=$("$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" --raw --temperature 0 --max-tokens "$MAX_TOKENS")
+"$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" --raw --temperature 0 --max-tokens "$MAX_TOKENS" \
+    > "$WORK/mlxd.txt"
 
-# --- Compare ---
+# --- Compare (byte-exact via parity_compare.py) ---
 
-if [ "$ORACLE_TEXT" = "$MLXD_TEXT" ]; then
-    echo "parity OK ($MAX_TOKENS tokens)"
+if python3 "$SCRIPT_DIR/parity_compare.py" "$WORK/oracle.txt" "$WORK/mlxd.txt"; then
+    echo "text parity OK ($MAX_TOKENS tokens)"
     exit 0
 else
-    echo "MISMATCH"
-    echo "oracle: $ORACLE_TEXT"
-    echo "mlxd:   $MLXD_TEXT"
     echo ""
     echo "--- mlxd token ids ---"
     "$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" --raw --temperature 0 --max-tokens "$MAX_TOKENS" --token-ids

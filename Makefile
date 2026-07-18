@@ -79,7 +79,7 @@ tests/test_http_gen_request: tests/test_http_gen_request.c $(GENREQ_OBJS)
 tests/test_%: tests/test_%.c $(LIB_OBJS)
 	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(LIB_OBJS) $(ALL_LDFLAGS)
 
-test: $(TEST_BINS) test-parity-skip
+test: $(TEST_BINS) test-parity-skip test-parity-script
 	@pass=0; fail=0; \
 	for t in $(TEST_BINS); do \
 		printf "  %-40s" "$$(basename $$t)"; \
@@ -154,7 +154,10 @@ test-parity-skip:
 	{ printf "  %-40sFAIL (build-fail: no error message)\n" "parity-skip"; exit 1; }
 	@printf "  %-40sOK\n" "parity-skip"
 
-.PHONY: test test-gpu test-tsan test-leaks test-parity-skip clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
+test-parity-script:
+	@sh tests/test_parity_script.sh
+
+.PHONY: test test-gpu test-tsan test-leaks test-parity-skip test-parity-script clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
 
 # --- Thread Sanitizer tests ---------------------------------------------------
 
