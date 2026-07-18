@@ -152,6 +152,11 @@ test-parity-skip:
 	if [ "$$rc" -eq 0 ]; then printf "  %-40sFAIL (build-fail: expected nonzero exit)\n" "parity-skip"; exit 1; fi; \
 	printf '%s\n' "$$out" | grep -q 'build failed' || \
 	{ printf "  %-40sFAIL (build-fail: no error message)\n" "parity-skip"; exit 1; }
+	@tmpstub=$$(mktemp); printf '#!/bin/sh\nexit 0\n' > "$$tmpstub"; chmod +x "$$tmpstub"; \
+	out=$$(MLXD_MLX_SERVE_BIN="$$tmpstub" sh scripts/parity_temp0.sh 2>&1); \
+	rm -f "$$tmpstub"; \
+	printf '%s\n' "$$out" | grep -q 'skipped: checkpoint dir' || \
+	{ printf "  %-40sFAIL (ckpt-missing skip)\n" "parity-skip"; exit 1; }
 	@printf "  %-40sOK\n" "parity-skip"
 
 test-parity-script:
