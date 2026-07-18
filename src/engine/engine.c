@@ -468,13 +468,15 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         mlx_array_free(pending_logits);
         pending_logits = mlx_array_new();
 
-        /* 2) if more steps remain, build NEXT forward and async_eval both */
-        mlx_array next_logits = mlx_array_new();
+        /* 2) if more steps remain, build NEXT forward and async_eval both.
+           next_logits / step_ids are scoped to the pipelined branch only
+           (final-step path never constructs them). */
+        mlx_array next_logits;
         bool have_next = false;
-        mlx_array step_ids = mlx_array_new();
-        bool have_step = false;
 
         if (emitted + 1 < max_new) {
+            next_logits = mlx_array_new();
+            mlx_array step_ids = mlx_array_new();
             if (reshape_token_ids(lazy_token, &step_ids, em->stream) != 0) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
@@ -482,7 +484,6 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
                 generate_fail(eng, s, "token reshape failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
-            have_step = true;
             if (model_forward(em, step_ids, &kv, true, &next_logits) != 0) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
@@ -493,21 +494,17 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
             have_next = true;
 
             mlx_array pair[2] = {lazy_token, next_logits};
-            mlx_vector_array va = mlx_vector_array_new_data(pair, 2);
-            int arc = mlx_async_eval(va);
-            mlx_vector_array_free(va);
-            if (arc != 0) {
+            if (mlxbridge_async_eval_n(pair, 2) != 0) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
                 generate_fail(eng, s, "async_eval failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
+            mlx_array_free(step_ids);
         } else {
             /* last allowed token: force-eval the token alone */
             if (mlxbridge_async_eval(lazy_token) != 0) {
-                mlx_array_free(step_ids);
-                mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
                 generate_fail(eng, s, "async_eval failed", GEN_ERR_INTERNAL);
                 goto out_free;
@@ -517,17 +514,12 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         /* 3) NOW materialize CURRENT token */
         int32_t id = 0;
         if (mlxbridge_item_int32(&id, lazy_token) != 0) {
-            if (have_step) mlx_array_free(step_ids);
             if (have_next) mlx_array_free(next_logits);
             mlx_array_free(lazy_token);
             generate_fail(eng, s, "token materialize failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
         mlx_array_free(lazy_token);
-        if (have_step) {
-            mlx_array_free(step_ids);
-            have_step = false;
-        }
 
         chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = id, .logprob = 0}};
         if (!stream_push(s, tok)) {
@@ -545,16 +537,16 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         }
 
         if (emitted == max_new) {
+            /* Final step never sets have_next; guard is defensive. */
             if (have_next) mlx_array_free(next_logits);
             if (!stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_LENGTH}))
                 stream_finish_cancelled(s);
             goto out_free;
         }
 
-        /* promote next_logits to pending (drop empty placeholder) */
+        /* promote next_logits to pending (ownership transfer) */
         mlx_array_free(pending_logits);
         pending_logits = next_logits;
-        have_next = false;
 
         if (emitted % 256 == 0)
             mlxbridge_clear_cache();
@@ -617,7 +609,9 @@ static void handle_load(engine_t *eng, engine_cmd_t *cmd) {
         return;
     }
 
-    /* Real load path */
+    /* Real load path. free_resident_model runs before the new attempt, so a
+       bad reload destroys a previously working resident model (bricks until
+       another successful load). Matches "free prior model on reload". */
     free_resident_model(eng);
 
     char errbuf[256] = {0};
