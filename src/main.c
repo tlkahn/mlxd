@@ -143,10 +143,20 @@ static const char *resolve_model_dir(const char *model_arg, char **resolved_out)
     return *resolved_out;
 }
 
-static int wait_engine_load(engine_t *eng, int timeout_ms) {
-    for (int i = 0; i < timeout_ms && !engine_loaded(eng); i++)
-        usleep(1000);
-    return engine_loaded(eng) ? 0 : -1;
+static bool run_cancel_pred(void *ud) {
+    (void)ud;
+    return atomic_load(&g_run_cancel) > 0;
+}
+
+/* Print load failure distinguishing timeout vs LOAD_FAILED. */
+static void print_load_failure(const char *prefix, engine_t *eng) {
+    char err[256] = {0};
+    if (engine_load_state(eng) == LOAD_FAILED &&
+        engine_load_error(eng, err, sizeof(err)) == 0 && err[0] != '\0') {
+        fprintf(stderr, "%s: load failed: %s\n", prefix, err);
+    } else {
+        fprintf(stderr, "%s: timed out waiting for model load\n", prefix);
+    }
 }
 
 /* --- Subcommands ---------------------------------------------------------- */
@@ -275,8 +285,8 @@ static int cmd_serve(int argc, char **argv) {
         return 1;
     }
 
-    engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
-    if (!cmd) {
+    char *load_path = strdup(model_dir);
+    if (!load_path) {
         fprintf(stderr, "mlxd serve: out of memory\n");
         engine_destroy(&eng);
         tokenizer_free(tok);
@@ -284,21 +294,18 @@ static int cmd_serve(int argc, char **argv) {
         free(resolved_dir);
         return 1;
     }
-    cmd->tag = CMD_LOAD;
-    cmd->load.model_path = strdup(model_dir);
-    if (!cmd->load.model_path) {
-        fprintf(stderr, "mlxd serve: out of memory\n");
-        free(cmd);
+    if (engine_post_load(&eng, load_path) != 0) {
+        fprintf(stderr, "mlxd serve: failed to post model load\n");
         engine_destroy(&eng);
         tokenizer_free(tok);
         free(chat_template);
         free(resolved_dir);
         return 1;
     }
-    engine_post(&eng, cmd);
 
-    if (wait_engine_load(&eng, 30000) != 0) {
-        fprintf(stderr, "mlxd serve: timed out waiting for model load\n");
+    /* Unbounded wait: large HF checkpoints can exceed 30s on first Metal compile. */
+    if (engine_wait_load(&eng, -1) != 0) {
+        print_load_failure("mlxd serve", &eng);
         engine_destroy(&eng);
         tokenizer_free(tok);
         free(chat_template);
@@ -426,30 +433,24 @@ static int cmd_run(int argc, char **argv) {
     }
     eng_inited = true;
 
-    engine_cmd_t *load_cmd = calloc(1, sizeof(*load_cmd));
-    if (!load_cmd) {
+    char *load_path = strdup(model_dir);
+    if (!load_path) {
         fprintf(stderr, "mlxd run: out of memory\n");
         goto cleanup;
     }
-    load_cmd->tag = CMD_LOAD;
-    load_cmd->load.model_path = strdup(model_dir);
-    if (!load_cmd->load.model_path) {
-        fprintf(stderr, "mlxd run: out of memory\n");
-        free(load_cmd);
+    if (engine_post_load(&eng, load_path) != 0) {
+        fprintf(stderr, "mlxd run: failed to post model load\n");
         goto cleanup;
     }
-    engine_post(&eng, load_cmd);
 
-    for (int i = 0; i < 30000 && !engine_loaded(&eng); i++) {
+    /* Unbounded wait; Ctrl-C still aborts via run_cancel_pred. */
+    if (engine_wait_load_until(&eng, -1, run_cancel_pred, NULL) != 0) {
         if (atomic_load(&g_run_cancel) > 0) {
             reason = FINISH_CANCELLED;
             rc = 0;
             goto cleanup;
         }
-        usleep(1000);
-    }
-    if (!engine_loaded(&eng)) {
-        fprintf(stderr, "mlxd run: timed out waiting for model load\n");
+        print_load_failure("mlxd run", &eng);
         goto cleanup;
     }
 

@@ -85,8 +85,13 @@ void mlxbridge_map_free(mlx_map_string_to_array params,
     mlx_map_string_to_string_free(meta);
 }
 
-int mlxbridge_async_eval(mlx_array a) {
-    mlx_vector_array va = mlx_vector_array_new_value(a);
+int mlxbridge_async_eval_n(const mlx_array *arrs, size_t n) {
+    if (n == 0)
+        return 0;
+    if (!arrs)
+        return -1;
+    /* mlx_vector_array_new_data takes const mlx_array*; cast is API-faithful. */
+    mlx_vector_array va = mlx_vector_array_new_data(arrs, n);
     int rc = mlx_async_eval(va);
     mlx_vector_array_free(va);
     if (rc != 0) {
@@ -94,6 +99,10 @@ int mlxbridge_async_eval(mlx_array a) {
         return -1;
     }
     return 0;
+}
+
+int mlxbridge_async_eval(mlx_array a) {
+    return mlxbridge_async_eval_n(&a, 1);
 }
 
 int mlxbridge_item_int32(int32_t *out, mlx_array a) {

@@ -40,7 +40,7 @@ static gen_fixture_t gen_fixture_up(bool load_model, bool set_tokenizer,
         engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
         assert(cmd != NULL);
         cmd->tag = CMD_LOAD;
-        cmd->load.model_path = strdup("gpt2");
+        cmd->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
         engine_post(&f.eng, cmd);
         usleep(10000);
     }

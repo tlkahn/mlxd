@@ -29,6 +29,8 @@ void   mlxbridge_map_free(mlx_map_string_to_array params,
                            mlx_map_string_to_string meta);
 
 int    mlxbridge_async_eval(mlx_array a);
+/* Async-eval n arrays. n == 0 is a success no-op. Returns -1 and logs on failure. */
+int    mlxbridge_async_eval_n(const mlx_array *arrs, size_t n);
 int    mlxbridge_item_int32(int32_t *out, mlx_array a);
 int    mlxbridge_synchronize(mlx_stream s);
 

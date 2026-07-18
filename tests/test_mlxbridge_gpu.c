@@ -1244,6 +1244,36 @@ static void test_eval_helpers(void) {
     mlx_stream_free(s);
 }
 
+static void test_async_eval_n_pair(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+
+    mlx_array ra = mlx_array_new();
+    assert(MLXB_CHECK(mlx_arange(&ra, 0, 5, 1, MLX_INT32, s)));
+    mlx_array sa = mlx_array_new();
+    assert(MLXB_CHECK(mlx_sum(&sa, ra, false, s)));
+
+    mlx_array rb = mlx_array_new();
+    assert(MLXB_CHECK(mlx_arange(&rb, 0, 4, 1, MLX_INT32, s)));
+    mlx_array sb = mlx_array_new();
+    assert(MLXB_CHECK(mlx_sum(&sb, rb, false, s)));
+
+    mlx_array pair[2] = {sa, sb};
+    assert(mlxbridge_async_eval_n(pair, 2) == 0);
+    assert(mlxbridge_synchronize(s) == 0);
+
+    int32_t va = 0, vb = 0;
+    assert(mlxbridge_item_int32(&va, sa) == 0);
+    assert(mlxbridge_item_int32(&vb, sb) == 0);
+    assert(va == 10); /* 0+1+2+3+4 */
+    assert(vb == 6);  /* 0+1+2+3 */
+
+    mlx_array_free(sb);
+    mlx_array_free(rb);
+    mlx_array_free(sa);
+    mlx_array_free(ra);
+    mlx_stream_free(s);
+}
+
 /* ---- Cycle 15: memory helpers ---- */
 
 static void test_memory_helpers(void) {
@@ -1357,6 +1387,9 @@ int main(void) {
 
     test_eval_helpers();
     printf("  test_eval_helpers: passed\n");
+
+    test_async_eval_n_pair();
+    printf("  test_async_eval_n_pair: passed\n");
 
     test_memory_helpers();
     printf("  test_memory_helpers: passed\n");

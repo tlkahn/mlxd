@@ -168,11 +168,17 @@ static void test_check_macro(void) {
     assert(MLXB_CHECK(zero));
 }
 
+/* n == 0 is a documented success no-op (no arrays to eval). */
+static void test_async_eval_n_empty(void) {
+    assert(mlxbridge_async_eval_n(NULL, 0) == 0);
+}
+
 int main(void) {
     test_extern_presence();
     test_check_success();
     test_check_failure();
     test_check_macro();
+    test_async_eval_n_empty();
     printf("test_mlxbridge: all passed\n");
     return 0;
 }

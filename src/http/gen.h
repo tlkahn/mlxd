@@ -55,8 +55,10 @@ char *gen_build_completion_response(const char *id, const char *model, int64_t c
                                     const usage_t *u);
 
 /* Build an SSE-wrapped OpenAI error event JSON.
+ * type defaults to "server_error" when NULL; code is omitted when NULL.
  * Returns heap-allocated SSE string. Caller frees. */
 char *gen_sse_error(const char *msg);
+char *gen_sse_error_ex(const char *msg, const char *type, const char *code);
 
 /* Generate a unique request ID: "<prefix><24 lowercase hex chars>".
  * prefix is typically "chatcmpl-" or "cmpl-". Caller frees. */

@@ -126,15 +126,20 @@ char *gen_build_completion_response(const char *id, const char *model, int64_t c
     return serialize_mut_root(mdoc, root);
 }
 
-char *gen_sse_error(const char *msg) {
+char *gen_sse_error_ex(const char *msg, const char *type, const char *code) {
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
     if (!mdoc) return NULL;
-    yyjson_mut_val *root = error_envelope_serialize(msg, "server_error", NULL, mdoc);
+    yyjson_mut_val *root = error_envelope_serialize(
+        msg, type ? type : "server_error", code, mdoc);
     char *json = serialize_mut_root(mdoc, root);
     if (!json) return NULL;
     char *sse = sse_format(json, strlen(json));
     free(json);
     return sse;
+}
+
+char *gen_sse_error(const char *msg) {
+    return gen_sse_error_ex(msg, "server_error", NULL);
 }
 
 /* macOS/BSD libc; also glibc >= 2.36. Link-time dependency only. */
