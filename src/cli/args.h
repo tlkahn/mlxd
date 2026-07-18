@@ -1,6 +1,8 @@
 #ifndef CLI_ARGS_H
 #define CLI_ARGS_H
 
+#include "core/types.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -56,5 +58,7 @@ int cli_parse_serve(int argc, char **argv, cli_serve_opts_t *out, char *err, siz
 int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t errsz);
 int cli_parse_pull(int argc, char **argv, cli_pull_opts_t *out, char *err, size_t errsz);
 int cli_parse_list(int argc, char **argv, cli_list_opts_t *out, char *err, size_t errsz);
+
+void run_opts_apply_sampling(const cli_run_opts_t *opts, gen_params_t *params);
 
 #endif

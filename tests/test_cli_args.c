@@ -1,6 +1,8 @@
 #include "cli/args.h"
+#include "core/types.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -515,6 +517,35 @@ static void test_run_sampling_bad_values(void) {
     assert(strstr(err, "seed") != NULL);
 }
 
+/* --- Cycle 7 (review): run_opts_apply_sampling greedy default ----------- */
+
+static void test_run_opts_apply_sampling_defaults(void) {
+    cli_run_opts_t opts = {0};
+    gen_params_t params = {.sampling = SAMPLING_PARAMS_DEFAULT};
+    run_opts_apply_sampling(&opts, &params);
+    assert(params.sampling.temperature == 0.0f);
+    assert(params.sampling_set & SAMPLING_SET_TEMPERATURE);
+    assert(!(params.sampling_set & SAMPLING_SET_TOP_P));
+    assert(!(params.sampling_set & SAMPLING_SET_TOP_K));
+    assert(!(params.sampling_set & SAMPLING_SET_MIN_P));
+    assert(!(params.sampling_set & SAMPLING_SET_SEED));
+}
+
+static void test_run_opts_apply_sampling_explicit_temp(void) {
+    cli_run_opts_t opts = {0};
+    opts.temperature = 0.8f;
+    opts.temperature_set = true;
+    opts.top_k = 40;
+    opts.top_k_set = true;
+    gen_params_t params = {.sampling = SAMPLING_PARAMS_DEFAULT};
+    run_opts_apply_sampling(&opts, &params);
+    assert(fabsf(params.sampling.temperature - 0.8f) < 1e-6f);
+    assert(params.sampling_set & SAMPLING_SET_TEMPERATURE);
+    assert(params.sampling.top_k == 40);
+    assert(params.sampling_set & SAMPLING_SET_TOP_K);
+    assert(!(params.sampling_set & SAMPLING_SET_TOP_P));
+}
+
 int main(void) {
     /* cycle 1: cli_command */
     test_command_serve();
@@ -594,6 +625,10 @@ int main(void) {
     /* C2 cycle 17: sampling flags */
     test_run_sampling_flags();
     test_run_sampling_bad_values();
+
+    /* Cycle 7 (review): run_opts_apply_sampling */
+    test_run_opts_apply_sampling_defaults();
+    test_run_opts_apply_sampling_explicit_temp();
 
     printf("test_cli_args: all passed\n");
     return 0;

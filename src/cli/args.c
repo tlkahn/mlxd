@@ -1,4 +1,5 @@
 #include "cli/args.h"
+#include "core/types.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -248,4 +249,30 @@ int cli_parse_list(int argc, char **argv, cli_list_opts_t *out, char *err, size_
         }
     }
     return 0;
+}
+
+void run_opts_apply_sampling(const cli_run_opts_t *opts, gen_params_t *params) {
+    if (opts->temperature_set) {
+        params->sampling.temperature = opts->temperature;
+        params->sampling_set |= SAMPLING_SET_TEMPERATURE;
+    } else {
+        params->sampling.temperature = 0.0f;
+        params->sampling_set |= SAMPLING_SET_TEMPERATURE;
+    }
+    if (opts->top_p_set) {
+        params->sampling.top_p = opts->top_p;
+        params->sampling_set |= SAMPLING_SET_TOP_P;
+    }
+    if (opts->top_k_set) {
+        params->sampling.top_k = opts->top_k;
+        params->sampling_set |= SAMPLING_SET_TOP_K;
+    }
+    if (opts->min_p_set) {
+        params->sampling.min_p = opts->min_p;
+        params->sampling_set |= SAMPLING_SET_MIN_P;
+    }
+    if (opts->seed_set) {
+        params->sampling.seed = opts->seed;
+        params->sampling_set |= SAMPLING_SET_SEED;
+    }
 }
