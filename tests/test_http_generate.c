@@ -944,6 +944,41 @@ static void test_enable_thinking_false(void) {
     gen_fixture_down(&f);
 }
 
+/* --- enable_thinking: true matches omitted-field baseline ----------------- */
+
+static void test_enable_thinking_true(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, THINK_COND_TMPL, 0);
+
+    http_client_response_t resp_true = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],"
+        "\"enable_thinking\":true}");
+    assert(resp_true.status == 200);
+
+    yyjson_doc *doc_true = yyjson_read(resp_true.body, resp_true.body_len, 0);
+    assert(doc_true != NULL);
+    int pt_true = (int)yyjson_get_sint(
+        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc_true), "usage"),
+                       "prompt_tokens"));
+    yyjson_doc_free(doc_true);
+    http_client_response_free(&resp_true);
+
+    http_client_response_t resp_omit = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}");
+    assert(resp_omit.status == 200);
+
+    yyjson_doc *doc_omit = yyjson_read(resp_omit.body, resp_omit.body_len, 0);
+    assert(doc_omit != NULL);
+    int pt_omit = (int)yyjson_get_sint(
+        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc_omit), "usage"),
+                       "prompt_tokens"));
+    yyjson_doc_free(doc_omit);
+    http_client_response_free(&resp_omit);
+
+    assert(pt_true == pt_omit);
+
+    gen_fixture_down(&f);
+}
+
 /* --- enable_thinking: non-boolean -> 400 --------------------------------- */
 
 static void test_enable_thinking_non_boolean_400(void) {
@@ -1002,6 +1037,7 @@ int main(void) {
     test_chat_sse_logprobs();
     test_top_logprobs_400();
     test_enable_thinking_false();
+    test_enable_thinking_true();
     test_enable_thinking_non_boolean_400();
     printf("test_http_generate: all passed\n");
 
