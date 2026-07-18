@@ -397,6 +397,83 @@ static void test_wait_load_fail_fast(void) {
     engine_destroy(&eng);
 }
 
+/* ---- reload failure clears path and remains recoverable ------------------- */
+
+static void test_reload_failure_clears_path_and_state(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    /* stub OK */
+    assert(engine_post_load(&eng, strdup(MLXD_STUB_MODEL_PATH)) == 0);
+    assert(poll_load_terminal(&eng, 2000) == LOAD_OK);
+    assert(eng.loaded_model != NULL);
+    assert(strcmp(eng.loaded_model, MLXD_STUB_MODEL_PATH) == 0);
+
+    /* failing reload */
+    assert(engine_post_load(&eng, strdup("/no/such/dir")) == 0);
+    assert(poll_load_terminal(&eng, 5000) == LOAD_FAILED);
+    assert(eng.loaded_model == NULL);
+    assert(!engine_loaded(&eng));
+
+    char err[256];
+    assert(engine_load_error(&eng, err, sizeof(err)) == 0);
+    assert(strstr(err, "/no/such/dir") != NULL);
+
+    /* recovery still works (and would UAF under a bad double-free fix) */
+    assert(engine_post_load(&eng, strdup(MLXD_STUB_MODEL_PATH)) == 0);
+    assert(poll_load_terminal(&eng, 2000) == LOAD_OK);
+    assert(eng.loaded_model != NULL);
+    assert(strcmp(eng.loaded_model, MLXD_STUB_MODEL_PATH) == 0);
+
+    engine_destroy(&eng);
+}
+
+/* ---- wait_load must not observe stale LOAD_OK / LOAD_FAILED on reload -- */
+
+static void test_wait_load_no_stale_ok_on_reload(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    /* First load: stub -> LOAD_OK */
+    assert(engine_post_load(&eng, strdup(MLXD_STUB_MODEL_PATH)) == 0);
+    assert(poll_load_terminal(&eng, 2000) == LOAD_OK);
+    assert(engine_wait_load(&eng, 100) == 0);
+
+    /* Second load: missing dir. Wait must NOT return success on stale LOAD_OK. */
+    assert(engine_post_load(&eng, strdup("/no/such/dir")) == 0);
+    assert(engine_load_state(&eng) != LOAD_OK);
+
+    int rc = engine_wait_load(&eng, 5000);
+    assert(rc != 0);
+    assert(engine_load_state(&eng) == LOAD_FAILED);
+
+    char err[256];
+    assert(engine_load_error(&eng, err, sizeof(err)) == 0);
+    assert(strstr(err, "/no/such/dir") != NULL);
+
+    engine_destroy(&eng);
+}
+
+static void test_wait_load_no_stale_failed_on_reload(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    /* First load fails -> LOAD_FAILED */
+    assert(engine_post_load(&eng, strdup("/no/such/dir")) == 0);
+    assert(poll_load_terminal(&eng, 5000) == LOAD_FAILED);
+    assert(engine_wait_load(&eng, 100) != 0);
+
+    /* Reload stub. Wait must NOT return failure on stale LOAD_FAILED. */
+    assert(engine_post_load(&eng, strdup(MLXD_STUB_MODEL_PATH)) == 0);
+    assert(engine_load_state(&eng) != LOAD_FAILED);
+
+    int rc = engine_wait_load(&eng, 5000);
+    assert(rc == 0);
+    assert(engine_load_state(&eng) == LOAD_OK);
+
+    engine_destroy(&eng);
+}
+
 /* ---- B3.5: error_kind zero-init default --------------------------------- */
 
 static void test_error_kind_default_internal(void) {
@@ -1079,6 +1156,9 @@ int main(void) {
     test_load_state_stub_ok();
     test_load_missing_dir_fails();
     test_wait_load_fail_fast();
+    test_reload_failure_clears_path_and_state();
+    test_wait_load_no_stale_ok_on_reload();
+    test_wait_load_no_stale_failed_on_reload();
     test_error_kind_default_internal();
     test_load_then_generate();
     test_generate_truncation();

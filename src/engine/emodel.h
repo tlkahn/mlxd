@@ -8,7 +8,7 @@
 
 #include <stdbool.h>
 
-typedef struct {
+typedef struct engine_model {
     model_config_t cfg;
     weights_t w;
     mlx_stream stream;

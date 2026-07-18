@@ -285,8 +285,8 @@ static int cmd_serve(int argc, char **argv) {
         return 1;
     }
 
-    engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
-    if (!cmd) {
+    char *load_path = strdup(model_dir);
+    if (!load_path) {
         fprintf(stderr, "mlxd serve: out of memory\n");
         engine_destroy(&eng);
         tokenizer_free(tok);
@@ -294,18 +294,14 @@ static int cmd_serve(int argc, char **argv) {
         free(resolved_dir);
         return 1;
     }
-    cmd->tag = CMD_LOAD;
-    cmd->load.model_path = strdup(model_dir);
-    if (!cmd->load.model_path) {
-        fprintf(stderr, "mlxd serve: out of memory\n");
-        free(cmd);
+    if (engine_post_load(&eng, load_path) != 0) {
+        fprintf(stderr, "mlxd serve: failed to post model load\n");
         engine_destroy(&eng);
         tokenizer_free(tok);
         free(chat_template);
         free(resolved_dir);
         return 1;
     }
-    engine_post(&eng, cmd);
 
     if (engine_wait_load(&eng, 30000) != 0) {
         print_load_failure("mlxd serve", &eng);
@@ -436,19 +432,15 @@ static int cmd_run(int argc, char **argv) {
     }
     eng_inited = true;
 
-    engine_cmd_t *load_cmd = calloc(1, sizeof(*load_cmd));
-    if (!load_cmd) {
+    char *load_path = strdup(model_dir);
+    if (!load_path) {
         fprintf(stderr, "mlxd run: out of memory\n");
         goto cleanup;
     }
-    load_cmd->tag = CMD_LOAD;
-    load_cmd->load.model_path = strdup(model_dir);
-    if (!load_cmd->load.model_path) {
-        fprintf(stderr, "mlxd run: out of memory\n");
-        free(load_cmd);
+    if (engine_post_load(&eng, load_path) != 0) {
+        fprintf(stderr, "mlxd run: failed to post model load\n");
         goto cleanup;
     }
-    engine_post(&eng, load_cmd);
 
     if (engine_wait_load_until(&eng, 30000, run_cancel_pred, NULL) != 0) {
         if (atomic_load(&g_run_cancel) > 0) {

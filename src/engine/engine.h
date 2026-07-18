@@ -2,12 +2,14 @@
 #define MLXD_ENGINE_H
 
 #include "core/types.h"
-#include "engine/emodel.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
+
+/* Opaque: concrete layout lives in engine/emodel.h (engine thread only). */
+typedef struct engine_model engine_model_t;
 
 /* Exact strcmp sentinel for the CPU-only echo path. No I/O, no mlx. */
 #define MLXD_STUB_MODEL_PATH "stub"
@@ -95,7 +97,7 @@ typedef struct {
     atomic_int      load_state;
     pthread_mutex_t load_mtx;
     char            load_error[256];
-    engine_model_t  model;        /* valid when LOAD_OK and !model.stub */
+    engine_model_t *model;        /* owned by engine thread; shell allocated in init */
     char           *loaded_model; /* retained path string for logging / unload */
     stream_t       *inflight;
 } engine_t;
@@ -136,5 +138,12 @@ int engine_wait_load_until(engine_t *eng, int timeout_ms,
    safe (re-checked under lock). After destroy returns, posts are
    rejected via atomic fast-path only - the mutex is already destroyed. */
 void engine_post(engine_t *eng, engine_cmd_t *cmd);
+
+/* Post a CMD_LOAD. Takes ownership of model_path (freed by the engine on
+   all paths). Synchronously sets LOAD_IN_PROGRESS and clears load_error
+   when accepted so engine_wait_load cannot observe a stale terminal state.
+   On shutdown rejection, frees path and returns -1 without changing
+   load_state. Returns 0 if enqueued. */
+int engine_post_load(engine_t *eng, char *model_path);
 
 #endif

@@ -135,7 +135,7 @@ compile_commands.json: Makefile
 test-leaks: tests/test_http_server
 	leaks --atExit -- ./tests/test_http_server
 
-.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage clean-coverage unicode-tables fixtures-tiny-ckpt
+.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
 
 # --- Thread Sanitizer tests ---------------------------------------------------
 
@@ -217,8 +217,11 @@ COV_LIB_OBJS := $(filter-out src/main.cov.o, $(COV_ALL_OBJS)) vendor/yyjson/yyjs
 %.cov.o: %.c
 	$(CC) $(ALL_CFLAGS) $(COV_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -c -o $@ $<
 
-COV_TEST_SRCS := $(wildcard tests/test_*.c)
-COV_TEST_BINS := $(COV_TEST_SRCS:tests/test_%.c=$(COV_DIR)/test_%)
+COV_TEST_SRCS     := $(filter-out tests/test_%_gpu.c, $(wildcard tests/test_*.c))
+COV_TEST_BINS     := $(COV_TEST_SRCS:tests/test_%.c=$(COV_DIR)/test_%)
+
+COV_GPU_TEST_SRCS := $(wildcard tests/test_*_gpu.c)
+COV_GPU_TEST_BINS := $(COV_GPU_TEST_SRCS:tests/test_%.c=$(COV_DIR)/test_%)
 
 GENREQ_COV_EXCL := src/http/server.cov.o src/http/gen_request.cov.o src/http/handler.cov.o
 GENREQ_COV_OBJS := $(filter-out $(GENREQ_COV_EXCL), $(COV_LIB_OBJS))
@@ -250,6 +253,26 @@ coverage: $(COV_TEST_BINS) | $(COV_DIR)
 		-ignore-filename-regex='vendor/|tests/'
 	@echo ""
 	@echo "HTML report: $(COV_DIR)/html/index.html"
+
+coverage-gpu: $(COV_GPU_TEST_BINS) fixtures-tiny-ckpt | $(COV_DIR)
+	@rm -f $(COV_DIR)/gpu-*.profraw $(COV_DIR)/gpu-merged.profdata
+	@for t in $(COV_GPU_TEST_BINS); do \
+		LLVM_PROFILE_FILE="$(COV_DIR)/gpu-$$(basename $$t).profraw" ./$$t > /dev/null 2>&1 || true; \
+	done
+	$(LLVM_PROFDATA) merge -sparse $(COV_DIR)/gpu-*.profraw -o $(COV_DIR)/gpu-merged.profdata
+	@echo ""
+	@echo "--- GPU coverage summary ---"
+	@$(LLVM_COV) report $(firstword $(COV_GPU_TEST_BINS)) \
+		$(addprefix -object ,$(wordlist 2,$(words $(COV_GPU_TEST_BINS)),$(COV_GPU_TEST_BINS))) \
+		-instr-profile=$(COV_DIR)/gpu-merged.profdata \
+		-ignore-filename-regex='vendor/|tests/'
+	$(LLVM_COV) show $(firstword $(COV_GPU_TEST_BINS)) \
+		$(addprefix -object ,$(wordlist 2,$(words $(COV_GPU_TEST_BINS)),$(COV_GPU_TEST_BINS))) \
+		-instr-profile=$(COV_DIR)/gpu-merged.profdata \
+		-format=html -output-dir=$(COV_DIR)/html-gpu \
+		-ignore-filename-regex='vendor/|tests/'
+	@echo ""
+	@echo "HTML report: $(COV_DIR)/html-gpu/index.html"
 
 clean-coverage:
 	rm -rf build/cov

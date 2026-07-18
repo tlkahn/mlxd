@@ -208,13 +208,14 @@ static void set_load_error(engine_t *eng, const char *msg) {
     pthread_mutex_unlock(&eng->load_mtx);
 }
 
-/* Free a resident real model (no-op for stub / empty). */
+/* Free a resident real model (no-op for stub / empty). Keeps the shell. */
 static void free_resident_model(engine_t *eng) {
-    if (eng->model.stub) {
-        memset(&eng->model, 0, sizeof(eng->model));
+    if (!eng->model) return;
+    if (eng->model->stub) {
+        memset(eng->model, 0, sizeof(*eng->model));
         return;
     }
-    engine_model_free(&eng->model);
+    engine_model_free(eng->model);
 }
 
 int engine_wait_load_until(engine_t *eng, int timeout_ms,
@@ -383,7 +384,7 @@ static void handle_generate_stub(engine_t *eng, engine_cmd_t *cmd) {
 /* Real prefill + pipelined greedy decode (mlx-lm cadence). */
 static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     stream_t *s = cmd->generate.stream;
-    engine_model_t *em = &eng->model;
+    engine_model_t *em = eng->model;
     int n = cmd->generate.token_count;
     int max_new = cmd->generate.params.max_tokens;
     const int32_t *token_ids = cmd->generate.token_ids;
@@ -582,7 +583,7 @@ static void handle_generate(engine_t *eng, engine_cmd_t *cmd) {
         goto done;
     }
 
-    if (eng->model.stub)
+    if (eng->model->stub)
         handle_generate_stub(eng, cmd);
     else
         handle_generate_real(eng, cmd);
@@ -610,8 +611,8 @@ static void handle_load(engine_t *eng, engine_cmd_t *cmd) {
         free_resident_model(eng);
         free(eng->loaded_model);
         eng->loaded_model = path;
-        memset(&eng->model, 0, sizeof(eng->model));
-        eng->model.stub = true;
+        memset(eng->model, 0, sizeof(*eng->model));
+        eng->model->stub = true;
         set_load_state(eng, LOAD_OK);
         return;
     }
@@ -620,19 +621,20 @@ static void handle_load(engine_t *eng, engine_cmd_t *cmd) {
     free_resident_model(eng);
 
     char errbuf[256] = {0};
-    if (!path || engine_model_load(&eng->model, path, errbuf, sizeof(errbuf)) != 0) {
+    if (!path || engine_model_load(eng->model, path, errbuf, sizeof(errbuf)) != 0) {
         if (errbuf[0] == '\0')
             snprintf(errbuf, sizeof(errbuf), "failed to load model from %s",
                      path ? path : "(null)");
         set_load_error(eng, errbuf);
         free(path);
+        free(eng->loaded_model);
         eng->loaded_model = NULL;
-        memset(&eng->model, 0, sizeof(eng->model));
+        memset(eng->model, 0, sizeof(*eng->model));
         set_load_state(eng, LOAD_FAILED);
         return;
     }
 
-    eng->model.stub = false;
+    eng->model->stub = false;
     free(eng->loaded_model);
     eng->loaded_model = path;
     set_load_state(eng, LOAD_OK);
@@ -642,7 +644,7 @@ static void handle_unload(engine_t *eng) {
     free_resident_model(eng);
     free(eng->loaded_model);
     eng->loaded_model = NULL;
-    memset(&eng->model, 0, sizeof(eng->model));
+    memset(eng->model, 0, sizeof(*eng->model));
     clear_load_error(eng);
     set_load_state(eng, LOAD_IDLE);
 }
@@ -689,6 +691,9 @@ static void *engine_thread_main(void *arg) {
 
 int engine_init(engine_t *eng) {
     memset(eng, 0, sizeof(*eng));
+    eng->model = calloc(1, sizeof(*eng->model));
+    if (!eng->model)
+        return -1;
     pthread_mutex_init(&eng->mailbox_mtx, NULL);
     pthread_cond_init(&eng->mailbox_cond, NULL);
     pthread_mutex_init(&eng->load_mtx, NULL);
@@ -701,6 +706,8 @@ int engine_init(engine_t *eng) {
     eng->inflight = NULL;
 
     if (pthread_create(&eng->thread, NULL, engine_thread_main, eng) != 0) {
+        free(eng->model);
+        eng->model = NULL;
         pthread_mutex_destroy(&eng->mailbox_mtx);
         pthread_cond_destroy(&eng->mailbox_cond);
         pthread_mutex_destroy(&eng->load_mtx);
@@ -725,6 +732,8 @@ void engine_destroy(engine_t *eng) {
     mailbox_drain_cancel(eng);
 
     free_resident_model(eng);
+    free(eng->model);
+    eng->model = NULL;
     free(eng->loaded_model);
     eng->loaded_model = NULL;
     clear_load_error(eng);
@@ -735,18 +744,10 @@ void engine_destroy(engine_t *eng) {
     pthread_mutex_destroy(&eng->load_mtx);
 }
 
-void engine_post(engine_t *eng, engine_cmd_t *cmd) {
-    if (atomic_load(&eng->shutdown)) {
-        cmd_cancel(cmd);
-        return;
-    }
+/* Enqueue under mailbox_mtx. Caller must hold the lock and have already
+   checked shutdown. */
+static void mailbox_enqueue_locked(engine_t *eng, engine_cmd_t *cmd) {
     cmd->next = NULL;
-    pthread_mutex_lock(&eng->mailbox_mtx);
-    if (atomic_load(&eng->shutdown)) {
-        pthread_mutex_unlock(&eng->mailbox_mtx);
-        cmd_cancel(cmd);
-        return;
-    }
     if (eng->mailbox_tail) {
         eng->mailbox_tail->next = cmd;
     } else {
@@ -754,5 +755,46 @@ void engine_post(engine_t *eng, engine_cmd_t *cmd) {
     }
     eng->mailbox_tail = cmd;
     pthread_cond_signal(&eng->mailbox_cond);
+}
+
+void engine_post(engine_t *eng, engine_cmd_t *cmd) {
+    if (atomic_load(&eng->shutdown)) {
+        cmd_cancel(cmd);
+        return;
+    }
+    pthread_mutex_lock(&eng->mailbox_mtx);
+    if (atomic_load(&eng->shutdown)) {
+        pthread_mutex_unlock(&eng->mailbox_mtx);
+        cmd_cancel(cmd);
+        return;
+    }
+    mailbox_enqueue_locked(eng, cmd);
     pthread_mutex_unlock(&eng->mailbox_mtx);
+}
+
+int engine_post_load(engine_t *eng, char *model_path) {
+    engine_cmd_t *cmd = calloc(1, sizeof(*cmd));
+    if (!cmd) {
+        free(model_path);
+        return -1;
+    }
+    cmd->tag = CMD_LOAD;
+    cmd->load.model_path = model_path;
+
+    if (atomic_load(&eng->shutdown)) {
+        cmd_cancel(cmd);
+        return -1;
+    }
+    pthread_mutex_lock(&eng->mailbox_mtx);
+    if (atomic_load(&eng->shutdown)) {
+        pthread_mutex_unlock(&eng->mailbox_mtx);
+        cmd_cancel(cmd);
+        return -1;
+    }
+    /* Synchronize the waiter with "a load is outstanding". */
+    clear_load_error(eng);
+    set_load_state(eng, LOAD_IN_PROGRESS);
+    mailbox_enqueue_locked(eng, cmd);
+    pthread_mutex_unlock(&eng->mailbox_mtx);
+    return 0;
 }

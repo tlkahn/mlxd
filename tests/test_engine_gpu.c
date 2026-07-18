@@ -26,12 +26,9 @@ static load_state_t poll_load_terminal(engine_t *eng, int timeout_ms) {
 }
 
 static void post_load(engine_t *eng, const char *path) {
-    engine_cmd_t *load = calloc(1, sizeof(*load));
-    assert(load);
-    load->tag = CMD_LOAD;
-    load->load.model_path = strdup(path);
-    assert(load->load.model_path);
-    engine_post(eng, load);
+    char *p = strdup(path);
+    assert(p);
+    assert(engine_post_load(eng, p) == 0);
 }
 
 /* ---- B3.3: real CMD_LOAD of tiny_qwen3 ---------------------------------- */
