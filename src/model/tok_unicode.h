@@ -40,9 +40,19 @@ typedef struct {
 
 void uc_build_bytes_to_unicode(uc_bytes_unicode_t *t);
 
+typedef enum {
+    UC_SCAN_ASCII,
+    UC_SCAN_VALID,
+    UC_SCAN_INVALID,
+} uc_scan_result;
+
+uc_scan_result uc_utf8_scan(const char *data, size_t len);
+
 /* NFC/NFKC normalization via CoreFoundation. Returns a malloc'd NUL-terminated
  * UTF-8 string; caller frees. Byte length (excl. NUL) written to *out_len.
- * Returns NULL on invalid UTF-8 (caller should fall back to raw input).
+ * Returns NULL on failure (invalid UTF-8 or allocation error); *out_len is
+ * always written (0 on failure). Callers that must distinguish invalid input
+ * from OOM should pre-validate with uc_utf8_scan. out_len must be non-NULL.
  * Empty input returns non-NULL "" with *out_len = 0.
  * Unlike other tok_unicode functions these allocate: normalization can change
  * byte length unboundedly. */

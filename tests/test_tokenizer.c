@@ -918,6 +918,24 @@ static void load_lowercase_normalizer_ok(void) {
     tokenizer_free(tok);
 }
 
+static void load_nfkc_normalizer_ok(void) {
+    const char *json =
+        "{\"normalizer\":{\"type\":\"NFKC\"},"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    tokenizer_free(tok);
+}
+
+static void load_stripaccents_normalizer_ok(void) {
+    const char *json =
+        "{\"normalizer\":{\"type\":\"StripAccents\"},"
+        "\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]}}";
+    tokenizer_t *tok = tokenizer_load_json(json, strlen(json));
+    assert(tok != NULL);
+    tokenizer_free(tok);
+}
+
 /* NFC/NFKC are now implemented: they must NOT warn. Lowercase/StripAccents
  * still warn. Replace stays silent: its space-to-U+2581 rewrite IS
  * implemented by the SentencePiece encoder. */
@@ -927,9 +945,18 @@ static void test_normalizer_unimplemented_warns(void) {
     assert(strstr(err, "not implemented") == NULL);
     free(err);
 
+    err = capture_stderr(load_nfkc_normalizer_ok);
+    assert(strstr(err, "not implemented") == NULL);
+    free(err);
+
     err = capture_stderr(load_lowercase_normalizer_ok);
     assert(strstr(err, "not implemented") != NULL);
     assert(strstr(err, "Lowercase") != NULL);
+    free(err);
+
+    err = capture_stderr(load_stripaccents_normalizer_ok);
+    assert(strstr(err, "not implemented") != NULL);
+    assert(strstr(err, "StripAccents") != NULL);
     free(err);
 
     err = capture_stderr(load_replace_normalizer_ok);

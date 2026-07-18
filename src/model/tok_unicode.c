@@ -8,6 +8,23 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 
+uc_scan_result uc_utf8_scan(const char *data, size_t len) {
+    if (len == 0) return UC_SCAN_ASCII;
+    const uint8_t *p = (const uint8_t *)data;
+    bool saw_non_ascii = false;
+    uint32_t pos = 0;
+    uint32_t n = (len > UINT32_MAX) ? UINT32_MAX : (uint32_t)len;
+    while (pos < n) {
+        uc_cp_info r = uc_decode_codepoint(p, n, pos);
+        if (r.len == 0) break;
+        if (r.cp == 0xFFFD && r.len == 1)
+            return UC_SCAN_INVALID;
+        if (r.cp >= 0x80) saw_non_ascii = true;
+        pos += r.len;
+    }
+    return saw_non_ascii ? UC_SCAN_VALID : UC_SCAN_ASCII;
+}
+
 static char *cf_normalize(const char *input, size_t len,
                           CFStringNormalizationForm form, size_t *out_len) {
     if (len == 0) {
@@ -17,11 +34,11 @@ static char *cf_normalize(const char *input, size_t len,
     CFStringRef src = CFStringCreateWithBytes(
         kCFAllocatorDefault, (const UInt8 *)input, (CFIndex)len,
         kCFStringEncodingUTF8, false);
-    if (!src) return NULL;
+    if (!src) { *out_len = 0; return NULL; }
 
     CFMutableStringRef mut = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, src);
     CFRelease(src);
-    if (!mut) return NULL;
+    if (!mut) { *out_len = 0; return NULL; }
 
     CFStringNormalize(mut, form);
 
@@ -29,13 +46,14 @@ static char *cf_normalize(const char *input, size_t len,
     CFStringGetBytes(mut, CFRangeMake(0, CFStringGetLength(mut)),
                      kCFStringEncodingUTF8, 0, false, NULL, 0, &needed);
     char *buf = malloc((size_t)needed + 1);
-    if (!buf) { CFRelease(mut); return NULL; }
+    if (!buf) { CFRelease(mut); *out_len = 0; return NULL; }
 
+    CFIndex used = 0;
     CFStringGetBytes(mut, CFRangeMake(0, CFStringGetLength(mut)),
-                     kCFStringEncodingUTF8, 0, false, (UInt8 *)buf, needed, NULL);
-    buf[needed] = '\0';
+                     kCFStringEncodingUTF8, 0, false, (UInt8 *)buf, needed, &used);
+    buf[used] = '\0';
     CFRelease(mut);
-    *out_len = (size_t)needed;
+    *out_len = (size_t)used;
     return buf;
 }
 

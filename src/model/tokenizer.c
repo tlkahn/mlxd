@@ -228,7 +228,8 @@ static void parse_normalizer(yyjson_val *norm, tokenizer_t *tok, bool *err) {
     if (strcmp(type, "Replace") == 0 || strcmp(type, "BertNormalizer") == 0)
         return;
     if (strcmp(type, "NFC") == 0) {
-        tok->norm_form = NORM_NFC;
+        if (tok->norm_form != NORM_NFKC)
+            tok->norm_form = NORM_NFC;
         return;
     }
     if (strcmp(type, "NFKC") == 0) {
@@ -1511,15 +1512,21 @@ int tokenizer_encode_alloc(const tokenizer_t *tok, const char *text, size_t len,
     if (len > (size_t)INT32_MAX) return -1;
 
     if (tok->norm_form != NORM_NONE && len > 0) {
-        size_t norm_len;
-        char  *norm = (tok->norm_form == NORM_NFC)
-                          ? uc_normalize_nfc(text, len, &norm_len)
-                          : uc_normalize_nfkc(text, len, &norm_len);
-        if (norm) {
+        uc_scan_result scan = uc_utf8_scan(text, len);
+        if (scan == UC_SCAN_VALID) {
+            size_t norm_len;
+            char  *norm = (tok->norm_form == NORM_NFC)
+                              ? uc_normalize_nfc(text, len, &norm_len)
+                              : uc_normalize_nfkc(text, len, &norm_len);
+            if (!norm) return -1;
             int ret = encode_alloc_impl(tok, norm, norm_len, parse_special, out_ids);
             free(norm);
             return ret;
         }
+        /* ASCII: invariant under NFC/NFKC, skip CF round-trip.
+           INVALID: encode raw (intentional fallback; non-ASCII specials with
+           normalized:false are a known residual HF divergence, acceptable for
+           the common ASCII-special case like <|im_start|>). */
     }
     return encode_alloc_impl(tok, text, len, parse_special, out_ids);
 }

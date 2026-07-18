@@ -356,6 +356,55 @@ static void test_encode_codepoint_rejects(void) {
     assert(uc_encode_codepoint(UINT32_MAX, buf) == 0);
 }
 
+/* --- uc_utf8_scan ------------------------------------------------------------ */
+
+static void test_utf8_scan_ascii(void) {
+    assert(uc_utf8_scan("hello", 5) == UC_SCAN_ASCII);
+}
+
+static void test_utf8_scan_empty(void) {
+    assert(uc_utf8_scan("", 0) == UC_SCAN_ASCII);
+}
+
+static void test_utf8_scan_valid_multibyte(void) {
+    /* e-acute: \xC3\xA9 */
+    assert(uc_utf8_scan("\xc3\xa9", 2) == UC_SCAN_VALID);
+}
+
+static void test_utf8_scan_invalid_lead(void) {
+    assert(uc_utf8_scan("\xff", 1) == UC_SCAN_INVALID);
+}
+
+static void test_utf8_scan_truncated(void) {
+    /* 2-byte lead with no continuation */
+    assert(uc_utf8_scan("\xc3", 1) == UC_SCAN_INVALID);
+}
+
+static void test_utf8_scan_overlong(void) {
+    /* 2-byte overlong for U+0000 */
+    assert(uc_utf8_scan("\xc0\x80", 2) == UC_SCAN_INVALID);
+}
+
+static void test_utf8_scan_surrogate(void) {
+    /* U+D800 encoded as 3 bytes */
+    assert(uc_utf8_scan("\xed\xa0\x80", 3) == UC_SCAN_INVALID);
+}
+
+static void test_utf8_scan_literal_fffd(void) {
+    /* Real U+FFFD is valid UTF-8 (3 bytes: EF BF BD) */
+    assert(uc_utf8_scan("\xef\xbf\xbd", 3) == UC_SCAN_VALID);
+}
+
+static void test_utf8_scan_mixed_ascii_multibyte(void) {
+    /* "cafe\xcc\x81" = "cafe" + combining acute */
+    assert(uc_utf8_scan("cafe\xcc\x81", 6) == UC_SCAN_VALID);
+}
+
+static void test_utf8_scan_invalid_in_middle(void) {
+    /* valid prefix + invalid byte + valid suffix */
+    assert(uc_utf8_scan("a\xff" "b", 3) == UC_SCAN_INVALID);
+}
+
 /* --- uc_normalize_nfc -------------------------------------------------------- */
 
 static void test_normalize_nfc_compose(void) {
@@ -392,9 +441,10 @@ static void test_normalize_empty(void) {
 }
 
 static void test_normalize_invalid_utf8(void) {
-    size_t n;
+    size_t n = 777;
     char *r = uc_normalize_nfc("\xff\xfe", 2, &n);
     assert(r == NULL);
+    assert(n == 0);
 }
 
 /* --- uc_normalize_nfkc ------------------------------------------------------- */
@@ -488,6 +538,16 @@ int main(void) {
     test_uc_is_whitespace_cp_exact();
     test_encode_codepoint();
     test_encode_codepoint_rejects();
+    test_utf8_scan_ascii();
+    test_utf8_scan_empty();
+    test_utf8_scan_valid_multibyte();
+    test_utf8_scan_invalid_lead();
+    test_utf8_scan_truncated();
+    test_utf8_scan_overlong();
+    test_utf8_scan_surrogate();
+    test_utf8_scan_literal_fffd();
+    test_utf8_scan_mixed_ascii_multibyte();
+    test_utf8_scan_invalid_in_middle();
     test_normalize_nfc_compose();
     test_normalize_empty();
     test_normalize_invalid_utf8();
