@@ -486,6 +486,104 @@ static bool map_has_prefix(mlx_map_string_to_array map, const char *prefix) {
     return found;
 }
 
+int weights_validate_expected(mlx_map_string_to_array merged,
+                              const model_config_t *cfg,
+                              const weight_expected_t *expected, int n,
+                              char *err, size_t errlen) {
+    for (int i = 0; i < n; i++) {
+        if (expected[i].kind == WEIGHT_KIND_BIAS) {
+            if (!map_has_key(merged, expected[i].name)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "missing expected tensor \"%s\"",
+                             expected[i].name);
+                return -1;
+            }
+            mlx_dtype bdt;
+            if (map_get_dtype(merged, expected[i].name, &bdt) == 0 &&
+                !dtype_is_floating(bdt)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "bias tensor \"%s\" has non-float dtype %d",
+                             expected[i].name, bdt);
+                return -1;
+            }
+            continue;
+        }
+
+        char wname[270];
+        snprintf(wname, sizeof(wname), "%s.weight", expected[i].name);
+
+        if (!map_has_key(merged, wname)) {
+            if (err && errlen > 0)
+                snprintf(err, errlen,
+                         "missing expected tensor \"%s\"", wname);
+            return -1;
+        }
+
+        mlx_dtype wdt;
+        if (map_get_dtype(merged, wname, &wdt) != 0) continue;
+
+        if (expected[i].kind == WEIGHT_KIND_NORM) {
+            if (!dtype_is_floating(wdt)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "norm tensor \"%s\" has non-float dtype %d",
+                             wname, wdt);
+                return -1;
+            }
+        } else {
+            if (wdt == MLX_UINT32) {
+                if (cfg->quant_bits <= 0) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "tensor \"%s\" is uint32 but config has no quantization",
+                                 wname);
+                    return -1;
+                }
+                char sname[270], bname[270];
+                snprintf(sname, sizeof(sname), "%s.scales",
+                         expected[i].name);
+                snprintf(bname, sizeof(bname), "%s.biases",
+                         expected[i].name);
+                if (!map_has_key(merged, sname) ||
+                    !map_has_key(merged, bname)) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "quantized tensor \"%s\" missing scales/biases",
+                                 expected[i].name);
+                    return -1;
+                }
+                mlx_dtype sdt, bdt;
+                if (map_get_dtype(merged, sname, &sdt) == 0 &&
+                    !dtype_is_floating(sdt)) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "scales \"%s\" has non-float dtype %d",
+                                 sname, sdt);
+                    return -1;
+                }
+                if (map_get_dtype(merged, bname, &bdt) == 0 &&
+                    !dtype_is_floating(bdt)) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "biases \"%s\" has non-float dtype %d",
+                                 bname, bdt);
+                    return -1;
+                }
+            } else if (!dtype_is_floating(wdt)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "tensor \"%s\" has unexpected dtype %d "
+                             "(expected float or uint32)",
+                             wname, wdt);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int weights_validate(mlx_map_string_to_array merged,
                             const model_config_t *cfg,
                             char **index_keys, size_t n_index_keys,
@@ -644,7 +742,7 @@ static int weights_validate(mlx_map_string_to_array merged,
         mlx_map_string_to_array_iterator_free(it);
     }
 
-    /* Strict expected-set validation (qwen3 only) */
+    /* Strict expected-set validation */
     {
         int n_expected = weights_expected_names(cfg, NULL, 0);
         if (n_expected > 0) {
@@ -664,86 +762,9 @@ static int weights_validate(mlx_map_string_to_array merged,
                 return -1;
             }
 
-            int strict_rc = 0;
-            for (int i = 0; i < erc; i++) {
-                char wname[270];
-                snprintf(wname, sizeof(wname), "%s.weight", expected[i].name);
-
-                if (!map_has_key(merged, wname)) {
-                    if (err && errlen > 0)
-                        snprintf(err, errlen,
-                                 "missing expected tensor \"%s\"", wname);
-                    strict_rc = -1;
-                    break;
-                }
-
-                mlx_dtype wdt;
-                if (map_get_dtype(merged, wname, &wdt) != 0) continue;
-
-                if (expected[i].kind == WEIGHT_KIND_NORM) {
-                    if (!dtype_is_floating(wdt)) {
-                        if (err && errlen > 0)
-                            snprintf(err, errlen,
-                                     "norm tensor \"%s\" has non-float dtype %d",
-                                     wname, wdt);
-                        strict_rc = -1;
-                        break;
-                    }
-                } else {
-                    /* MATMUL or EMBED: dense (float) or quantized triplet */
-                    if (wdt == MLX_UINT32) {
-                        if (cfg->quant_bits <= 0) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "tensor \"%s\" is uint32 but config has no quantization",
-                                         wname);
-                            strict_rc = -1;
-                            break;
-                        }
-                        char sname[270], bname[270];
-                        snprintf(sname, sizeof(sname), "%s.scales",
-                                 expected[i].name);
-                        snprintf(bname, sizeof(bname), "%s.biases",
-                                 expected[i].name);
-                        if (!map_has_key(merged, sname) ||
-                            !map_has_key(merged, bname)) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "quantized tensor \"%s\" missing scales/biases",
-                                         expected[i].name);
-                            strict_rc = -1;
-                            break;
-                        }
-                        mlx_dtype sdt, bdt;
-                        if (map_get_dtype(merged, sname, &sdt) == 0 &&
-                            !dtype_is_floating(sdt)) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "scales \"%s\" has non-float dtype %d",
-                                         sname, sdt);
-                            strict_rc = -1;
-                            break;
-                        }
-                        if (map_get_dtype(merged, bname, &bdt) == 0 &&
-                            !dtype_is_floating(bdt)) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "biases \"%s\" has non-float dtype %d",
-                                         bname, bdt);
-                            strict_rc = -1;
-                            break;
-                        }
-                    } else if (!dtype_is_floating(wdt)) {
-                        if (err && errlen > 0)
-                            snprintf(err, errlen,
-                                     "tensor \"%s\" has unexpected dtype %d "
-                                     "(expected float or uint32)",
-                                     wname, wdt);
-                        strict_rc = -1;
-                        break;
-                    }
-                }
-            }
+            int strict_rc = weights_validate_expected(merged, cfg,
+                                                      expected, erc,
+                                                      err, errlen);
             free(expected);
             if (strict_rc != 0)
                 return -1;

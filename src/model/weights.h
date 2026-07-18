@@ -46,6 +46,11 @@ int weights_expected_names_from_desc(const weights_family_desc_t *desc,
                                      const model_config_t *cfg,
                                      weight_expected_t *out, int capacity);
 
+int weights_validate_expected(mlx_map_string_to_array merged,
+                              const model_config_t *cfg,
+                              const weight_expected_t *expected, int n,
+                              char *err, size_t errlen);
+
 int weights_enumerate_shards(const char *model_dir, char ***paths,
                              size_t *count, bool *from_index);
 void weights_free_shard_paths(char **paths, size_t count);
