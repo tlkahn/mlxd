@@ -292,6 +292,15 @@ int weights_expected_names_from_desc(const weights_family_desc_t *desc,
                     return -1;
             }
         }
+        if (cfg->attention_bias) {
+            for (const char *const *p = desc->layer_biases; p && *p; p++) {
+                if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
+                    if (emit_expected(out, capacity, &pos, buf,
+                                      WEIGHT_KIND_BIAS) != 0)
+                        return -1;
+                }
+            }
+        }
         for (const char *const *p = desc->layer_norms; p && *p; p++) {
             if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
                 if (emit_expected(out, capacity, &pos, buf,

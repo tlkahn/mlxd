@@ -523,6 +523,56 @@ static void test_expected_names_from_desc_synthetic(void) {
     assert(names[4].kind == WEIGHT_KIND_NORM);
 }
 
+/* ---- Cycle CR-B: wire layer_biases ---- */
+
+static void test_expected_names_from_desc_biases(void) {
+    static const char *const syn_matmuls[] = { "attn.wq", NULL };
+    static const char *const syn_norms[]   = { "ln1", NULL };
+    static const char *const syn_biases[]  = { "attn.wq.bias", NULL };
+
+    weights_family_desc_t desc = {
+        .family         = MODEL_FAMILY_UNKNOWN,
+        .layer_matmuls  = syn_matmuls,
+        .layer_norms    = syn_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = syn_biases,
+        .extra_tensors  = NULL,
+    };
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_FAMILY_UNKNOWN;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.tie_word_embeddings = true;
+
+    cfg.attention_bias = false;
+    int count_no_bias = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count_no_bias == 4);
+
+    weight_expected_t names_no_bias[4];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names_no_bias, 4) == 4);
+    for (int i = 0; i < 4; i++)
+        assert(names_no_bias[i].kind != WEIGHT_KIND_BIAS);
+
+    cfg.attention_bias = true;
+    int count_bias = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count_bias == 5);
+
+    weight_expected_t names_bias[5];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names_bias, 5) == 5);
+
+    assert(strcmp(names_bias[0].name, "model.embed_tokens") == 0);
+    assert(names_bias[0].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names_bias[1].name, "model.layers.0.attn.wq") == 0);
+    assert(names_bias[1].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names_bias[2].name, "model.layers.0.attn.wq.bias") == 0);
+    assert(names_bias[2].kind == WEIGHT_KIND_BIAS);
+    assert(strcmp(names_bias[3].name, "model.layers.0.ln1") == 0);
+    assert(names_bias[3].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names_bias[4].name, "model.norm") == 0);
+    assert(names_bias[4].kind == WEIGHT_KIND_NORM);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -591,6 +641,9 @@ int main(void) {
 
     test_expected_names_from_desc_synthetic();
     printf("  test_expected_names_from_desc_synthetic: passed\n");
+
+    test_expected_names_from_desc_biases();
+    printf("  test_expected_names_from_desc_biases: passed\n");
 
     printf("test_weights: all passed\n");
     return 0;

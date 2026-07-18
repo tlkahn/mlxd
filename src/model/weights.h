@@ -13,6 +13,7 @@ typedef enum {
     WEIGHT_KIND_EMBED = 0,
     WEIGHT_KIND_MATMUL,
     WEIGHT_KIND_NORM,
+    WEIGHT_KIND_BIAS,
 } weight_kind_t;
 
 typedef struct {
