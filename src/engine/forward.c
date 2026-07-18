@@ -1,5 +1,6 @@
 #include "engine/forward.h"
 
+#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -70,6 +71,12 @@ int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
     mlx_array flat = mlx_array_new();
     mlx_array taken = mlx_array_new();
     mlx_array result = mlx_array_new();
+    mlx_array dq = mlx_array_new();
+    mlx_array dq_weight = mlx_array_new();
+    mlx_array dq_scales = mlx_array_new();
+    mlx_array dq_biases = mlx_array_new();
+    mlx_array embed_w = mlx_array_new();
+    mlx_array bf16 = mlx_array_new();
 
     int ndim = (int)mlx_array_ndim(ids);
     int B = ndim >= 2 ? mlx_array_dim(ids, 0) : 1;
@@ -83,12 +90,6 @@ int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
     if (weights_get_triplet(&tri, w, name) != 0) goto cleanup;
 
     if (tri.quantized) {
-        mlx_array dq = mlx_array_new();
-        mlx_array rows = mlx_array_new();
-        mlx_array dq_weight = mlx_array_new();
-        mlx_array dq_scales = mlx_array_new();
-        mlx_array dq_biases = mlx_array_new();
-
         if (!MLXB_CHECK(mlx_take_axis(&dq_weight, tri.weight, flat, 0, s)) ||
             !MLXB_CHECK(mlx_take_axis(&dq_scales, tri.scales, flat, 0, s)) ||
             !MLXB_CHECK(mlx_take_axis(&dq_biases, tri.biases, flat, 0, s)) ||
@@ -100,75 +101,53 @@ int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
                 (mlx_array){.ctx = NULL},
                 (mlx_optional_dtype){.has_value = false},
                 s))) {
-            mlx_array_free(dq_biases);
-            mlx_array_free(dq_scales);
-            mlx_array_free(dq_weight);
-            mlx_array_free(rows);
-            mlx_array_free(dq);
             weights_triplet_free(&tri);
             goto cleanup;
         }
 
         int out_shape[] = {B, S, cfg->hidden_size};
         if (!MLXB_CHECK(mlx_reshape(&result, dq, out_shape, 3, s))) {
-            mlx_array_free(dq_biases);
-            mlx_array_free(dq_scales);
-            mlx_array_free(dq_weight);
-            mlx_array_free(rows);
-            mlx_array_free(dq);
             weights_triplet_free(&tri);
             goto cleanup;
         }
-
-        mlx_array_free(dq_biases);
-        mlx_array_free(dq_scales);
-        mlx_array_free(dq_weight);
-        mlx_array_free(rows);
-        mlx_array_free(dq);
     } else {
-        mlx_array embed_w = mlx_array_new();
         char wname[270];
         snprintf(wname, sizeof(wname), "%s.weight", name);
         if (weights_get(&embed_w, w, wname) != 0) {
-            mlx_array_free(embed_w);
             weights_triplet_free(&tri);
             goto cleanup;
         }
 
         if (!MLXB_CHECK(mlx_take_axis(&taken, embed_w, flat, 0, s))) {
-            mlx_array_free(embed_w);
             weights_triplet_free(&tri);
             goto cleanup;
         }
 
-        mlx_array bf16 = mlx_array_new();
         if (!MLXB_CHECK(mlx_astype(&bf16, taken, MLX_BFLOAT16, s))) {
-            mlx_array_free(bf16);
-            mlx_array_free(embed_w);
             weights_triplet_free(&tri);
             goto cleanup;
         }
 
         int out_shape[] = {B, S, cfg->hidden_size};
         if (!MLXB_CHECK(mlx_reshape(&result, bf16, out_shape, 3, s))) {
-            mlx_array_free(bf16);
-            mlx_array_free(embed_w);
             weights_triplet_free(&tri);
             goto cleanup;
         }
-
-        mlx_array_free(bf16);
-        mlx_array_free(embed_w);
     }
 
     weights_triplet_free(&tri);
-    mlx_array_free(taken);
-    mlx_array_free(flat);
     mlx_array_free(*out);
     *out = result;
-    return 0;
+    result = mlx_array_new();
+    rc = 0;
 
 cleanup:
+    mlx_array_free(bf16);
+    mlx_array_free(embed_w);
+    mlx_array_free(dq_biases);
+    mlx_array_free(dq_scales);
+    mlx_array_free(dq_weight);
+    mlx_array_free(dq);
     mlx_array_free(result);
     mlx_array_free(taken);
     mlx_array_free(flat);
@@ -288,6 +267,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
 
     /* RoPE - offset read BEFORE kvcache_update */
     int offset = kvcache_layer_offset(kv, layer);
+    assert(offset >= 0);
     if (!MLXB_CHECK(mlx_fast_rope(&q_roped, q_transposed, hd, false,
             (mlx_optional_float){.value = cfg->rope_theta, .has_value = true},
             1.0f, offset, (mlx_array){.ctx = NULL}, s))) goto cleanup;

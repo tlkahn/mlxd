@@ -19,6 +19,8 @@ static void test_init_free(void) {
         assert(kv.entries[layer].initialized == false);
         assert(kv.entries[layer].capacity == 0);
     }
+    assert(kvcache_layer_offset(&kv, -1) == -1);
+    assert(kvcache_layer_offset(&kv, 2) == -1);
     kvcache_free(&kv);
 
     /* free is idempotent on a zeroed struct */
@@ -237,6 +239,75 @@ static void test_bulk(void) {
     kvcache_free(&kv);
 }
 
+/* ---- bulk write that forces grow on non-empty cache ---- */
+
+static void test_bulk_grow(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+
+    /* Seed: single-step write, offset -> 1, capacity -> 1 */
+    int shape1[] = {1, 2, 1, 16};
+    float seed_vals[32];
+    for (int i = 0; i < 32; i++) seed_vals[i] = 7.0f;
+    mlx_array sf32 = mlx_array_new_data(seed_vals, shape1, 4, MLX_FLOAT32);
+    mlx_array sk = mlx_array_new();
+    mlx_array sv = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&sk, sf32, MLX_BFLOAT16, s));
+    MLXB_CHECK(mlx_astype(&sv, sf32, MLX_BFLOAT16, s));
+
+    mlx_array kv0 = mlx_array_new();
+    mlx_array vv0 = mlx_array_new();
+    assert(kvcache_update(&kv, 0, sk, sv, &kv0, &vv0, s) == 0);
+    assert(kvcache_layer_offset(&kv, 0) == 1);
+    assert(kvcache_capacity(&kv, 0) == 1);
+
+    /* Bulk write: 3 tokens, needs capacity >= 4, forces grow with offset > 0 */
+    int shape3[] = {1, 2, 3, 16};
+    float bulk_vals[96];
+    for (int h = 0; h < 2; h++)
+        for (int t = 0; t < 3; t++)
+            for (int d = 0; d < 16; d++)
+                bulk_vals[h * 48 + t * 16 + d] = (float)(t + 1);
+    mlx_array bf32 = mlx_array_new_data(bulk_vals, shape3, 4, MLX_FLOAT32);
+    mlx_array bk = mlx_array_new();
+    mlx_array bv = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&bk, bf32, MLX_BFLOAT16, s));
+    MLXB_CHECK(mlx_astype(&bv, bf32, MLX_BFLOAT16, s));
+
+    mlx_array kv1 = mlx_array_new();
+    mlx_array vv1 = mlx_array_new();
+    assert(kvcache_update(&kv, 0, bk, bv, &kv1, &vv1, s) == 0);
+    assert(kvcache_layer_offset(&kv, 0) == 4);
+    assert(kvcache_capacity(&kv, 0) == 4);
+
+    /* Verify: row 0 = 7.0 (seeded), rows 1-3 = 1.0, 2.0, 3.0 */
+    assert(MLXB_CHECK(mlx_array_eval(kv1)));
+    assert(mlx_array_dim(kv1, 2) == 4);
+    mlx_array kf32 = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&kf32, kv1, MLX_FLOAT32, s));
+    assert(MLXB_CHECK(mlx_array_eval(kf32)));
+    const float *kdata = mlx_array_data_float32(kf32);
+    for (int d = 0; d < 16; d++)
+        assert(fabsf(kdata[d] - 7.0f) < 1e-2f);
+    for (int t = 0; t < 3; t++)
+        for (int d = 0; d < 16; d++)
+            assert(fabsf(kdata[(t + 1) * 16 + d] - (float)(t + 1)) < 1e-2f);
+
+    mlx_array_free(kf32);
+    mlx_array_free(vv1);
+    mlx_array_free(kv1);
+    mlx_array_free(bv);
+    mlx_array_free(bk);
+    mlx_array_free(bf32);
+    mlx_array_free(vv0);
+    mlx_array_free(kv0);
+    mlx_array_free(sv);
+    mlx_array_free(sk);
+    mlx_array_free(sf32);
+    kvcache_free(&kv);
+}
+
 int main(void) {
     test_init_free();
     printf("  test_init_free: passed\n");
@@ -249,6 +320,9 @@ int main(void) {
 
     test_bulk();
     printf("  test_bulk: passed\n");
+
+    test_bulk_grow();
+    printf("  test_bulk_grow: passed\n");
 
     printf("test_kvcache_gpu: all passed\n");
     return 0;

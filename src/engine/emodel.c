@@ -25,7 +25,6 @@ int engine_model_load(engine_model_t *em, const char *model_dir) {
 
     em->stream = mlxbridge_gpu_stream();
     em->attn_scale = 1.0f / sqrtf((float)em->cfg.head_dim);
-    em->stub = false;
     return 0;
 }
 

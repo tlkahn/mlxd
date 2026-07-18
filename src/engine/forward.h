@@ -6,6 +6,8 @@
 #include "model/weights.h"
 #include "engine/kvcache.h"
 
+#include <stdbool.h>
+
 int fwd_linear(mlx_array *out, mlx_array x, const weight_triplet_t *tri,
                const model_config_t *cfg, bool bias, mlx_stream s);
 

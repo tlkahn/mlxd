@@ -13,7 +13,6 @@ typedef struct {
     weights_t w;
     mlx_stream stream;
     float attn_scale;
-    bool stub;
 } engine_model_t;
 
 int engine_model_load(engine_model_t *em, const char *model_dir);

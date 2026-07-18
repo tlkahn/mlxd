@@ -460,7 +460,6 @@ static void test_emodel(void) {
 
     engine_model_t em;
     assert(engine_model_load(&em, path) == 0);
-    assert(!em.stub);
 
     int32_t ids_data[] = {1, 2, 3, 4, 5};
     int ids_shape[] = {1, 5};
@@ -490,6 +489,39 @@ static void test_emodel(void) {
     assert(kvcache_layer_offset(&kv2, 0) == 5);
 
     kvcache_free(&kv2);
+    mlx_array_free(ids);
+    engine_model_free(&em);
+}
+
+/* ---- B1.7b: emodel tied lm_head path ---- */
+
+static void test_emodel_tied(void) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tiny_qwen3", FIXTURES);
+
+    engine_model_t em;
+    assert(engine_model_load(&em, path) == 0);
+
+    em.cfg.tie_word_embeddings = true;
+
+    int32_t ids_data[] = {1, 2, 3, 4, 5};
+    int ids_shape[] = {1, 5};
+    mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, em.cfg.num_hidden_layers,
+                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+
+    mlx_array logits = mlx_array_new();
+    assert(model_forward(&em, ids, &kv, true, &logits) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(logits)));
+    assert(mlx_array_ndim(logits) == 2);
+    assert(mlx_array_dim(logits, 0) == 1);
+    assert(mlx_array_dim(logits, 1) == em.cfg.vocab_size);
+    assert(is_finite_f32(logits, gpu));
+
+    mlx_array_free(logits);
+    kvcache_free(&kv);
     mlx_array_free(ids);
     engine_model_free(&em);
 }
@@ -606,6 +638,9 @@ int main(void) {
 
     test_emodel();
     printf("  test_emodel: passed\n");
+
+    test_emodel_tied();
+    printf("  test_emodel_tied: passed\n");
 
     test_incremental_equals_full();
     printf("  test_incremental_equals_full: passed\n");
