@@ -32,6 +32,8 @@ typedef struct {
     float temperature;
     bool temperature_set;
     bool stream;
+    bool raw;
+    bool token_ids;
 } cli_run_opts_t;
 
 typedef struct {

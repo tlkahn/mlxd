@@ -79,7 +79,7 @@ tests/test_http_gen_request: tests/test_http_gen_request.c $(GENREQ_OBJS)
 tests/test_%: tests/test_%.c $(LIB_OBJS)
 	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(LIB_OBJS) $(ALL_LDFLAGS)
 
-test: $(TEST_BINS)
+test: $(TEST_BINS) test-parity-skip test-parity-script
 	@pass=0; fail=0; \
 	for t in $(TEST_BINS); do \
 		printf "  %-40s" "$$(basename $$t)"; \
@@ -135,7 +135,34 @@ compile_commands.json: Makefile
 test-leaks: tests/test_http_server
 	leaks --atExit -- ./tests/test_http_server
 
-.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
+test-parity-skip:
+	@out=$$(env -u MLXD_MLX_SERVE_BIN sh scripts/parity_temp0.sh 2>&1) && \
+		printf '%s\n' "$$out" | grep -q 'skipped' || \
+		{ printf "  %-40sFAIL (env-unset skip)\n" "parity-skip"; exit 1; }
+	@out=$$(MLXD_MLX_SERVE_BIN=/nonexistent sh scripts/parity_temp0.sh /nonexistent-ckpt 2>&1) && \
+		printf '%s\n' "$$out" | grep -q 'skipped' || \
+		{ printf "  %-40sFAIL (bad-bin skip)\n" "parity-skip"; exit 1; }
+	@tmpdir=$$(mktemp -d); \
+	mkdir -p "$$tmpdir/scripts"; \
+	cp scripts/parity_temp0.sh "$$tmpdir/scripts/"; \
+	printf '#!/bin/sh\nexit 0\n' > "$$tmpdir/stub"; chmod +x "$$tmpdir/stub"; \
+	mkdir -p "$$tmpdir/ckpt"; \
+	out=$$(MLXD_MLX_SERVE_BIN="$$tmpdir/stub" sh "$$tmpdir/scripts/parity_temp0.sh" "$$tmpdir/ckpt" 2>&1) && rc=0 || rc=$$?; \
+	rm -rf "$$tmpdir"; \
+	if [ "$$rc" -eq 0 ]; then printf "  %-40sFAIL (build-fail: expected nonzero exit)\n" "parity-skip"; exit 1; fi; \
+	printf '%s\n' "$$out" | grep -q 'build failed' || \
+	{ printf "  %-40sFAIL (build-fail: no error message)\n" "parity-skip"; exit 1; }
+	@tmpstub=$$(mktemp); printf '#!/bin/sh\nexit 0\n' > "$$tmpstub"; chmod +x "$$tmpstub"; \
+	out=$$(MLXD_MLX_SERVE_BIN="$$tmpstub" sh scripts/parity_temp0.sh 2>&1); \
+	rm -f "$$tmpstub"; \
+	printf '%s\n' "$$out" | grep -q 'skipped: checkpoint dir' || \
+	{ printf "  %-40sFAIL (ckpt-missing skip)\n" "parity-skip"; exit 1; }
+	@printf "  %-40sOK\n" "parity-skip"
+
+test-parity-script:
+	@sh tests/test_parity_script.sh
+
+.PHONY: test test-gpu test-tsan test-leaks test-parity-skip test-parity-script clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
 
 # --- Thread Sanitizer tests ---------------------------------------------------
 

@@ -149,7 +149,7 @@ static void test_run_consume_happy(void) {
     _Atomic int cancel = 0;
     finish_reason_t reason = FINISH_LENGTH;
     char err[256] = {0};
-    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err));
+    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err), false);
     fclose(out);
 
     assert(rc == 0);
@@ -191,7 +191,7 @@ static void test_run_consume_flush_each(void) {
     _Atomic int cancel = 0;
     finish_reason_t reason = FINISH_LENGTH;
     char err[256] = {0};
-    int rc = cli_run_consume(s, tok, out, true, &cancel, &reason, err, sizeof(err));
+    int rc = cli_run_consume(s, tok, out, true, &cancel, &reason, err, sizeof(err), false);
     fclose(out);
 
     assert(rc == 0);
@@ -221,7 +221,7 @@ static void test_run_consume_error(void) {
     _Atomic int cancel = 0;
     finish_reason_t reason = FINISH_STOP;
     char err[256] = {0};
-    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err));
+    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err), false);
     fclose(out);
 
     assert(rc == -1);
@@ -247,7 +247,7 @@ static void test_run_consume_cancelled(void) {
     _Atomic int cancel = 0;
     finish_reason_t reason = FINISH_STOP;
     char err[256] = {0};
-    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err));
+    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err), false);
     fclose(out);
 
     assert(rc == 0);
@@ -273,7 +273,7 @@ static void test_run_consume_cancel_flag(void) {
     _Atomic int cancel = 1;
     finish_reason_t reason = FINISH_STOP;
     char err[256] = {0};
-    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err));
+    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err), false);
     fclose(out);
 
     assert(rc == 0);
@@ -332,7 +332,7 @@ static void test_run_consume_delayed_producer(void) {
     _Atomic int cancel = 0;
     finish_reason_t reason = FINISH_LENGTH;
     char err[256] = {0};
-    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err));
+    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err), false);
     fclose(out);
 
     assert(rc == 0);
@@ -368,7 +368,7 @@ static void *cancel_no_terminal_consumer(void *arg) {
     char err[256] = {0};
     ctx->result->rc = cli_run_consume(ctx->stream, ctx->tok, ctx->out, false,
                                        ctx->cancel_flag, &ctx->result->reason,
-                                       err, sizeof(err));
+                                       err, sizeof(err), false);
     atomic_store(&ctx->result->done, 1);
     return NULL;
 }
@@ -407,6 +407,75 @@ static void test_run_consume_cancel_no_terminal(void) {
 
     pthread_join(thr, NULL);
     fclose(out);
+    free(membuf);
+    stream_release(s);
+    tokenizer_free(tok);
+}
+
+/* --- B4 cycle 4: cli_run_consume token-ids mode -------------------------- */
+
+static void test_run_consume_token_ids_mode(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    stream_t *s = stream_create(8);
+    assert(s != NULL);
+
+    int32_t ids[] = {5, 17, 99};
+    for (int i = 0; i < 3; i++) {
+        chunk_t c = {.tag = CHUNK_TOKEN, .token = {.id = ids[i], .logprob = 0.0f}};
+        assert(stream_push(s, c));
+    }
+    chunk_t done = {.tag = CHUNK_DONE, .done = FINISH_STOP};
+    assert(stream_push(s, done));
+
+    char *membuf = NULL;
+    size_t memlen = 0;
+    FILE *out = open_memstream(&membuf, &memlen);
+    assert(out != NULL);
+
+    _Atomic int cancel = 0;
+    finish_reason_t reason = FINISH_LENGTH;
+    char err[256] = {0};
+    int rc = cli_run_consume(s, tok, out, false, &cancel, &reason, err, sizeof(err), true);
+    fclose(out);
+
+    assert(rc == 0);
+    assert(reason == FINISH_STOP);
+    assert(strcmp(membuf, "5\n17\n99\n") == 0);
+
+    free(membuf);
+    stream_release(s);
+    tokenizer_free(tok);
+}
+
+static void test_run_consume_token_ids_with_flush(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    stream_t *s = stream_create(8);
+    assert(s != NULL);
+
+    chunk_t c1 = {.tag = CHUNK_TOKEN, .token = {.id = 42, .logprob = 0.0f}};
+    assert(stream_push(s, c1));
+    chunk_t done = {.tag = CHUNK_DONE, .done = FINISH_LENGTH};
+    assert(stream_push(s, done));
+
+    char *membuf = NULL;
+    size_t memlen = 0;
+    FILE *out = open_memstream(&membuf, &memlen);
+    assert(out != NULL);
+
+    _Atomic int cancel = 0;
+    finish_reason_t reason = FINISH_STOP;
+    char err[256] = {0};
+    int rc = cli_run_consume(s, tok, out, true, &cancel, &reason, err, sizeof(err), true);
+    fclose(out);
+
+    assert(rc == 0);
+    assert(reason == FINISH_LENGTH);
+    assert(strcmp(membuf, "42\n") == 0);
+
     free(membuf);
     stream_release(s);
     tokenizer_free(tok);
@@ -481,6 +550,10 @@ int main(void) {
 
     /* review fix: cancel with no terminal chunk (grace deadline) */
     test_run_consume_cancel_no_terminal();
+
+    /* B4 cycle 4: token-ids mode */
+    test_run_consume_token_ids_mode();
+    test_run_consume_token_ids_with_flush();
 
     printf("test_cli_io: all passed\n");
     return 0;

@@ -237,7 +237,7 @@ static void test_generate_eos_finish_stop(void) {
     finish_reason_t reason = FINISH_LENGTH;
     int n = collect_tokens(s, got, 16, &reason);
 
-    assert(n == stop_at + 1);
+    assert(n == stop_at);
     for (int i = 0; i < n; i++)
         assert(got[i] == kOracle[i]);
     assert(reason == FINISH_STOP);

@@ -69,6 +69,8 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
     out->temperature = 0.0f;
     out->temperature_set = false;
     out->stream = false;
+    out->raw = false;
+    out->token_ids = false;
 
     int positional = 0;
     bool opts_done = false;
@@ -109,6 +111,10 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
             out->temperature_set = true;
         } else if (!opts_done && strcmp(argv[i], "--stream") == 0) {
             out->stream = true;
+        } else if (!opts_done && strcmp(argv[i], "--raw") == 0) {
+            out->raw = true;
+        } else if (!opts_done && strcmp(argv[i], "--token-ids") == 0) {
+            out->token_ids = true;
         } else if (!opts_done && argv[i][0] == '-') {
             snprintf(err, errsz, "unknown option '%s'", argv[i]);
             return -1;

@@ -39,6 +39,8 @@ static void usage(void) {
             "  --max-tokens <N>        maximum tokens to generate (0 or unset: unlimited)\n"
             "  --temperature <F>       sampling temperature\n"
             "  --stream                flush each token to stdout as generated\n"
+            "  --raw                   force raw completion even when a chat template is present\n"
+            "  --token-ids             print generated token IDs instead of text\n"
             "  --                      end of options; remaining args are positional\n"
             "\n"
             "pull options:\n"
@@ -361,7 +363,7 @@ static int cmd_run(int argc, char **argv) {
     char err[256] = {0};
     if (cli_parse_run(argc, argv, &opts, err, sizeof(err)) != 0) {
         fprintf(stderr, "mlxd run: %s\n", err);
-        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--stream] [--]\n");
+        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--stream] [--raw] [--token-ids] [--]\n");
         return 1;
     }
 
@@ -388,7 +390,8 @@ static int cmd_run(int argc, char **argv) {
         goto cleanup;
     }
 
-    chat_template = read_chat_template(model_dir);
+    if (!opts.raw)
+        chat_template = read_chat_template(model_dir);
 
     prompt_buf = cli_resolve_run_prompt(opts.prompt, stdin);
     if (!prompt_buf) {
@@ -487,11 +490,11 @@ static int cmd_run(int argc, char **argv) {
     engine_post(&eng, gen_cmd);
 
     rc = cli_run_consume(s, tok, stdout, opts.stream, &g_run_cancel,
-                         &reason, err, sizeof(err));
+                         &reason, err, sizeof(err), opts.token_ids);
 
     if (rc != 0)
         fprintf(stderr, "\nmlxd run: %s\n", err);
-    else
+    else if (!opts.token_ids)
         printf("\n");
 
 cleanup:
