@@ -363,11 +363,11 @@ static int cmd_serve(int argc, char **argv) {
 }
 
 static int cmd_run(int argc, char **argv) {
-    cli_run_opts_t opts;
+    cli_run_opts_t opts = {0};
     char err[256] = {0};
     if (cli_parse_run(argc, argv, &opts, err, sizeof(err)) != 0) {
         fprintf(stderr, "mlxd run: %s\n", err);
-        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--stream] [--raw] [--token-ids] [--]\n");
+        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--top-p F] [--top-k N] [--min-p F] [--seed N] [--stream] [--raw] [--token-ids] [--]\n");
         return 1;
     }
 

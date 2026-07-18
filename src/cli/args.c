@@ -69,6 +69,14 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
     out->max_tokens = 0;
     out->temperature = 0.0f;
     out->temperature_set = false;
+    out->top_p = 0.0f;
+    out->top_p_set = false;
+    out->top_k = 0;
+    out->top_k_set = false;
+    out->min_p = 0.0f;
+    out->min_p_set = false;
+    out->seed = 0;
+    out->seed_set = false;
     out->stream = false;
     out->raw = false;
     out->token_ids = false;

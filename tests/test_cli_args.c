@@ -232,6 +232,10 @@ static void test_run_defaults(void) {
     assert(rc == 0);
     assert(opts.max_tokens == 0);
     assert(!opts.temperature_set);
+    assert(!opts.top_p_set);
+    assert(!opts.top_k_set);
+    assert(!opts.min_p_set);
+    assert(!opts.seed_set);
     assert(!opts.stream);
 }
 
@@ -517,6 +521,26 @@ static void test_run_sampling_bad_values(void) {
     assert(strstr(err, "seed") != NULL);
 }
 
+/* --- C3 cycle 1: cli_parse_run must fully initialize all fields ---------- */
+
+static void test_run_parse_initializes_poisoned_struct(void) {
+    char *argv[] = {"mlxd", "run", "m", "hello"};
+    cli_run_opts_t opts;
+    memset(&opts, 0xA5, sizeof(opts));
+    char err[256] = {0};
+    int rc = cli_parse_run(4, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(!opts.top_p_set);
+    assert(!opts.top_k_set);
+    assert(!opts.min_p_set);
+    assert(!opts.seed_set);
+    assert(!opts.temperature_set);
+    assert(!opts.stream);
+    assert(!opts.raw);
+    assert(!opts.token_ids);
+    assert(opts.max_tokens == 0);
+}
+
 /* --- Cycle 7 (review): run_opts_apply_sampling greedy default ----------- */
 
 static void test_run_opts_apply_sampling_defaults(void) {
@@ -625,6 +649,9 @@ int main(void) {
     /* C2 cycle 17: sampling flags */
     test_run_sampling_flags();
     test_run_sampling_bad_values();
+
+    /* C3 cycle 1: poisoned struct initialization */
+    test_run_parse_initializes_poisoned_struct();
 
     /* Cycle 7 (review): run_opts_apply_sampling */
     test_run_opts_apply_sampling_defaults();
