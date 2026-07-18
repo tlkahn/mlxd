@@ -114,6 +114,15 @@ int mlxbridge_item_int32(int32_t *out, mlx_array a) {
     return 0;
 }
 
+int mlxbridge_item_float32(float *out, mlx_array a) {
+    if (!out) return -1;
+    if (mlx_array_eval(a) != 0)
+        return -1;
+    if (mlx_array_item_float32(out, a) != 0)
+        return -1;
+    return 0;
+}
+
 int mlxbridge_synchronize(mlx_stream s) {
     if (mlx_synchronize(s) != 0) {
         log_error("mlxbridge: synchronize failed");

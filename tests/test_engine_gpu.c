@@ -4,6 +4,7 @@
 #include "mlxbridge/mlxbridge.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -347,6 +348,102 @@ static void test_shutdown_mid_generate_real(void) {
     stream_release(s);
 }
 
+/* ---- C2.11: engine logprob ---- */
+
+static int collect_tokens_lp(stream_t *s, int32_t *out_ids, float *out_lps,
+                             int max_ids, finish_reason_t *reason_out) {
+    int n = 0;
+    chunk_t c;
+    *reason_out = FINISH_STOP;
+    while (stream_next(s, &c, 30000)) {
+        if (c.tag == CHUNK_TOKEN) {
+            if (n < max_ids) {
+                out_ids[n] = c.token.id;
+                out_lps[n] = c.token.logprob;
+            }
+            n++;
+        } else if (c.tag == CHUNK_DONE) {
+            *reason_out = c.done;
+            break;
+        } else if (c.tag == CHUNK_ERROR) {
+            fprintf(stderr, "unexpected error: %s\n", c.error);
+            free(c.error);
+            return -1;
+        }
+    }
+    return n;
+}
+
+static void test_generate_logprobs(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    int32_t prompt[] = {1, 2};
+    int max_new = 8;
+
+    /* logprobs=true, temperature=0 (greedy): every chunk has logprob < 0 and finite */
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.logprobs = true;
+        gen->generate.params.sampling = SAMPLING_PARAMS_DEFAULT;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        float lps[16];
+        finish_reason_t reason;
+        int n = collect_tokens_lp(s, ids, lps, 16, &reason);
+        assert(n == max_new);
+        assert(reason == FINISH_LENGTH);
+        for (int i = 0; i < n; i++) {
+            assert(isfinite(lps[i]));
+            assert(lps[i] < 0.0f);
+        }
+        stream_release(s);
+    }
+
+    /* logprobs=false: all logprobs are 0 */
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.logprobs = false;
+        gen->generate.params.sampling = SAMPLING_PARAMS_DEFAULT;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        float lps[16];
+        finish_reason_t reason;
+        int n = collect_tokens_lp(s, ids, lps, 16, &reason);
+        assert(n == max_new);
+        for (int i = 0; i < n; i++)
+            assert(lps[i] == 0.0f);
+        stream_release(s);
+    }
+
+    engine_destroy(&eng);
+}
+
 /* ---- C1.8: seeded sampling via engine ---- */
 
 static void test_generate_seeded_sampling(void) {
@@ -428,6 +525,9 @@ int main(void) {
 
     test_generate_seeded_sampling();
     printf("  test_generate_seeded_sampling: passed\n");
+
+    test_generate_logprobs();
+    printf("  test_generate_logprobs: passed\n");
 
     printf("test_engine_gpu: all passed\n");
     return 0;

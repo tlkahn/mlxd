@@ -263,6 +263,61 @@ static void test_seeded_reproducibility(void) {
     mlx_stream_free(s);
 }
 
+/* ---- Cycle 10: lazy logprob computation ---- */
+
+static void test_logprob_computation(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+
+    /* Use kLogits; temp=0.7. Greedy pick => idx 2 (3.5).
+     * Expected logprob = log(softmax(logits/0.7)[2]).
+     * Compute reference on host. */
+    const float temp = 0.7f;
+    float scaled[VOCAB];
+    for (int i = 0; i < VOCAB; i++)
+        scaled[i] = kLogits[i] / temp;
+    float maxs = scaled[0];
+    for (int i = 1; i < VOCAB; i++)
+        if (scaled[i] > maxs) maxs = scaled[i];
+    double sum_exp = 0;
+    for (int i = 0; i < VOCAB; i++)
+        sum_exp += exp((double)(scaled[i] - maxs));
+    double logsumexp = (double)maxs + log(sum_exp);
+    float expected_lp = (float)((double)scaled[2] - logsumexp);
+
+    sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+    sp.temperature = temp;
+    sp.top_k = 1;
+
+    mlx_array logits = logits_1xv(kLogits);
+    mlx_array nokey = mlx_array_new();
+    mlx_array tok = mlx_array_new();
+    mlx_array logprob_arr = mlx_array_new();
+
+    assert(sampler_sample_lazy(logits, &sp, nokey, true, s, &tok, &logprob_arr) == 0);
+
+    int32_t id;
+    assert(mlxbridge_item_int32(&id, tok) == 0);
+    assert(id == 2);
+
+    float lp;
+    assert(mlxbridge_item_float32(&lp, logprob_arr) == 0);
+    assert(fabsf(lp - expected_lp) < 1e-4f);
+
+    /* want_logprob=false: logprob_arr untouched */
+    mlx_array tok2 = mlx_array_new();
+    mlx_array logprob2 = mlx_array_new();
+    assert(sampler_sample_lazy(logits, &sp, nokey, false, s, &tok2, &logprob2) == 0);
+    /* logprob2 should remain the empty placeholder (no eval possible on it) */
+
+    mlx_array_free(logprob2);
+    mlx_array_free(tok2);
+    mlx_array_free(logprob_arr);
+    mlx_array_free(tok);
+    mlx_array_free(nokey);
+    mlx_array_free(logits);
+    mlx_stream_free(s);
+}
+
 /* ---- Cycle 7: combined filters - all draws within the intersection set ---- */
 
 static void test_combined_filters(void) {
@@ -310,6 +365,7 @@ int main(void) {
     test_top_k1_equals_greedy();
     test_top_p_filter();
     test_min_p_filter();
+    test_logprob_computation();
     test_seeded_reproducibility();
     test_combined_filters();
     printf("test_sampler_gpu: all tests passed\n");

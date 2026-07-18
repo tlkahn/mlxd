@@ -178,24 +178,64 @@ out:
     return mask_neg_inf(mask, logits, s, out);
 }
 
+static int compute_logprob_at(mlx_array log_probs, mlx_array tok, mlx_stream s,
+                              mlx_array *logprob_out) {
+    mlx_array tok_idx = mlx_array_new();
+    mlx_array lp_raw = mlx_array_new();
+    mlx_array lp = mlx_array_new();
+    if (!MLXB_CHECK(mlx_reshape(&tok_idx, tok, (int[]){1, 1}, 2, s)) ||
+        !MLXB_CHECK(mlx_take_along_axis(&lp_raw, log_probs, tok_idx, -1, s)) ||
+        !MLXB_CHECK(mlx_astype(&lp, lp_raw, MLX_FLOAT32, s))) {
+        mlx_array_free(tok_idx);
+        mlx_array_free(lp_raw);
+        mlx_array_free(lp);
+        return -1;
+    }
+    mlx_array_free(tok_idx);
+    mlx_array_free(lp_raw);
+    *logprob_out = lp;
+    return 0;
+}
+
 int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array subkey,
                         bool want_logprob, mlx_stream s, mlx_array *tok_out,
                         mlx_array *logprob_out) {
-    (void)want_logprob;
-    (void)logprob_out;
-
     mlx_array tok = mlx_array_new();
+
+    /* temperature scale: logits / T */
+    mlx_array scaled = mlx_array_new();
     if (sp->temperature < SAMPLER_GREEDY_TEMP) {
+        /* Greedy short-circuit: argmax, optionally compute logprob from raw logits */
         if (!MLXB_CHECK(mlx_argmax_axis(&tok, logits, -1, false, s))) {
             mlx_array_free(tok);
+            mlx_array_free(scaled);
             return -1;
         }
+        if (want_logprob && logprob_out) {
+            mlx_array lse = mlx_array_new();
+            mlx_array log_probs = mlx_array_new();
+            if (!MLXB_CHECK(mlx_logsumexp_axis(&lse, logits, -1, true, s)) ||
+                !MLXB_CHECK(mlx_subtract(&log_probs, logits, lse, s))) {
+                mlx_array_free(lse);
+                mlx_array_free(log_probs);
+                mlx_array_free(tok);
+                mlx_array_free(scaled);
+                return -1;
+            }
+            mlx_array_free(lse);
+            if (compute_logprob_at(log_probs, tok, s, logprob_out) != 0) {
+                mlx_array_free(log_probs);
+                mlx_array_free(tok);
+                mlx_array_free(scaled);
+                return -1;
+            }
+            mlx_array_free(log_probs);
+        }
+        mlx_array_free(scaled);
         *tok_out = tok;
         return 0;
     }
 
-    /* temperature scale: logits / T (oracle divides; skip the no-op T == 1) */
-    mlx_array scaled = mlx_array_new();
     if (sp->temperature != 1.0f) {
         mlx_array temp = mlx_array_new_float(sp->temperature);
         int rc = MLXB_CHECK(mlx_divide(&scaled, logits, temp, s)) ? 0 : -1;
@@ -207,11 +247,25 @@ int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array
             goto fail;
     }
 
+    /* Compute log-probs from temp-scaled logits BEFORE filtering (pre-filter semantics) */
+    mlx_array log_probs = mlx_array_new();
+    if (want_logprob && logprob_out) {
+        mlx_array lse = mlx_array_new();
+        if (!MLXB_CHECK(mlx_logsumexp_axis(&lse, scaled, -1, true, s)) ||
+            !MLXB_CHECK(mlx_subtract(&log_probs, scaled, lse, s))) {
+            mlx_array_free(lse);
+            mlx_array_free(log_probs);
+            goto fail;
+        }
+        mlx_array_free(lse);
+    }
+
     /* filters: top_k, then top_p, then min_p (spec order) */
     if (sp->top_k > 0) {
         mlx_array filtered = mlx_array_new();
         if (sampler_apply_top_k(scaled, sp->top_k, s, &filtered) != 0) {
             mlx_array_free(filtered);
+            mlx_array_free(log_probs);
             goto fail;
         }
         mlx_array_free(scaled);
@@ -222,6 +276,7 @@ int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array
         mlx_array filtered = mlx_array_new();
         if (sampler_apply_top_p(scaled, sp->top_p, s, &filtered) != 0) {
             mlx_array_free(filtered);
+            mlx_array_free(log_probs);
             goto fail;
         }
         mlx_array_free(scaled);
@@ -232,6 +287,7 @@ int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array
         mlx_array filtered = mlx_array_new();
         if (sampler_apply_min_p(scaled, sp->min_p, s, &filtered) != 0) {
             mlx_array_free(filtered);
+            mlx_array_free(log_probs);
             goto fail;
         }
         mlx_array_free(scaled);
@@ -239,9 +295,20 @@ int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array
     }
 
     /* categorical softmaxes internally; -inf masks become probability 0 */
-    if (!MLXB_CHECK(mlx_random_categorical(&tok, scaled, -1, subkey, s)))
+    if (!MLXB_CHECK(mlx_random_categorical(&tok, scaled, -1, subkey, s))) {
+        mlx_array_free(log_probs);
         goto fail;
+    }
     mlx_array_free(scaled);
+
+    if (want_logprob && logprob_out) {
+        if (compute_logprob_at(log_probs, tok, s, logprob_out) != 0) {
+            mlx_array_free(log_probs);
+            mlx_array_free(tok);
+            return -1;
+        }
+    }
+    mlx_array_free(log_probs);
     *tok_out = tok;
     return 0;
 
