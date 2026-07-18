@@ -295,6 +295,109 @@ else
     fail "e2e-oracle-crash" "expected nonzero + 'oracle exited' (rc=$rc)"
 fi
 
+# --- e2e: oracle 500 -> diagnostic message (finding 9 residual) ---
+
+E2E_500_DIR=$(mktemp -d)
+E2E_500_PORT=$(pick_free_port)
+setup_e2e "$E2E_500_DIR" "hello" "hello"
+
+# Overwrite oracle to return 500 on completions (health stays 200)
+cat > "$E2E_500_DIR/stub_oracle.py" <<'PYEOF'
+import http.server, sys
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+    def do_POST(self):
+        if self.path == "/v1/completions":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(500)
+            self.end_headers()
+    def log_message(self, *a): pass
+
+port = int(sys.argv[1])
+srv = http.server.HTTPServer(("127.0.0.1", port), H)
+srv.serve_forever()
+PYEOF
+
+STUB_ORACLE_TEXT_FILE="$E2E_500_DIR/oracle_text.dat" MLXD_MLX_SERVE_BIN="$E2E_500_DIR/stub_oracle_bin" \
+    MLXD_PARITY_PORT="$E2E_500_PORT" \
+    sh "$E2E_500_DIR/scripts/parity_temp0.sh" "$E2E_500_DIR/ckpt" >"$TMP/e2e_500.out" 2>&1 &
+E2E_500_PID=$!
+ELAPSED=0
+while kill -0 "$E2E_500_PID" 2>/dev/null && [ "$ELAPSED" -lt 15 ]; do
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+if kill -0 "$E2E_500_PID" 2>/dev/null; then
+    kill "$E2E_500_PID" 2>/dev/null; wait "$E2E_500_PID" 2>/dev/null || true
+fi
+wait "$E2E_500_PID" 2>/dev/null && rc=0 || rc=$?
+rm -rf "$E2E_500_DIR"
+
+if [ "$rc" -ne 0 ] && grep -q 'FAIL: oracle completion request failed' "$TMP/e2e_500.out"; then
+    pass "e2e-oracle-500"
+else
+    fail "e2e-oracle-500" "expected nonzero + 'oracle completion request failed' (rc=$rc)"
+fi
+
+# --- e2e: oracle bad JSON -> diagnostic message (finding 9 residual) ---
+
+E2E_BADJSON_DIR=$(mktemp -d)
+E2E_BADJSON_PORT=$(pick_free_port)
+setup_e2e "$E2E_BADJSON_DIR" "hello" "hello"
+
+# Overwrite oracle to return 200 with non-JSON body
+cat > "$E2E_BADJSON_DIR/stub_oracle.py" <<'PYEOF'
+import http.server, sys
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+    def do_POST(self):
+        if self.path == "/v1/completions":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "8")
+            self.end_headers()
+            self.wfile.write(b"not json")
+    def log_message(self, *a): pass
+
+port = int(sys.argv[1])
+srv = http.server.HTTPServer(("127.0.0.1", port), H)
+srv.serve_forever()
+PYEOF
+
+STUB_ORACLE_TEXT_FILE="$E2E_BADJSON_DIR/oracle_text.dat" MLXD_MLX_SERVE_BIN="$E2E_BADJSON_DIR/stub_oracle_bin" \
+    MLXD_PARITY_PORT="$E2E_BADJSON_PORT" \
+    sh "$E2E_BADJSON_DIR/scripts/parity_temp0.sh" "$E2E_BADJSON_DIR/ckpt" >"$TMP/e2e_badjson.out" 2>&1 &
+E2E_BADJSON_PID=$!
+ELAPSED=0
+while kill -0 "$E2E_BADJSON_PID" 2>/dev/null && [ "$ELAPSED" -lt 15 ]; do
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+if kill -0 "$E2E_BADJSON_PID" 2>/dev/null; then
+    kill "$E2E_BADJSON_PID" 2>/dev/null; wait "$E2E_BADJSON_PID" 2>/dev/null || true
+fi
+wait "$E2E_BADJSON_PID" 2>/dev/null && rc=0 || rc=$?
+rm -rf "$E2E_BADJSON_DIR"
+
+if [ "$rc" -ne 0 ] && grep -q 'FAIL: could not parse oracle response' "$TMP/e2e_badjson.out"; then
+    pass "e2e-oracle-bad-json"
+else
+    fail "e2e-oracle-bad-json" "expected nonzero + 'could not parse oracle response' (rc=$rc)"
+fi
+
 # --- e2e: bounded oracle kill + teardown before mlxd (cycle D) ---
 
 E2E_KILL_DIR=$(mktemp -d)

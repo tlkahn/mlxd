@@ -107,12 +107,18 @@ fi
 # --- Oracle text (via temp file, no command substitution) ---
 
 BODY=$(python3 -c 'import json,sys; print(json.dumps({"prompt": sys.argv[1], "temperature": 0, "max_tokens": int(sys.argv[2]), "stream": False}))' "$PROMPT" "$MAX_TOKENS")
-curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
+if ! curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
     -H "Content-Type: application/json" \
     -d "$BODY" \
-    -o "$WORK/resp.json"
-python3 -c 'import sys,json; f=open(sys.argv[1],"rb"); d=json.load(f); open(sys.argv[2],"wb").write(d["choices"][0]["text"].encode("utf-8"))' \
-    "$WORK/resp.json" "$WORK/oracle.txt"
+    -o "$WORK/resp.json"; then
+    echo "FAIL: oracle completion request failed" >&2
+    exit 1
+fi
+if ! python3 -c 'import sys,json; f=open(sys.argv[1],"rb"); d=json.load(f); open(sys.argv[2],"wb").write(d["choices"][0]["text"].encode("utf-8"))' \
+    "$WORK/resp.json" "$WORK/oracle.txt" 2>/dev/null; then
+    echo "FAIL: could not parse oracle response" >&2
+    exit 1
+fi
 
 stop_oracle
 

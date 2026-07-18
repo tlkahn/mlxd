@@ -39,7 +39,7 @@ static void usage(void) {
             "  --max-tokens <N>        maximum tokens to generate (0 or unset: unlimited)\n"
             "  --temperature <F>       sampling temperature\n"
             "  --stream                flush each token to stdout as generated\n"
-            "  --raw                   skip chat template, tokenize as raw completion\n"
+            "  --raw                   force raw completion even when a chat template is present\n"
             "  --token-ids             print generated token IDs instead of text\n"
             "  --                      end of options; remaining args are positional\n"
             "\n"

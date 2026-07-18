@@ -90,7 +90,7 @@ int cli_run_consume(stream_t *s, const tokenizer_t *tok, FILE *out, bool flush_e
         switch (c.tag) {
         case CHUNK_TOKEN: {
             if (token_ids) {
-                fprintf(out, "%d\n", c.token.id);
+                fprintf(out, "%" PRId32 "\n", c.token.id);
                 if (flush_each) fflush(out);
                 break;
             }
