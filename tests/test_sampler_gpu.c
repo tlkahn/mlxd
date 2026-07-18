@@ -152,6 +152,45 @@ static void test_top_p_filter(void) {
     mlx_stream_free(s);
 }
 
+/* ---- Review fix D: top_p = 0 degenerates to greedy, not NaN ---- */
+
+static void test_top_p_zero_greedy(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+    mlx_array logits = logits_1xv(kLogits);
+    float out[VOCAB];
+
+    /* Filter level: p=0 keeps only the max logit (idx 2), rest -inf */
+    mlx_array filtered = mlx_array_new();
+    assert(sampler_apply_top_p(logits, 0.0f, s, &filtered) == 0);
+    readback_1xv(filtered, out);
+    for (int i = 0; i < VOCAB; i++) {
+        if (i == 2)
+            assert(out[i] == kLogits[i]);
+        else
+            assert(isinf(out[i]) && out[i] < 0);
+    }
+    mlx_array_free(filtered);
+
+    /* Pipeline level: high temperature + top_p=0 always draws the argmax
+     * (an all -inf row would make categorical return NaN/garbage) */
+    mlx_array nokey = mlx_array_new();
+    sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+    sp.temperature = 5.0f;
+    sp.top_p = 0.0f;
+    for (int i = 0; i < 16; i++) {
+        mlx_array tok = mlx_array_new();
+        assert(sampler_sample_lazy(logits, &sp, nokey, false, s, &tok, NULL) == 0);
+        int32_t id = -1;
+        assert(mlxbridge_item_int32(&id, tok) == 0);
+        assert(id == 2);
+        mlx_array_free(tok);
+    }
+    mlx_array_free(nokey);
+
+    mlx_array_free(logits);
+    mlx_stream_free(s);
+}
+
 /* ---- Cycle 5: min_p filter (no oracle, pure logit-space) ---- */
 
 static void test_min_p_filter(void) {
@@ -446,6 +485,7 @@ int main(void) {
     test_top_k_filter();
     test_top_k1_equals_greedy();
     test_top_p_filter();
+    test_top_p_zero_greedy();
     test_min_p_filter();
     test_logprob_computation();
     test_seeded_reproducibility();

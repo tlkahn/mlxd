@@ -132,6 +132,21 @@ int sampler_apply_top_p(mlx_array logits, float p, mlx_stream s, mlx_array *out)
         return 0;
     }
 
+    /* p <= 0: the nucleus degenerates to the top token. Without this the
+     * cumsum threshold masks every logit to -inf and categorical goes NaN. */
+    if (p <= 0.0f) {
+        mlx_array max_logit = mlx_array_new();
+        mlx_array mask = mlx_array_new();
+        if (!MLXB_CHECK(mlx_max_axis(&max_logit, logits, -1, true, s)) ||
+            !MLXB_CHECK(mlx_greater_equal(&mask, logits, max_logit, s))) {
+            mlx_array_free(max_logit);
+            mlx_array_free(mask);
+            return -1;
+        }
+        mlx_array_free(max_logit);
+        return mask_neg_inf(mask, logits, s, out);
+    }
+
     /* Ascending sort, softmax, inclusive cumsum: tokens whose bottom-tail mass
      * stays <= 1-p fall outside the nucleus. Recover the smallest in-nucleus
      * logit as a scalar cutoff so the mask applies in original vocab order. */

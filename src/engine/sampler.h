@@ -25,6 +25,7 @@ int sampler_apply_top_k(mlx_array logits, int k, mlx_stream s, mlx_array *out);
 
 /* top_p (nucleus) filter: mask tokens outside the smallest set whose
  * probability mass reaches p. p >= 1 returns the logits unchanged (lazy copy).
+ * p <= 0 degenerates to top-1 (keeps only the argmax logit).
  * Caller owns *out. */
 int sampler_apply_top_p(mlx_array logits, float p, mlx_stream s, mlx_array *out);
 
@@ -35,6 +36,7 @@ int sampler_apply_min_p(mlx_array logits, float mp, mlx_stream s, mlx_array *out
 
 /* Resolve sampling parameters: request-set fields (sampling_set mask) win,
  * then model generation_config defaults, then SAMPLING_PARAMS_DEFAULT.
+ * min_p and seed have no gen-config tier (request-or-default only).
  * Pure function - no GPU access. */
 sampling_params_t sampling_resolve(const sampling_params_t *req, unsigned set_mask,
                                    const model_config_t *cfg);
