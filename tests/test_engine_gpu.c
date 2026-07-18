@@ -347,6 +347,63 @@ static void test_shutdown_mid_generate_real(void) {
     stream_release(s);
 }
 
+/* ---- C1.8: seeded sampling via engine ---- */
+
+static void test_generate_seeded_sampling(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    int32_t prompt[] = {1, 2};
+    int max_new = 8;
+
+    /* Two runs with temperature=5, seed=7 must be identical */
+    int32_t seq_a[16], seq_b[16];
+    finish_reason_t reason_a, reason_b;
+
+    for (int run = 0; run < 2; run++) {
+        int32_t *seq = (run == 0) ? seq_a : seq_b;
+        finish_reason_t *reason = (run == 0) ? &reason_a : &reason_b;
+
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 5.0f;
+        gen->generate.params.sampling.seed = 7;
+        gen->generate.params.sampling.top_p = 1.0f;
+        gen->generate.params.sampling.top_k = -1;
+        gen->generate.params.sampling.min_p = 0.0f;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int n = collect_tokens(s, seq, 16, reason);
+        assert(n == max_new);
+        assert(*reason == FINISH_LENGTH);
+        stream_release(s);
+    }
+
+    /* Seeded runs are identical */
+    for (int i = 0; i < max_new; i++)
+        assert(seq_a[i] == seq_b[i]);
+
+    /* Must differ from greedy oracle (temperature 5 is far from greedy) */
+    bool differs = false;
+    for (int i = 0; i < max_new; i++) {
+        if (seq_a[i] != kOracle[i]) { differs = true; break; }
+    }
+    assert(differs);
+
+    engine_destroy(&eng);
+}
+
 int main(void) {
     test_load_tiny_qwen3_ok();
     printf("  test_load_tiny_qwen3_ok: passed\n");
@@ -368,6 +425,9 @@ int main(void) {
 
     test_shutdown_mid_generate_real();
     printf("  test_shutdown_mid_generate_real: passed\n");
+
+    test_generate_seeded_sampling();
+    printf("  test_generate_seeded_sampling: passed\n");
 
     printf("test_engine_gpu: all passed\n");
     return 0;

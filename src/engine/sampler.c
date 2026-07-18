@@ -10,6 +10,45 @@ static int last_dim(mlx_array a) {
     return nd == 0 ? 1 : mlx_array_dim(a, (int)nd - 1);
 }
 
+int sampler_key_init(sampler_key_t *k, int seed) {
+    if (seed < 0) {
+        k->key = mlx_array_new();
+        k->seeded = false;
+        return 0;
+    }
+    k->key = mlx_array_new();
+    if (!MLXB_CHECK(mlx_random_key(&k->key, (uint64_t)seed))) {
+        mlx_array_free(k->key);
+        return -1;
+    }
+    k->seeded = true;
+    return 0;
+}
+
+int sampler_key_next(sampler_key_t *k, mlx_array *subkey_out, mlx_stream s) {
+    if (!k->seeded) {
+        *subkey_out = mlx_array_new();
+        return 0;
+    }
+    mlx_array new_key = mlx_array_new();
+    mlx_array subkey = mlx_array_new();
+    if (!MLXB_CHECK(mlx_random_split(&new_key, &subkey, k->key, s))) {
+        mlx_array_free(new_key);
+        mlx_array_free(subkey);
+        return -1;
+    }
+    mlx_array_free(k->key);
+    k->key = new_key;
+    *subkey_out = subkey;
+    return 0;
+}
+
+void sampler_key_free(sampler_key_t *k) {
+    mlx_array_free(k->key);
+    k->key = mlx_array_new();
+    k->seeded = false;
+}
+
 /* *out = where(mask, logits, -inf). Frees mask. */
 static int mask_neg_inf(mlx_array mask, mlx_array logits, mlx_stream s, mlx_array *out) {
     mlx_array neg_inf = mlx_array_new_float(-INFINITY);
@@ -103,6 +142,42 @@ out:
     return mask_neg_inf(mask, logits, s, out);
 }
 
+int sampler_apply_min_p(mlx_array logits, float mp, mlx_stream s, mlx_array *out) {
+    if (mp <= 0.0f) {
+        mlx_array copy = mlx_array_new();
+        if (!MLXB_CHECK(mlx_copy(&copy, logits, s))) {
+            mlx_array_free(copy);
+            return -1;
+        }
+        *out = copy;
+        return 0;
+    }
+
+    /* Threshold in logit space: keep logits >= max(logits) + log(min_p).
+     * Exact under softmax without computing softmax. */
+    mlx_array max_logit = mlx_array_new();
+    mlx_array log_mp = mlx_array_new_float(logf(mp));
+    mlx_array threshold = mlx_array_new();
+    mlx_array mask = mlx_array_new();
+    int rc = -1;
+
+    if (!MLXB_CHECK(mlx_max_axis(&max_logit, logits, -1, true, s)) ||
+        !MLXB_CHECK(mlx_add(&threshold, max_logit, log_mp, s)) ||
+        !MLXB_CHECK(mlx_greater_equal(&mask, logits, threshold, s)))
+        goto out;
+    rc = 0;
+
+out:
+    mlx_array_free(max_logit);
+    mlx_array_free(log_mp);
+    mlx_array_free(threshold);
+    if (rc != 0) {
+        mlx_array_free(mask);
+        return -1;
+    }
+    return mask_neg_inf(mask, logits, s, out);
+}
+
 int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array subkey,
                         bool want_logprob, mlx_stream s, mlx_array *tok_out,
                         mlx_array *logprob_out) {
@@ -146,6 +221,16 @@ int sampler_sample_lazy(mlx_array logits, const sampling_params_t *sp, mlx_array
     if (sp->top_p < 1.0f) {
         mlx_array filtered = mlx_array_new();
         if (sampler_apply_top_p(scaled, sp->top_p, s, &filtered) != 0) {
+            mlx_array_free(filtered);
+            goto fail;
+        }
+        mlx_array_free(scaled);
+        scaled = filtered;
+    }
+
+    if (sp->min_p > 0.0f) {
+        mlx_array filtered = mlx_array_new();
+        if (sampler_apply_min_p(scaled, sp->min_p, s, &filtered) != 0) {
             mlx_array_free(filtered);
             goto fail;
         }

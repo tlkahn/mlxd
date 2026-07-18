@@ -2,6 +2,7 @@
 #include "engine/engine_internal.h"
 #include "engine/emodel.h"
 #include "engine/kvcache.h"
+#include "engine/sampler.h"
 #include "mlxbridge/mlxbridge.h"
 
 #include <stdio.h>
@@ -389,11 +390,14 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     int n = cmd->generate.token_count;
     int max_new = cmd->generate.params.max_tokens;
     const int32_t *token_ids = cmd->generate.token_ids;
+    const sampling_params_t *sp = &cmd->generate.params.sampling;
 
     kvcache_t kv;
     memset(&kv, 0, sizeof(kv));
     bool kv_inited = false;
     mlx_array pending_logits = mlx_array_new();
+    sampler_key_t skey;
+    sampler_key_init(&skey, sp->seed);
 
     if (n > em->cfg.max_position_embeddings) {
         char msg[160];
@@ -460,12 +464,21 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         }
 
         /* 1) sample CURRENT token lazily */
-        mlx_array lazy_token = mlx_array_new();
-        if (greedy_next_token_lazy(pending_logits, em->stream, &lazy_token) != 0) {
-            mlx_array_free(lazy_token);
-            generate_fail(eng, s, "greedy sample failed", GEN_ERR_INTERNAL);
+        mlx_array subkey = mlx_array_new();
+        if (sampler_key_next(&skey, &subkey, em->stream) != 0) {
+            mlx_array_free(subkey);
+            generate_fail(eng, s, "sampler key_next failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
+        mlx_array lazy_token = mlx_array_new();
+        if (sampler_sample_lazy(pending_logits, sp, subkey, false, em->stream,
+                                &lazy_token, NULL) != 0) {
+            mlx_array_free(subkey);
+            mlx_array_free(lazy_token);
+            generate_fail(eng, s, "sampler sample failed", GEN_ERR_INTERNAL);
+            goto out_free;
+        }
+        mlx_array_free(subkey);
         mlx_array_free(pending_logits);
         pending_logits = mlx_array_new();
 
@@ -554,6 +567,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     }
 
 out_free:
+    sampler_key_free(&skey);
     mlx_array_free(pending_logits);
     if (kv_inited)
         kvcache_free(&kv);
