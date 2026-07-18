@@ -174,6 +174,7 @@ PYEOF
     # Stub oracle launcher (mimics mlx-serve CLI: --model X --serve --port N)
     cat > "$_dir/stub_oracle_bin" <<SHEOF
 #!/bin/sh
+printf '%s\n' "\$@" > "$_dir/oracle_args.txt"
 exec python3 "$_dir/stub_oracle.py" "\$5"
 SHEOF
     chmod +x "$_dir/stub_oracle_bin"
@@ -217,12 +218,15 @@ if kill -0 "$E2E_PID" 2>/dev/null; then
     kill "$E2E_PID" 2>/dev/null; wait "$E2E_PID" 2>/dev/null || true
 fi
 wait "$E2E_PID" 2>/dev/null && rc=0 || rc=$?
+cp "$E2E_MATCH_DIR/oracle_args.txt" "$TMP/e2e_match_args.txt" 2>/dev/null || true
 rm -rf "$E2E_MATCH_DIR"
 
-if [ "$rc" -eq 0 ] && grep -q 'text parity OK' "$TMP/e2e_match.out"; then
+if [ "$rc" -eq 0 ] && grep -q 'text parity OK' "$TMP/e2e_match.out" && \
+   grep -q -- '--no-pld' "$TMP/e2e_match_args.txt" && \
+   grep -q -- '--no-mtp' "$TMP/e2e_match_args.txt"; then
     pass "e2e-match"
 else
-    fail "e2e-match" "expected exit 0 + 'text parity OK' (rc=$rc)"
+    fail "e2e-match" "expected exit 0 + 'text parity OK' + pinned flags (rc=$rc)"
 fi
 
 # --- e2e: masked divergence -> MISMATCH (cycle 8) ---
@@ -255,6 +259,125 @@ if [ "$rc" -ne 0 ] && grep -q 'MISMATCH' "$TMP/e2e_mask.out"; then
     pass "e2e-masked-divergence"
 else
     fail "e2e-masked-divergence" "expected exit 1 + MISMATCH (rc=$rc)"
+fi
+
+# --- e2e: oracle crash -> fail fast (cycle C) ---
+
+E2E_CRASH_DIR=$(mktemp -d)
+E2E_CRASH_PORT=$(pick_free_port)
+setup_e2e "$E2E_CRASH_DIR" "hello" "hello"
+
+# Overwrite oracle with one that exits immediately
+cat > "$E2E_CRASH_DIR/stub_oracle_bin" <<'SHEOF'
+#!/bin/sh
+exit 1
+SHEOF
+chmod +x "$E2E_CRASH_DIR/stub_oracle_bin"
+
+STUB_ORACLE_TEXT_FILE="$E2E_CRASH_DIR/oracle_text.dat" MLXD_MLX_SERVE_BIN="$E2E_CRASH_DIR/stub_oracle_bin" \
+    MLXD_PARITY_PORT="$E2E_CRASH_PORT" \
+    sh "$E2E_CRASH_DIR/scripts/parity_temp0.sh" "$E2E_CRASH_DIR/ckpt" >"$TMP/e2e_crash.out" 2>&1 &
+E2E_CRASH_PID=$!
+ELAPSED=0
+while kill -0 "$E2E_CRASH_PID" 2>/dev/null && [ "$ELAPSED" -lt 15 ]; do
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+if kill -0 "$E2E_CRASH_PID" 2>/dev/null; then
+    kill "$E2E_CRASH_PID" 2>/dev/null; wait "$E2E_CRASH_PID" 2>/dev/null || true
+fi
+wait "$E2E_CRASH_PID" 2>/dev/null && rc=0 || rc=$?
+rm -rf "$E2E_CRASH_DIR"
+
+if [ "$rc" -ne 0 ] && grep -q 'oracle exited before becoming healthy' "$TMP/e2e_crash.out"; then
+    pass "e2e-oracle-crash"
+else
+    fail "e2e-oracle-crash" "expected nonzero + 'oracle exited' (rc=$rc)"
+fi
+
+# --- e2e: bounded oracle kill + teardown before mlxd (cycle D) ---
+
+E2E_KILL_DIR=$(mktemp -d)
+E2E_KILL_PORT=$(pick_free_port)
+setup_e2e "$E2E_KILL_DIR" "hello world" "hello world"
+
+# Overwrite oracle Python to ignore SIGTERM and write PID
+cat > "$E2E_KILL_DIR/stub_oracle.py" <<'PYEOF'
+import http.server, json, os, signal, sys
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+pid_file = os.environ.get("STUB_ORACLE_PID_FILE", "")
+if pid_file:
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+    def do_POST(self):
+        if self.path == "/v1/completions":
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            text = open(os.environ["STUB_ORACLE_TEXT_FILE"]).read()
+            body = json.dumps({"choices": [{"text": text}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    def log_message(self, *a): pass
+
+port = int(sys.argv[1])
+srv = http.server.HTTPServer(("127.0.0.1", port), H)
+srv.serve_forever()
+PYEOF
+
+# Overwrite mlxd to verify oracle is dead before running
+cat > "$E2E_KILL_DIR/mlxd" <<SHEOF
+#!/bin/sh
+OPID=\$(cat "$E2E_KILL_DIR/oracle_pid.txt" 2>/dev/null || echo "")
+if [ -n "\$OPID" ] && kill -0 "\$OPID" 2>/dev/null; then
+    echo "FAIL: oracle still alive when mlxd runs" >&2
+    exit 1
+fi
+touch "$E2E_KILL_DIR/mlxd_marker.txt"
+for arg in "\$@"; do
+    if [ "\$arg" = "--token-ids" ]; then
+        printf '%s\n' "1 2 3"
+        exit 0
+    fi
+done
+printf '%s\n' "hello world"
+SHEOF
+chmod +x "$E2E_KILL_DIR/mlxd"
+
+STUB_ORACLE_TEXT_FILE="$E2E_KILL_DIR/oracle_text.dat" \
+    STUB_ORACLE_PID_FILE="$E2E_KILL_DIR/oracle_pid.txt" \
+    MLXD_MLX_SERVE_BIN="$E2E_KILL_DIR/stub_oracle_bin" \
+    MLXD_PARITY_PORT="$E2E_KILL_PORT" \
+    sh "$E2E_KILL_DIR/scripts/parity_temp0.sh" "$E2E_KILL_DIR/ckpt" >"$TMP/e2e_kill.out" 2>&1 &
+E2E_KILL_PID=$!
+ELAPSED=0
+while kill -0 "$E2E_KILL_PID" 2>/dev/null && [ "$ELAPSED" -lt 30 ]; do
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+if kill -0 "$E2E_KILL_PID" 2>/dev/null; then
+    kill "$E2E_KILL_PID" 2>/dev/null; wait "$E2E_KILL_PID" 2>/dev/null || true
+fi
+wait "$E2E_KILL_PID" 2>/dev/null && rc=0 || rc=$?
+marker_exists=false
+[ -f "$E2E_KILL_DIR/mlxd_marker.txt" ] && marker_exists=true
+rm -rf "$E2E_KILL_DIR"
+
+if [ "$rc" -eq 0 ] && [ "$marker_exists" = "true" ]; then
+    pass "e2e-bounded-kill"
+else
+    fail "e2e-bounded-kill" "expected exit 0 + marker (rc=$rc, marker=$marker_exists)"
 fi
 
 exit "$FAILS"

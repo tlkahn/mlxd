@@ -57,21 +57,41 @@ fi
 # --- Start oracle ---
 
 WORK=$(mktemp -d)
-cleanup() {
-    if [ -n "${ORACLE_PID:-}" ]; then
+ORACLE_PID=""
+
+stop_oracle() {
+    if [ -n "${ORACLE_PID}" ]; then
         kill "$ORACLE_PID" 2>/dev/null || true
+        _w=0
+        while kill -0 "$ORACLE_PID" 2>/dev/null && [ "$_w" -lt 5 ]; do
+            sleep 1
+            _w=$((_w + 1))
+        done
+        if kill -0 "$ORACLE_PID" 2>/dev/null; then
+            kill -9 "$ORACLE_PID" 2>/dev/null || true
+        fi
         wait "$ORACLE_PID" 2>/dev/null || true
+        ORACLE_PID=""
     fi
+}
+
+cleanup() {
+    stop_oracle
     rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-"$MLXD_MLX_SERVE_BIN" --model "$CKPT" --serve --port "$PORT" >/dev/null 2>&1 &
+echo "oracle flags: --no-pld --no-mtp"
+"$MLXD_MLX_SERVE_BIN" --model "$CKPT" --serve --port "$PORT" --no-pld --no-mtp >/dev/null 2>&1 &
 ORACLE_PID=$!
 
 echo "waiting for oracle on port $PORT..."
 TRIES=0
 while [ "$TRIES" -lt 120 ]; do
+    if ! kill -0 "$ORACLE_PID" 2>/dev/null; then
+        echo "FAIL: oracle exited before becoming healthy" >&2
+        exit 1
+    fi
     if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
         break
     fi
@@ -93,6 +113,8 @@ curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
     -o "$WORK/resp.json"
 python3 -c 'import sys,json; f=open(sys.argv[1],"rb"); d=json.load(f); open(sys.argv[2],"wb").write(d["choices"][0]["text"].encode("utf-8"))' \
     "$WORK/resp.json" "$WORK/oracle.txt"
+
+stop_oracle
 
 # --- mlxd text (via temp file, no command substitution) ---
 
