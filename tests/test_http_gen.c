@@ -494,6 +494,8 @@ static void test_chat_prompt_extra_json(void) {
     free(ids);
     free(expected);
 
+    int n_false = n;
+
     ids = NULL;
     err = NULL;
     n = gen_build_chat_prompt(tok, THINK_COND_TMPL, msgs, NULL, NULL, &ids, &err);
@@ -508,6 +510,20 @@ static void test_chat_prompt_extra_json(void) {
     assert(memcmp(ids, expected, (size_t)n * sizeof(int32_t)) == 0);
     free(ids);
     free(expected);
+
+    int n_omitted = n;
+
+    ids = NULL;
+    err = NULL;
+    n = gen_build_chat_prompt(tok, THINK_COND_TMPL, msgs, NULL,
+                              "{\"enable_thinking\":true}", &ids, &err);
+    assert(n > 0);
+    assert(err == NULL);
+    int n_true = n;
+    free(ids);
+
+    assert(n_true == n_omitted);
+    assert(n_false > n_true);
 
     tokenizer_free(tok);
 }
