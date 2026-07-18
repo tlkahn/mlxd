@@ -330,6 +330,13 @@ int weights_expected_names_from_desc(const weights_family_desc_t *desc,
             return -1;
     }
 
+    for (const weight_extra_t *e = desc->extra_tensors; e && e->suffix; e++) {
+        if (weights_tensor_name(buf, sizeof(buf), cfg, -1, e->suffix) == 0) {
+            if (emit_expected(out, capacity, &pos, buf, e->kind) != 0)
+                return -1;
+        }
+    }
+
     return pos;
 }
 

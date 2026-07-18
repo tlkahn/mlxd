@@ -573,6 +573,54 @@ static void test_expected_names_from_desc_biases(void) {
     assert(names_bias[4].kind == WEIGHT_KIND_NORM);
 }
 
+/* ---- Cycle CR-C: wire extra_tensors ---- */
+
+static void test_expected_names_from_desc_extras(void) {
+    static const char *const syn_matmuls[] = { "attn.wq", NULL };
+    static const char *const syn_norms[]   = { "ln1", NULL };
+    static const weight_extra_t syn_extras[] = {
+        {"embed_tokens_per_layer", WEIGHT_KIND_EMBED},
+        {"v_norm_global",          WEIGHT_KIND_NORM},
+        {NULL, 0},
+    };
+
+    weights_family_desc_t desc = {
+        .family         = MODEL_FAMILY_UNKNOWN,
+        .layer_matmuls  = syn_matmuls,
+        .layer_norms    = syn_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = NULL,
+        .extra_tensors  = syn_extras,
+    };
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_FAMILY_UNKNOWN;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.tie_word_embeddings = false;
+
+    int count = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count == 7);
+
+    weight_expected_t names[7];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names, 7) == 7);
+
+    assert(strcmp(names[0].name, "model.embed_tokens") == 0);
+    assert(names[0].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names[1].name, "model.layers.0.attn.wq") == 0);
+    assert(names[1].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[2].name, "model.layers.0.ln1") == 0);
+    assert(names[2].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names[3].name, "model.norm") == 0);
+    assert(names[3].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names[4].name, "lm_head") == 0);
+    assert(names[4].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[5].name, "model.embed_tokens_per_layer") == 0);
+    assert(names[5].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names[6].name, "model.v_norm_global") == 0);
+    assert(names[6].kind == WEIGHT_KIND_NORM);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -644,6 +692,9 @@ int main(void) {
 
     test_expected_names_from_desc_biases();
     printf("  test_expected_names_from_desc_biases: passed\n");
+
+    test_expected_names_from_desc_extras();
+    printf("  test_expected_names_from_desc_extras: passed\n");
 
     printf("test_weights: all passed\n");
     return 0;
