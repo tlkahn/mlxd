@@ -40,7 +40,10 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [ ! -x "$REPO_DIR/mlxd" ]; then
     echo "building mlxd..."
-    make -C "$REPO_DIR" mlxd >/dev/null 2>&1
+    if ! make -C "$REPO_DIR" mlxd >/dev/null; then
+        echo "FAIL: mlxd build failed" >&2
+        exit 1
+    fi
 fi
 
 # --- Start oracle ---

@@ -136,13 +136,23 @@ test-leaks: tests/test_http_server
 	leaks --atExit -- ./tests/test_http_server
 
 test-parity-skip:
-	@echo "--- parity skip: env unset ---"
 	@out=$$(env -u MLXD_MLX_SERVE_BIN sh scripts/parity_temp0.sh 2>&1) && \
-		echo "$$out" | grep -q 'skipped' || { echo "FAIL: expected 'skipped' in output"; exit 1; }
-	@echo "--- parity skip: bad binary + bad ckpt ---"
+		printf '%s\n' "$$out" | grep -q 'skipped' || \
+		{ printf "  %-40sFAIL (env-unset skip)\n" "parity-skip"; exit 1; }
 	@out=$$(MLXD_MLX_SERVE_BIN=/nonexistent sh scripts/parity_temp0.sh /nonexistent-ckpt 2>&1) && \
-		echo "$$out" | grep -q 'skipped' || { echo "FAIL: expected 'skipped' in output"; exit 1; }
-	@echo "test-parity-skip: OK"
+		printf '%s\n' "$$out" | grep -q 'skipped' || \
+		{ printf "  %-40sFAIL (bad-bin skip)\n" "parity-skip"; exit 1; }
+	@tmpdir=$$(mktemp -d); \
+	mkdir -p "$$tmpdir/scripts"; \
+	cp scripts/parity_temp0.sh "$$tmpdir/scripts/"; \
+	printf '#!/bin/sh\nexit 0\n' > "$$tmpdir/stub"; chmod +x "$$tmpdir/stub"; \
+	mkdir -p "$$tmpdir/ckpt"; \
+	out=$$(MLXD_MLX_SERVE_BIN="$$tmpdir/stub" sh "$$tmpdir/scripts/parity_temp0.sh" "$$tmpdir/ckpt" 2>&1) && rc=0 || rc=$$?; \
+	rm -rf "$$tmpdir"; \
+	if [ "$$rc" -eq 0 ]; then printf "  %-40sFAIL (build-fail: expected nonzero exit)\n" "parity-skip"; exit 1; fi; \
+	printf '%s\n' "$$out" | grep -q 'build failed' || \
+	{ printf "  %-40sFAIL (build-fail: no error message)\n" "parity-skip"; exit 1; }
+	@printf "  %-40sOK\n" "parity-skip"
 
 .PHONY: test test-gpu test-tsan test-leaks test-parity-skip clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
 
