@@ -474,6 +474,33 @@ static void test_wait_load_no_stale_failed_on_reload(void) {
     engine_destroy(&eng);
 }
 
+/* ---- timeout_ms < 0 => wait forever (cancel still honored) -------------- */
+
+static bool cancel_after_n(void *ud) {
+    int *left = ud;
+    return ((*left)--) <= 0;
+}
+
+static void test_wait_load_negative_timeout_polls_until_cancel(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    /* No load posted: state stays LOAD_IDLE forever. */
+    int ticks = 5; /* cancel after several poll attempts */
+    int rc = engine_wait_load_until(&eng, -1, cancel_after_n, &ticks);
+    assert(rc != 0);    /* cancelled, not "instant timeout" */
+    assert(ticks <= 0); /* predicate actually ran multiple times */
+    engine_destroy(&eng);
+}
+
+static void test_wait_load_negative_timeout_reaches_ok(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    assert(engine_post_load(&eng, strdup(MLXD_STUB_MODEL_PATH)) == 0);
+    assert(engine_wait_load(&eng, -1) == 0);
+    assert(engine_load_state(&eng) == LOAD_OK);
+    engine_destroy(&eng);
+}
+
 /* ---- B3.5: error_kind zero-init default --------------------------------- */
 
 static void test_error_kind_default_internal(void) {
@@ -1159,6 +1186,8 @@ int main(void) {
     test_reload_failure_clears_path_and_state();
     test_wait_load_no_stale_ok_on_reload();
     test_wait_load_no_stale_failed_on_reload();
+    test_wait_load_negative_timeout_polls_until_cancel();
+    test_wait_load_negative_timeout_reaches_ok();
     test_error_kind_default_internal();
     test_load_then_generate();
     test_generate_truncation();

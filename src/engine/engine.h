@@ -124,13 +124,15 @@ static inline bool engine_loaded(const engine_t *eng) {
     return engine_load_state(eng) == LOAD_OK;
 }
 
-/* Poll until LOAD_OK / LOAD_FAILED / timeout.
-   Returns 0 on LOAD_OK, -1 on LOAD_FAILED or timeout.
+/* Poll until LOAD_OK / LOAD_FAILED / timeout / cancel.
+   timeout_ms < 0 means wait forever (cancel still honored).
+   Returns 0 on LOAD_OK, -1 on LOAD_FAILED, timeout, or cancel.
    On LOAD_FAILED, engine_load_error is populated. */
 int engine_wait_load(engine_t *eng, int timeout_ms);
 
 /* Like engine_wait_load, but also aborts early when cancel(ud) returns true
-   (return -1). Used by cmd_run for Ctrl-C during load. cancel may be NULL. */
+   (return -1). Used by cmd_run for Ctrl-C during load. cancel may be NULL.
+   timeout_ms < 0 means wait forever (cancel still honored). */
 int engine_wait_load_until(engine_t *eng, int timeout_ms,
                            bool (*cancel)(void *), void *ud);
 

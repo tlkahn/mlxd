@@ -220,7 +220,8 @@ static void free_resident_model(engine_t *eng) {
 
 int engine_wait_load_until(engine_t *eng, int timeout_ms,
                            bool (*cancel)(void *), void *ud) {
-    for (int i = 0; i < timeout_ms; i++) {
+    /* timeout_ms < 0 => wait forever (until OK / FAILED / cancel). */
+    for (int i = 0; timeout_ms < 0 || i < timeout_ms; i++) {
         if (cancel && cancel(ud))
             return -1;
         load_state_t st = engine_load_state(eng);

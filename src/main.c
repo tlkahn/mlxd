@@ -303,7 +303,8 @@ static int cmd_serve(int argc, char **argv) {
         return 1;
     }
 
-    if (engine_wait_load(&eng, 30000) != 0) {
+    /* Unbounded wait: large HF checkpoints can exceed 30s on first Metal compile. */
+    if (engine_wait_load(&eng, -1) != 0) {
         print_load_failure("mlxd serve", &eng);
         engine_destroy(&eng);
         tokenizer_free(tok);
@@ -442,7 +443,8 @@ static int cmd_run(int argc, char **argv) {
         goto cleanup;
     }
 
-    if (engine_wait_load_until(&eng, 30000, run_cancel_pred, NULL) != 0) {
+    /* Unbounded wait; Ctrl-C still aborts via run_cancel_pred. */
+    if (engine_wait_load_until(&eng, -1, run_cancel_pred, NULL) != 0) {
         if (atomic_load(&g_run_cancel) > 0) {
             reason = FINISH_CANCELLED;
             rc = 0;
