@@ -1,4 +1,5 @@
 #include "cli/args.h"
+#include "core/types.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -68,6 +69,14 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
     out->max_tokens = 0;
     out->temperature = 0.0f;
     out->temperature_set = false;
+    out->top_p = 0.0f;
+    out->top_p_set = false;
+    out->top_k = 0;
+    out->top_k_set = false;
+    out->min_p = 0.0f;
+    out->min_p_set = false;
+    out->seed = 0;
+    out->seed_set = false;
     out->stream = false;
     out->raw = false;
     out->token_ids = false;
@@ -109,6 +118,76 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
             }
             out->temperature = v;
             out->temperature_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--top-p") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--top-p requires a value");
+                return -1;
+            }
+            char *end;
+            float v = strtof(argv[++i], &end);
+            if (*end != '\0' || !isfinite(v)) {
+                snprintf(err, errsz, "invalid top-p '%s'", argv[i]);
+                return -1;
+            }
+            if (v < 0.0f || v > 1.0f) {
+                snprintf(err, errsz, "top-p must be in [0, 1]");
+                return -1;
+            }
+            out->top_p = v;
+            out->top_p_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--top-k") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--top-k requires a value");
+                return -1;
+            }
+            char *end;
+            errno = 0;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || errno == ERANGE) {
+                snprintf(err, errsz, "invalid top-k '%s'", argv[i]);
+                return -1;
+            }
+            if (v < -1 || v > INT_MAX) {
+                snprintf(err, errsz, "top-k must be >= -1");
+                return -1;
+            }
+            out->top_k = (int)v;
+            out->top_k_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--min-p") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--min-p requires a value");
+                return -1;
+            }
+            char *end;
+            float v = strtof(argv[++i], &end);
+            if (*end != '\0' || !isfinite(v)) {
+                snprintf(err, errsz, "invalid min-p '%s'", argv[i]);
+                return -1;
+            }
+            if (v < 0.0f || v > 1.0f) {
+                snprintf(err, errsz, "min-p must be in [0, 1]");
+                return -1;
+            }
+            out->min_p = v;
+            out->min_p_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--seed") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--seed requires a value");
+                return -1;
+            }
+            char *end;
+            errno = 0;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || errno == ERANGE) {
+                snprintf(err, errsz, "invalid seed '%s'", argv[i]);
+                return -1;
+            }
+            if (v < 0 || v > INT_MAX) {
+                snprintf(err, errsz, "seed must be >= 0");
+                return -1;
+            }
+            out->seed = (int)v;
+            out->seed_set = true;
         } else if (!opts_done && strcmp(argv[i], "--stream") == 0) {
             out->stream = true;
         } else if (!opts_done && strcmp(argv[i], "--raw") == 0) {
@@ -178,4 +257,30 @@ int cli_parse_list(int argc, char **argv, cli_list_opts_t *out, char *err, size_
         }
     }
     return 0;
+}
+
+void run_opts_apply_sampling(const cli_run_opts_t *opts, gen_params_t *params) {
+    if (opts->temperature_set) {
+        params->sampling.temperature = opts->temperature;
+        params->sampling_set |= SAMPLING_SET_TEMPERATURE;
+    } else {
+        params->sampling.temperature = 0.0f;
+        params->sampling_set |= SAMPLING_SET_TEMPERATURE;
+    }
+    if (opts->top_p_set) {
+        params->sampling.top_p = opts->top_p;
+        params->sampling_set |= SAMPLING_SET_TOP_P;
+    }
+    if (opts->top_k_set) {
+        params->sampling.top_k = opts->top_k;
+        params->sampling_set |= SAMPLING_SET_TOP_K;
+    }
+    if (opts->min_p_set) {
+        params->sampling.min_p = opts->min_p;
+        params->sampling_set |= SAMPLING_SET_MIN_P;
+    }
+    if (opts->seed_set) {
+        params->sampling.seed = opts->seed;
+        params->sampling_set |= SAMPLING_SET_SEED;
+    }
 }

@@ -1304,6 +1304,18 @@ static void test_item_int32_null_out(void) {
     mlx_array_free(a);
 }
 
+/* ---- Cycle 9 (C2): mlxbridge_item_float32 ---- */
+
+static void test_item_float32(void) {
+    mlx_array a = mlx_array_new_float(3.14f);
+    float val = 0;
+    assert(mlxbridge_item_float32(&val, a) == 0);
+    assert(val == 3.14f);
+
+    assert(mlxbridge_item_float32(NULL, a) == -1);
+    mlx_array_free(a);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -1396,6 +1408,9 @@ int main(void) {
 
     test_item_int32_null_out();
     printf("  test_item_int32_null_out: passed\n");
+
+    test_item_float32();
+    printf("  test_item_float32: passed\n");
 
     printf("test_mlxbridge_gpu: all passed\n");
     return 0;

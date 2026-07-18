@@ -269,6 +269,9 @@ static void test_chat_response_roundtrip_basic(void) {
     yyjson_val *msg = yyjson_obj_get(c0, "message");
     assert(strcmp(yyjson_get_str(yyjson_obj_get(msg, "role")), "assistant") == 0);
     assert(strcmp(yyjson_get_str(yyjson_obj_get(msg, "content")), "Hi there") == 0);
+    /* No logprobs requested -> explicit null key */
+    yyjson_val *lp_basic = yyjson_obj_get(c0, "logprobs");
+    assert(lp_basic != NULL && yyjson_is_null(lp_basic));
     assert(strcmp(yyjson_get_str(yyjson_obj_get(c0, "finish_reason")), "stop") == 0);
     yyjson_val *usage = yyjson_obj_get(root, "usage");
     assert(yyjson_get_sint(yyjson_obj_get(usage, "prompt_tokens")) == 9);
@@ -356,6 +359,11 @@ static void test_chat_response_roundtrip_logprobs(void) {
     yyjson_val *t0 = yyjson_arr_get(cont, 0);
     assert(strcmp(yyjson_get_str(yyjson_obj_get(t0, "token")), "Hi") == 0);
     assert(fabs(yyjson_get_real(yyjson_obj_get(t0, "logprob")) - (-0.31725305)) < 1e-6);
+    /* bytes = UTF-8 byte values of "Hi" -> [72, 105] */
+    yyjson_val *b0 = yyjson_obj_get(t0, "bytes");
+    assert(b0 != NULL && yyjson_arr_size(b0) == 2);
+    assert(yyjson_get_sint(yyjson_arr_get(b0, 0)) == 72);
+    assert(yyjson_get_sint(yyjson_arr_get(b0, 1)) == 105);
     yyjson_val *tp0 = yyjson_obj_get(t0, "top_logprobs");
     assert(yyjson_arr_size(tp0) == 2);
     yyjson_val *tp0_1 = yyjson_arr_get(tp0, 1);
@@ -365,6 +373,10 @@ static void test_chat_response_roundtrip_logprobs(void) {
     yyjson_val *t1 = yyjson_arr_get(cont, 1);
     assert(strcmp(yyjson_get_str(yyjson_obj_get(t1, "token")), " there") == 0);
     assert(fabs(yyjson_get_real(yyjson_obj_get(t1, "logprob")) - (-0.02380986)) < 1e-6);
+    /* bytes = UTF-8 byte values of " there" -> [32, 116, 104, 101, 114, 101] */
+    yyjson_val *b1 = yyjson_obj_get(t1, "bytes");
+    assert(b1 != NULL && yyjson_arr_size(b1) == 6);
+    assert(yyjson_get_sint(yyjson_arr_get(b1, 0)) == 32);
     assert(yyjson_arr_size(yyjson_obj_get(t1, "top_logprobs")) == 0);
 
     yyjson_doc_free(doc);
@@ -394,9 +406,53 @@ static void test_chunk_serialize_stream(void) {
     yyjson_val *delta = yyjson_obj_get(c0, "delta");
     assert(strcmp(yyjson_get_str(yyjson_obj_get(delta, "role")), "assistant") == 0);
     assert(strcmp(yyjson_get_str(yyjson_obj_get(delta, "content")), "Hello") == 0);
+    /* logprobs null when no logprob entries */
+    yyjson_val *lp_chunk = yyjson_obj_get(c0, "logprobs");
+    assert(lp_chunk != NULL && yyjson_is_null(lp_chunk));
     /* finish_reason present as JSON null (not the enum string). */
     yyjson_val *fr = yyjson_obj_get(c0, "finish_reason");
     assert(fr != NULL && yyjson_is_null(fr));
+
+    yyjson_doc_free(doc);
+    yyjson_mut_doc_free(mdoc);
+}
+
+/* --- Cycle 11b: chunk serialize with logprobs ----------------------------- */
+
+static void test_chunk_serialize_with_logprobs(void) {
+    token_logprob_t entry = {
+        .token = "Hello",
+        .logprob = -0.5f,
+        .top_logprobs = NULL,
+        .top_logprob_count = 0,
+    };
+    chat_completion_chunk_t chunk = {
+        .id = "chatcmpl-lp",
+        .model = "qwen3-4b",
+        .created = 1728933352,
+        .has_choice = true,
+        .delta_content = "Hello",
+        .logprobs = &entry,
+        .logprob_count = 1,
+    };
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    yyjson_doc *doc = roundtrip(mdoc, chat_completion_chunk_serialize(&chunk, mdoc), NULL);
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "choices"), 0);
+    yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+    assert(lp != NULL && !yyjson_is_null(lp));
+    yyjson_val *cont = yyjson_obj_get(lp, "content");
+    assert(yyjson_arr_size(cont) == 1);
+    yyjson_val *e0 = yyjson_arr_get(cont, 0);
+    assert(strcmp(yyjson_get_str(yyjson_obj_get(e0, "token")), "Hello") == 0);
+    assert(fabs(yyjson_get_real(yyjson_obj_get(e0, "logprob")) - (-0.5)) < 1e-6);
+    /* bytes = UTF-8 byte values of "Hello" -> [72, 101, 108, 108, 111] */
+    yyjson_val *bytes = yyjson_obj_get(e0, "bytes");
+    assert(bytes != NULL && yyjson_arr_size(bytes) == 5);
+    assert(yyjson_get_sint(yyjson_arr_get(bytes, 0)) == 72);
+    assert(yyjson_get_sint(yyjson_arr_get(bytes, 4)) == 111);
+    assert(yyjson_arr_size(yyjson_obj_get(e0, "top_logprobs")) == 0);
 
     yyjson_doc_free(doc);
     yyjson_mut_doc_free(mdoc);
@@ -779,6 +835,227 @@ static void test_chat_request_parse_stop_non_string_element(void) {
     yyjson_doc_free(doc);
 }
 
+/* --- Cycle 12 (C2): sampling_set bitmask + top_k/min_p extension fields --- */
+
+static void test_parse_sampling_set_mask(void) {
+    /* Chat request with all sampling fields set */
+    const char *json_all =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"temperature\":0.8,\"top_p\":0.95,\"top_k\":40,\"min_p\":0.05,\"seed\":42}";
+    yyjson_doc *doc = yyjson_read(json_all, strlen(json_all), 0);
+    assert(doc);
+    chat_completion_request_t req;
+    const char *err = NULL;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling.temperature == 0.8f);
+    assert(req.params.sampling.top_p == 0.95f);
+    assert(req.params.sampling.top_k == 40);
+    assert(fabsf(req.params.sampling.min_p - 0.05f) < 1e-6f);
+    assert(req.params.sampling.seed == 42);
+    assert(req.params.sampling_set ==
+           (SAMPLING_SET_TEMPERATURE | SAMPLING_SET_TOP_P | SAMPLING_SET_TOP_K |
+            SAMPLING_SET_MIN_P | SAMPLING_SET_SEED));
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* Chat request with only temperature set - other mask bits clear */
+    const char *json_temp =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"temperature\":0.5}";
+    doc = yyjson_read(json_temp, strlen(json_temp), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling.temperature == 0.5f);
+    assert(req.params.sampling_set == SAMPLING_SET_TEMPERATURE);
+    assert(req.params.sampling.top_p == 1.0f);
+    assert(req.params.sampling.top_k == -1);
+    assert(req.params.sampling.min_p == 0.0f);
+    assert(req.params.sampling.seed == -1);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* No sampling fields set at all */
+    const char *json_none =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    doc = yyjson_read(json_none, strlen(json_none), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling_set == 0);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* Completion request with top_k and min_p */
+    const char *json_comp =
+        "{\"model\":\"m\",\"prompt\":\"hi\",\"max_tokens\":5,"
+        "\"top_k\":50,\"min_p\":0.1,\"seed\":7}";
+    doc = yyjson_read(json_comp, strlen(json_comp), 0);
+    assert(doc);
+    completion_request_t creq;
+    assert(completion_request_parse(&creq, yyjson_doc_get_root(doc), &err) == 0);
+    assert(creq.params.sampling.top_k == 50);
+    assert(fabsf(creq.params.sampling.min_p - 0.1f) < 1e-6f);
+    assert(creq.params.sampling.seed == 7);
+    assert(creq.params.sampling_set ==
+           (SAMPLING_SET_TOP_K | SAMPLING_SET_MIN_P | SAMPLING_SET_SEED));
+    completion_request_free(&creq);
+    yyjson_doc_free(doc);
+}
+
+/* --- Cycle 16 (C2): top_k validation ---- */
+
+static void test_sampling_params_validate_top_k(void) {
+    const char *err = NULL;
+    sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+
+    /* top_k < -1 rejected */
+    sp.top_k = -2;
+    assert(!sampling_params_validate(&sp, &err));
+    assert(err != NULL);
+
+    /* top_k = -1 accepted (disabled) */
+    sp.top_k = -1;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* top_k = 0 accepted (disabled) */
+    sp.top_k = 0;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* top_k = 1 accepted */
+    sp.top_k = 1;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* top_k = 50 accepted */
+    sp.top_k = 50;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* any seed accepted */
+    sp.seed = -1;
+    assert(sampling_params_validate(&sp, &err));
+    sp.seed = 0;
+    assert(sampling_params_validate(&sp, &err));
+    sp.seed = 999999;
+    assert(sampling_params_validate(&sp, &err));
+}
+
+/* --- Cycle 3 (review): top_logprobs > 0 rejected on chat endpoint -------- */
+
+static void test_chat_top_logprobs_rejected(void) {
+    chat_completion_request_t req;
+    const char *err = NULL;
+
+    /* top_logprobs: 2 -> 400 */
+    const char *json_pos =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"logprobs\":true,\"top_logprobs\":2}";
+    yyjson_doc *doc = yyjson_read(json_pos, strlen(json_pos), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == -1);
+    assert(err != NULL);
+    yyjson_doc_free(doc);
+
+    /* top_logprobs: -1 -> rejected (negative) */
+    err = NULL;
+    const char *json_neg =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"logprobs\":true,\"top_logprobs\":-1}";
+    doc = yyjson_read(json_neg, strlen(json_neg), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == -1);
+    assert(err != NULL);
+    yyjson_doc_free(doc);
+
+    /* top_logprobs: 0 -> accepted */
+    err = NULL;
+    const char *json_zero =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"logprobs\":true,\"top_logprobs\":0}";
+    doc = yyjson_read(json_zero, strlen(json_zero), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.logprobs == true);
+    assert(req.params.top_logprobs == 0);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* logprobs absent, top_logprobs absent -> accepted */
+    err = NULL;
+    const char *json_none =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    doc = yyjson_read(json_none, strlen(json_none), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.logprobs == false);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+}
+
+/* --- Cycle 3 (review): logprobs >= 1 rejected on completions endpoint ---- */
+
+static void test_completion_logprobs_rejected(void) {
+    completion_request_t req;
+    const char *err = NULL;
+
+    /* logprobs: 1 -> rejected */
+    const char *json_one =
+        "{\"model\":\"m\",\"prompt\":\"hi\",\"logprobs\":1}";
+    yyjson_doc *doc = yyjson_read(json_one, strlen(json_one), 0);
+    assert(doc);
+    assert(completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == -1);
+    assert(err != NULL);
+    yyjson_doc_free(doc);
+
+    /* logprobs: 0 -> accepted */
+    err = NULL;
+    const char *json_zero =
+        "{\"model\":\"m\",\"prompt\":\"hi\",\"logprobs\":0}";
+    doc = yyjson_read(json_zero, strlen(json_zero), 0);
+    assert(doc);
+    assert(completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* logprobs absent -> accepted */
+    err = NULL;
+    const char *json_none =
+        "{\"model\":\"m\",\"prompt\":\"hi\"}";
+    doc = yyjson_read(json_none, strlen(json_none), 0);
+    assert(doc);
+    assert(completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    completion_request_free(&req);
+    yyjson_doc_free(doc);
+}
+
+/* --- C3 cycle 2: top_k accepts integral doubles on the wire ------------- */
+
+static void test_parse_top_k_integral_double(void) {
+    const char *err = NULL;
+
+    /* top_k: 40.0 (integral double) should be accepted as 40 */
+    const char *json_int_double =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"top_k\":40.0}";
+    yyjson_doc *doc = yyjson_read(json_int_double, strlen(json_int_double), 0);
+    assert(doc);
+    chat_completion_request_t req;
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(req.params.sampling.top_k == 40);
+    assert(req.params.sampling_set & SAMPLING_SET_TOP_K);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+
+    /* top_k: 40.5 (non-integral) should be silently ignored */
+    const char *json_frac =
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"top_k\":40.5}";
+    doc = yyjson_read(json_frac, strlen(json_frac), 0);
+    assert(doc);
+    assert(chat_completion_request_parse(&req, yyjson_doc_get_root(doc), &err) == 0);
+    assert(!(req.params.sampling_set & SAMPLING_SET_TOP_K));
+    assert(req.params.sampling.top_k == -1);
+    chat_completion_request_free(&req);
+    yyjson_doc_free(doc);
+}
+
 int main(void) {
     test_helper_reads_and_parses_error_envelope();
     test_error_envelope_serialize();
@@ -792,6 +1069,7 @@ int main(void) {
     test_chat_response_roundtrip_tool_calls();
     test_chat_response_roundtrip_logprobs();
     test_chunk_serialize_stream();
+    test_chunk_serialize_with_logprobs();
     test_chunk_serialize_final_usage();
     test_chunk_serialize_tool_call_delta();
     test_embedding_request_parse();
@@ -804,6 +1082,12 @@ int main(void) {
     test_chat_request_parse_toolchoice_missing_function();
     test_parse_free_after_early_error_is_safe();
     test_chat_request_parse_stop_non_string_element();
+    test_parse_sampling_set_mask();
+    test_sampling_params_validate_top_k();
+    test_chat_top_logprobs_rejected();
+    test_completion_logprobs_rejected();
+    test_parse_top_k_integral_double();
+    printf("  test_completion_logprobs_rejected: passed\n");
     printf("test_openai: all passed\n");
     return 0;
 }

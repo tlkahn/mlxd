@@ -37,6 +37,10 @@ bool sampling_params_validate(const sampling_params_t *p, const char **err) {
         *err = "min_p must be in [0, 1]";
         return false;
     }
+    if (p->top_k < -1) {
+        *err = "top_k must be >= -1";
+        return false;
+    }
     return true;
 }
 

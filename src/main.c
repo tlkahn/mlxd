@@ -37,7 +37,11 @@ static void usage(void) {
             "  MODEL                   model directory or HuggingFace spec (required)\n"
             "  [PROMPT]                prompt text (reads stdin if omitted)\n"
             "  --max-tokens <N>        maximum tokens to generate (0 or unset: unlimited)\n"
-            "  --temperature <F>       sampling temperature\n"
+            "  --temperature <F>       sampling temperature (default: 0 = greedy)\n"
+            "  --top-p <F>            nucleus sampling threshold [0,1]\n"
+            "  --top-k <N>            top-k filter (-1 to disable)\n"
+            "  --min-p <F>            minimum probability filter [0,1]\n"
+            "  --seed <N>             random seed for reproducibility\n"
             "  --stream                flush each token to stdout as generated\n"
             "  --raw                   force raw completion even when a chat template is present\n"
             "  --token-ids             print generated token IDs instead of text\n"
@@ -359,11 +363,11 @@ static int cmd_serve(int argc, char **argv) {
 }
 
 static int cmd_run(int argc, char **argv) {
-    cli_run_opts_t opts;
+    cli_run_opts_t opts = {0};
     char err[256] = {0};
     if (cli_parse_run(argc, argv, &opts, err, sizeof(err)) != 0) {
         fprintf(stderr, "mlxd run: %s\n", err);
-        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--stream] [--raw] [--token-ids] [--]\n");
+        fprintf(stderr, "usage: mlxd run MODEL [PROMPT] [--max-tokens N] [--temperature F] [--top-p F] [--top-k N] [--min-p F] [--seed N] [--stream] [--raw] [--token-ids] [--]\n");
         return 1;
     }
 
@@ -469,8 +473,7 @@ static int cmd_run(int argc, char **argv) {
         .n = 1,
         .stream = true,
     };
-    if (opts.temperature_set)
-        params.sampling.temperature = opts.temperature;
+    run_opts_apply_sampling(&opts, &params);
 
     engine_cmd_t *gen_cmd = calloc(1, sizeof(*gen_cmd));
     if (!gen_cmd) {

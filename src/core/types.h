@@ -33,10 +33,19 @@ typedef struct {
 
 bool sampling_params_validate(const sampling_params_t *p, const char **err);
 
+/* --- Sampling set-mask bits (which fields were explicitly set on the wire) -- */
+
+#define SAMPLING_SET_TEMPERATURE (1u << 0)
+#define SAMPLING_SET_TOP_P       (1u << 1)
+#define SAMPLING_SET_TOP_K       (1u << 2)
+#define SAMPLING_SET_MIN_P       (1u << 3)
+#define SAMPLING_SET_SEED        (1u << 4)
+
 /* --- Generation parameters ------------------------------------------------ */
 
 typedef struct {
     sampling_params_t sampling;
+    unsigned sampling_set;
     int      max_tokens;
     int      n;
     bool     stream;

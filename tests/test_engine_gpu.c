@@ -1,9 +1,10 @@
 #include "engine/engine.h"
-#include "engine/engine_internal.h"
 #include "engine/emodel.h"
+#include "engine/sampler.h"
 #include "mlxbridge/mlxbridge.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,32 +100,38 @@ static void test_oversized_prompt(void) {
 static void test_greedy_argmax(void) {
     mlx_stream s = mlxbridge_gpu_stream();
 
-    /* logits [1, 8] with unique max at index 5 */
     float data[8] = {0.1f, -1.0f, 0.5f, 0.2f, -0.3f, 2.5f, 1.0f, 0.0f};
     int shape[] = {1, 8};
-    mlx_array logits_f32 = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
-    mlx_array logits = mlx_array_new();
-    assert(MLXB_CHECK(mlx_astype(&logits, logits_f32, MLX_BFLOAT16, s)));
+    mlx_array logits = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
+    mlx_array nokey = mlx_array_new();
 
+    sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+    sp.temperature = 0.0f;
+
+    mlx_array tok = mlx_array_new();
+    assert(sampler_sample_lazy(logits, &sp, nokey, false, s, &tok, NULL) == 0);
     int32_t id = -1;
-    assert(greedy_next_id(logits, s, &id) == 0);
+    assert(mlxbridge_item_int32(&id, tok) == 0);
     assert(id == 5);
 
+    mlx_array_free(tok);
+    mlx_array_free(nokey);
     mlx_array_free(logits);
-    mlx_array_free(logits_f32);
 }
 
-/* ---- B3.9/B3.10: deterministic generate --------------------------------- */
+/* ---- Stream helpers ----------------------------------------------------- */
 
-static int collect_tokens(stream_t *s, int32_t *out_ids, int max_ids,
-                          finish_reason_t *reason_out) {
+static int collect_tokens_lp(stream_t *s, int32_t *out_ids, float *out_lps,
+                             int max_ids, finish_reason_t *reason_out) {
     int n = 0;
     chunk_t c;
     *reason_out = FINISH_STOP;
     while (stream_next(s, &c, 30000)) {
         if (c.tag == CHUNK_TOKEN) {
-            if (n < max_ids)
+            if (n < max_ids) {
                 out_ids[n] = c.token.id;
+                if (out_lps) out_lps[n] = c.token.logprob;
+            }
             n++;
         } else if (c.tag == CHUNK_DONE) {
             *reason_out = c.done;
@@ -137,6 +144,13 @@ static int collect_tokens(stream_t *s, int32_t *out_ids, int max_ids,
     }
     return n;
 }
+
+static int collect_tokens(stream_t *s, int32_t *out_ids, int max_ids,
+                          finish_reason_t *reason_out) {
+    return collect_tokens_lp(s, out_ids, NULL, max_ids, reason_out);
+}
+
+/* ---- B3.9/B3.10: deterministic generate --------------------------------- */
 
 static void test_generate_deterministic(void) {
     engine_t eng;
@@ -163,6 +177,8 @@ static void test_generate_deterministic(void) {
         memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
         gen->generate.token_count = 2;
         gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
         gen->generate.stream = s;
         engine_post(&eng, gen);
 
@@ -183,6 +199,8 @@ static void test_generate_deterministic(void) {
         memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
         gen->generate.token_count = 2;
         gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
         gen->generate.stream = s;
         engine_post(&eng, gen);
 
@@ -230,6 +248,8 @@ static void test_generate_eos_finish_stop(void) {
     memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
     gen->generate.token_count = 2;
     gen->generate.params.max_tokens = 8; /* > stop_at+1 so length is not the reason */
+    gen->generate.params.sampling.temperature = 0.0f;
+    gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
     gen->generate.stream = s;
     engine_post(&eng, gen);
 
@@ -347,6 +367,285 @@ static void test_shutdown_mid_generate_real(void) {
     stream_release(s);
 }
 
+/* ---- C2.11: engine logprob ---- */
+
+static void test_generate_logprobs(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    int32_t prompt[] = {1, 2};
+    int max_new = 8;
+
+    /* logprobs=true, temperature=0 (greedy): every chunk has logprob < 0 and finite */
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.logprobs = true;
+        gen->generate.params.sampling = SAMPLING_PARAMS_DEFAULT;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        float lps[16];
+        finish_reason_t reason;
+        int n = collect_tokens_lp(s, ids, lps, 16, &reason);
+        assert(n == max_new);
+        assert(reason == FINISH_LENGTH);
+        for (int i = 0; i < n; i++) {
+            assert(isfinite(lps[i]));
+            assert(lps[i] < 0.0f);
+        }
+        stream_release(s);
+    }
+
+    /* logprobs=false: all logprobs are 0 */
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.logprobs = false;
+        gen->generate.params.sampling = SAMPLING_PARAMS_DEFAULT;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        float lps[16];
+        finish_reason_t reason;
+        int n = collect_tokens_lp(s, ids, lps, 16, &reason);
+        assert(n == max_new);
+        for (int i = 0; i < n; i++)
+            assert(lps[i] == 0.0f);
+        stream_release(s);
+    }
+
+    engine_destroy(&eng);
+}
+
+/* ---- C1.8: seeded sampling via engine ---- */
+
+static void test_generate_seeded_sampling(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    int32_t prompt[] = {1, 2};
+    int max_new = 8;
+
+    /* Two runs with temperature=5, seed=7 must be identical */
+    int32_t seq_a[16], seq_b[16];
+    finish_reason_t reason_a, reason_b;
+
+    for (int run = 0; run < 2; run++) {
+        int32_t *seq = (run == 0) ? seq_a : seq_b;
+        finish_reason_t *reason = (run == 0) ? &reason_a : &reason_b;
+
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 5.0f;
+        gen->generate.params.sampling.seed = 7;
+        gen->generate.params.sampling.top_p = 1.0f;
+        gen->generate.params.sampling.top_k = -1;
+        gen->generate.params.sampling.min_p = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE | SAMPLING_SET_SEED |
+                                            SAMPLING_SET_TOP_P | SAMPLING_SET_TOP_K |
+                                            SAMPLING_SET_MIN_P;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int n = collect_tokens(s, seq, 16, reason);
+        assert(n == max_new);
+        assert(*reason == FINISH_LENGTH);
+        stream_release(s);
+    }
+
+    /* Seeded runs are identical */
+    for (int i = 0; i < max_new; i++)
+        assert(seq_a[i] == seq_b[i]);
+
+    /* Must differ from greedy oracle (temperature 5 is far from greedy) */
+    bool differs = false;
+    for (int i = 0; i < max_new; i++) {
+        if (seq_a[i] != kOracle[i]) { differs = true; break; }
+    }
+    assert(differs);
+
+    engine_destroy(&eng);
+}
+
+/* ---- C2.14: gen-config defaults reach the GPU ---- */
+
+static void test_generate_genconfig_defaults(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    /* Inject gen_temperature=0 into the model config (post-load injection) */
+    eng.model->cfg.has_gen_temperature = true;
+    eng.model->cfg.gen_temperature = 0.0f;
+
+    /* Request does NOT set temperature (sampling_set=0) -> resolve picks gen_config's 0 -> greedy */
+    int32_t prompt[] = {1, 2};
+    int max_new = 8;
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        finish_reason_t reason;
+        int n = collect_tokens(s, ids, 16, &reason);
+        assert(n == max_new);
+        for (int i = 0; i < max_new; i++)
+            assert(ids[i] == kOracle[i]);
+        stream_release(s);
+    }
+
+    /* Request sets temperature=5 + seed (mask on) -> overrides gen_config -> not greedy */
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 5.0f;
+        gen->generate.params.sampling.seed = 99;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE | SAMPLING_SET_SEED;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        finish_reason_t reason;
+        int n = collect_tokens(s, ids, 16, &reason);
+        assert(n == max_new);
+        bool differs = false;
+        for (int i = 0; i < max_new; i++) {
+            if (ids[i] != kOracle[i]) { differs = true; break; }
+        }
+        assert(differs);
+        stream_release(s);
+    }
+
+    engine_destroy(&eng);
+}
+
+/* ---- C2.15: multi-eos termination ---- */
+
+static void test_generate_multi_eos(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    int32_t prompt[] = {1, 2};
+    int max_new = 8;
+
+    /* Inject two eos ids: kOracle[2] (63) and kOracle[5] (184) */
+    eng.model->cfg.eos_token_ids[0] = (uint32_t)kOracle[2];
+    eng.model->cfg.eos_token_ids[1] = (uint32_t)kOracle[5];
+    eng.model->cfg.num_eos_tokens = 2;
+
+    /* Should stop at first hit (kOracle[2] = 63, position 2) */
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        finish_reason_t reason;
+        int n = collect_tokens(s, ids, 16, &reason);
+        assert(n == 2);
+        assert(reason == FINISH_STOP);
+        for (int i = 0; i < n; i++)
+            assert(ids[i] == kOracle[i]);
+        stream_release(s);
+    }
+
+    /* Inject only the later id (kOracle[5] = 184): should stop at position 5 */
+    eng.model->cfg.eos_token_ids[0] = (uint32_t)kOracle[5];
+    eng.model->cfg.eos_token_ids[1] = 0;
+    eng.model->cfg.num_eos_tokens = 1;
+    {
+        stream_t *s = stream_create(32);
+        stream_retain(s);
+        engine_cmd_t *gen = calloc(1, sizeof(*gen));
+        assert(gen);
+        gen->tag = CMD_GENERATE;
+        gen->generate.token_ids = malloc(sizeof(prompt));
+        memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+        gen->generate.token_count = 2;
+        gen->generate.params.max_tokens = max_new;
+        gen->generate.params.sampling.temperature = 0.0f;
+        gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
+        gen->generate.stream = s;
+        engine_post(&eng, gen);
+
+        int32_t ids[16];
+        finish_reason_t reason;
+        int n = collect_tokens(s, ids, 16, &reason);
+        assert(n == 5);
+        assert(reason == FINISH_STOP);
+        for (int i = 0; i < n; i++)
+            assert(ids[i] == kOracle[i]);
+        stream_release(s);
+    }
+
+    engine_destroy(&eng);
+}
+
 int main(void) {
     test_load_tiny_qwen3_ok();
     printf("  test_load_tiny_qwen3_ok: passed\n");
@@ -368,6 +667,18 @@ int main(void) {
 
     test_shutdown_mid_generate_real();
     printf("  test_shutdown_mid_generate_real: passed\n");
+
+    test_generate_seeded_sampling();
+    printf("  test_generate_seeded_sampling: passed\n");
+
+    test_generate_logprobs();
+    printf("  test_generate_logprobs: passed\n");
+
+    test_generate_genconfig_defaults();
+    printf("  test_generate_genconfig_defaults: passed\n");
+
+    test_generate_multi_eos();
+    printf("  test_generate_multi_eos: passed\n");
 
     printf("test_engine_gpu: all passed\n");
     return 0;

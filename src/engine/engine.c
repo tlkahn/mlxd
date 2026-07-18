@@ -1,7 +1,7 @@
 #include "engine/engine.h"
-#include "engine/engine_internal.h"
 #include "engine/emodel.h"
 #include "engine/kvcache.h"
+#include "engine/sampler.h"
 #include "mlxbridge/mlxbridge.h"
 
 #include <stdio.h>
@@ -305,34 +305,6 @@ static bool token_is_eos(const model_config_t *cfg, int32_t id) {
     return false;
 }
 
-/* Lazy form: returns argmax array without materializing. Caller owns *tok_out. */
-static int greedy_next_token_lazy(mlx_array logits, mlx_stream s,
-                                  mlx_array *tok_out) {
-    mlx_array tok = mlx_array_new();
-    if (!MLXB_CHECK(mlx_argmax_axis(&tok, logits, -1, false, s))) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    *tok_out = tok;
-    return 0;
-}
-
-/* Greedy argmax over last-axis of logits. logits: [1, vocab] (or [1,1,vocab]).
- * Exposed (non-static) so GPU tests can call it directly. */
-int greedy_next_id(mlx_array logits, mlx_stream s, int32_t *id_out) {
-    mlx_array tok = mlx_array_new();
-    if (greedy_next_token_lazy(logits, s, &tok) != 0) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    if (mlxbridge_item_int32(id_out, tok) != 0) {
-        mlx_array_free(tok);
-        return -1;
-    }
-    mlx_array_free(tok);
-    return 0;
-}
-
 static mlx_array make_ids_array(const int32_t *ids, int n) {
     int shape[] = {1, n};
     return mlx_array_new_data(ids, shape, 2, MLX_INT32);
@@ -357,6 +329,7 @@ static void handle_generate_stub(engine_t *eng, engine_cmd_t *cmd) {
     int limit = count < max ? count : max;
     bool truncated = limit < count;
     bool aborted = false;
+    bool want_lp = cmd->generate.params.logprobs;
 
     for (int i = 0; i < limit; i++) {
         if (atomic_load(&eng->shutdown)) {
@@ -364,9 +337,10 @@ static void handle_generate_stub(engine_t *eng, engine_cmd_t *cmd) {
             aborted = true;
             break;
         }
+        float lp = want_lp ? -0.25f * (float)(i + 1) : 0.0f;
         chunk_t tok = {
             .tag = CHUNK_TOKEN,
-            .token = {.id = cmd->generate.token_ids[i], .logprob = 0},
+            .token = {.id = cmd->generate.token_ids[i], .logprob = lp},
         };
         if (!stream_push(s, tok)) {
             stream_finish_cancelled(s);
@@ -389,11 +363,21 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     int n = cmd->generate.token_count;
     int max_new = cmd->generate.params.max_tokens;
     const int32_t *token_ids = cmd->generate.token_ids;
+    sampling_params_t resolved_sp = sampling_resolve(
+        &cmd->generate.params.sampling, cmd->generate.params.sampling_set,
+        &em->cfg);
+    const sampling_params_t *sp = &resolved_sp;
+    bool want_lp = cmd->generate.params.logprobs;
 
     kvcache_t kv;
     memset(&kv, 0, sizeof(kv));
     bool kv_inited = false;
     mlx_array pending_logits = mlx_array_new();
+    sampler_key_t skey;
+    if (sampler_key_init(&skey, sp->seed) != 0) {
+        generate_fail(eng, s, "sampler key init failed", GEN_ERR_INTERNAL);
+        goto out_free;
+    }
 
     if (n > em->cfg.max_position_embeddings) {
         char msg[160];
@@ -460,12 +444,23 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         }
 
         /* 1) sample CURRENT token lazily */
-        mlx_array lazy_token = mlx_array_new();
-        if (greedy_next_token_lazy(pending_logits, em->stream, &lazy_token) != 0) {
-            mlx_array_free(lazy_token);
-            generate_fail(eng, s, "greedy sample failed", GEN_ERR_INTERNAL);
+        mlx_array subkey = mlx_array_new();
+        if (sampler_key_next(&skey, &subkey, em->stream) != 0) {
+            mlx_array_free(subkey);
+            generate_fail(eng, s, "sampler key_next failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
+        mlx_array lazy_token = mlx_array_new();
+        mlx_array lazy_lp = mlx_array_new();
+        if (sampler_sample_lazy(pending_logits, sp, subkey, want_lp, em->stream,
+                                &lazy_token, &lazy_lp) != 0) {
+            mlx_array_free(subkey);
+            mlx_array_free(lazy_token);
+            mlx_array_free(lazy_lp);
+            generate_fail(eng, s, "sampler sample failed", GEN_ERR_INTERNAL);
+            goto out_free;
+        }
+        mlx_array_free(subkey);
         mlx_array_free(pending_logits);
         pending_logits = mlx_array_new();
 
@@ -482,6 +477,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
+                mlx_array_free(lazy_lp);
                 generate_fail(eng, s, "token reshape failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
@@ -489,24 +485,30 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
+                mlx_array_free(lazy_lp);
                 generate_fail(eng, s, "decode forward failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
             have_next = true;
 
-            mlx_array pair[2] = {lazy_token, next_logits};
-            if (mlxbridge_async_eval_n(pair, 2) != 0) {
+            mlx_array batch[3] = {lazy_token, next_logits, lazy_lp};
+            size_t batch_n = want_lp ? 3 : 2;
+            if (mlxbridge_async_eval_n(batch, batch_n) != 0) {
                 mlx_array_free(step_ids);
                 mlx_array_free(next_logits);
                 mlx_array_free(lazy_token);
+                mlx_array_free(lazy_lp);
                 generate_fail(eng, s, "async_eval failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
             mlx_array_free(step_ids);
         } else {
             /* last allowed token: force-eval the token alone */
-            if (mlxbridge_async_eval(lazy_token) != 0) {
+            mlx_array batch[2] = {lazy_token, lazy_lp};
+            size_t batch_n = want_lp ? 2 : 1;
+            if (mlxbridge_async_eval_n(batch, batch_n) != 0) {
                 mlx_array_free(lazy_token);
+                mlx_array_free(lazy_lp);
                 generate_fail(eng, s, "async_eval failed", GEN_ERR_INTERNAL);
                 goto out_free;
             }
@@ -517,10 +519,22 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         if (mlxbridge_item_int32(&id, lazy_token) != 0) {
             if (have_next) mlx_array_free(next_logits);
             mlx_array_free(lazy_token);
+            mlx_array_free(lazy_lp);
             generate_fail(eng, s, "token materialize failed", GEN_ERR_INTERNAL);
             goto out_free;
         }
         mlx_array_free(lazy_token);
+
+        float lp_val = 0.0f;
+        if (want_lp) {
+            if (mlxbridge_item_float32(&lp_val, lazy_lp) != 0) {
+                if (have_next) mlx_array_free(next_logits);
+                mlx_array_free(lazy_lp);
+                generate_fail(eng, s, "logprob materialize failed", GEN_ERR_INTERNAL);
+                goto out_free;
+            }
+        }
+        mlx_array_free(lazy_lp);
 
         if (token_is_eos(&em->cfg, id)) {
             if (have_next) mlx_array_free(next_logits);
@@ -529,7 +543,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
             goto out_free;
         }
 
-        chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = id, .logprob = 0}};
+        chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = id, .logprob = lp_val}};
         if (!stream_push(s, tok)) {
             if (have_next) mlx_array_free(next_logits);
             stream_finish_cancelled(s);
@@ -554,6 +568,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     }
 
 out_free:
+    sampler_key_free(&skey);
     mlx_array_free(pending_logits);
     if (kv_inited)
         kvcache_free(&kv);

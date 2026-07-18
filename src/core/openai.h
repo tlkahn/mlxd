@@ -89,6 +89,8 @@ typedef struct {
     int                tool_call_count;
     bool               has_finish_reason;
     finish_reason_t    finish_reason;
+    token_logprob_t   *logprobs;
+    int                logprob_count;
     bool               has_usage;
     usage_t            usage;
 } chat_completion_chunk_t;

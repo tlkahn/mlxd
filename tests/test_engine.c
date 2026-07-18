@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "engine/sampler.h"
 
 #include <assert.h>
 #include <pthread.h>
@@ -1163,6 +1164,134 @@ static void test_signal_shutdown_flushes_queued(void) {
     stream_release(s_b);
 }
 
+/* ---- C2.13: sampling_resolve precedence ---- */
+
+static void test_sampling_resolve(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    /* Case 1: request sets temperature, cfg has gen_temperature -> request wins */
+    cfg.has_gen_temperature = true;
+    cfg.gen_temperature = 0.5f;
+    cfg.has_gen_top_p = true;
+    cfg.gen_top_p = 0.8f;
+    cfg.has_gen_top_k = true;
+    cfg.gen_top_k = 20;
+
+    sampling_params_t req = {.temperature = 0.9f, .top_p = 0.7f, .top_k = 50,
+                             .min_p = 0.1f, .seed = 42};
+    unsigned mask = SAMPLING_SET_TEMPERATURE | SAMPLING_SET_SEED;
+
+    sampling_params_t out = sampling_resolve(&req, mask, &cfg);
+    assert(out.temperature == 0.9f);
+    assert(out.top_p == 0.8f);
+    assert(out.top_k == 20);
+    assert(out.min_p == 0.0f);
+    assert(out.seed == 42);
+
+    /* Case 2: nothing set on request, cfg has defaults */
+    out = sampling_resolve(&req, 0, &cfg);
+    assert(out.temperature == 0.5f);
+    assert(out.top_p == 0.8f);
+    assert(out.top_k == 20);
+    assert(out.min_p == 0.0f);
+    assert(out.seed == -1);
+
+    /* Case 3: cfg has nothing (no gen_* flags) -> SAMPLING_PARAMS_DEFAULT */
+    model_config_t empty_cfg;
+    memset(&empty_cfg, 0, sizeof(empty_cfg));
+    out = sampling_resolve(&req, 0, &empty_cfg);
+    assert(out.temperature == 1.0f);
+    assert(out.top_p == 1.0f);
+    assert(out.top_k == -1);
+    assert(out.min_p == 0.0f);
+    assert(out.seed == -1);
+
+    /* Case 4: NULL cfg -> SAMPLING_PARAMS_DEFAULT */
+    out = sampling_resolve(&req, 0, NULL);
+    assert(out.temperature == 1.0f);
+
+    /* Case 5: min_p and seed never come from gen config (not parsed in model.c) */
+    out = sampling_resolve(&req, SAMPLING_SET_MIN_P, &cfg);
+    assert(out.min_p == 0.1f);
+    assert(out.seed == -1);
+}
+
+/* ---- Cycle 5 (review): stub engine emits deterministic logprobs --------- */
+
+static void test_stub_logprobs(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
+    engine_post(&eng, load);
+
+    stream_t *s = stream_create(16);
+    stream_retain(s);
+
+    int32_t ids[] = {10, 20, 30};
+    engine_cmd_t *gen = calloc(1, sizeof(*gen));
+    gen->tag = CMD_GENERATE;
+    gen->generate.token_ids = malloc(sizeof(ids));
+    memcpy(gen->generate.token_ids, ids, sizeof(ids));
+    gen->generate.token_count = 3;
+    gen->generate.params.max_tokens = 10;
+    gen->generate.params.logprobs = true;
+    gen->generate.stream = s;
+    engine_post(&eng, gen);
+
+    chunk_t out;
+    for (int i = 0; i < 3; i++) {
+        assert(stream_next(s, &out, -1));
+        assert(out.tag == CHUNK_TOKEN);
+        float expected = -0.25f * (float)(i + 1);
+        assert(out.token.logprob == expected);
+    }
+    assert(stream_next(s, &out, -1));
+    assert(out.tag == CHUNK_DONE);
+
+    stream_release(s);
+    engine_destroy(&eng);
+}
+
+static void test_stub_no_logprobs(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+
+    engine_cmd_t *load = calloc(1, sizeof(*load));
+    load->tag = CMD_LOAD;
+    load->load.model_path = strdup(MLXD_STUB_MODEL_PATH);
+    engine_post(&eng, load);
+
+    stream_t *s = stream_create(16);
+    stream_retain(s);
+
+    int32_t ids[] = {10, 20};
+    engine_cmd_t *gen = calloc(1, sizeof(*gen));
+    gen->tag = CMD_GENERATE;
+    gen->generate.token_ids = malloc(sizeof(ids));
+    memcpy(gen->generate.token_ids, ids, sizeof(ids));
+    gen->generate.token_count = 2;
+    gen->generate.params.max_tokens = 10;
+    gen->generate.params.logprobs = false;
+    gen->generate.stream = s;
+    engine_post(&eng, gen);
+
+    chunk_t out;
+    for (int i = 0; i < 2; i++) {
+        assert(stream_next(s, &out, -1));
+        assert(out.tag == CHUNK_TOKEN);
+        assert(out.token.logprob == 0.0f);
+    }
+    assert(stream_next(s, &out, -1));
+    assert(out.tag == CHUNK_DONE);
+
+    stream_release(s);
+    engine_destroy(&eng);
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(void) {
@@ -1204,6 +1333,9 @@ int main(void) {
     test_post_during_destroy_stress();
     test_user_cancel_emits_terminal();
     test_signal_shutdown_flushes_queued();
+    test_sampling_resolve();
+    test_stub_logprobs();
+    test_stub_no_logprobs();
     printf("test_engine: all passed\n");
     return 0;
 }

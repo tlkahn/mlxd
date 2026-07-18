@@ -1,6 +1,8 @@
 #include "cli/args.h"
+#include "core/types.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -230,6 +232,10 @@ static void test_run_defaults(void) {
     assert(rc == 0);
     assert(opts.max_tokens == 0);
     assert(!opts.temperature_set);
+    assert(!opts.top_p_set);
+    assert(!opts.top_k_set);
+    assert(!opts.min_p_set);
+    assert(!opts.seed_set);
     assert(!opts.stream);
 }
 
@@ -457,6 +463,118 @@ static void test_list_unknown_flag(void) {
     assert(rc == -1);
 }
 
+/* --- C2 cycle 17: sampling flags ------------------------------------------ */
+
+static void test_run_sampling_flags(void) {
+    char *argv[] = {"mlxd", "run", "m", "hi",
+                    "--top-p", "0.9", "--top-k", "40", "--min-p", "0.05", "--seed", "42"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(12, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(opts.top_p_set);
+    assert(opts.top_p > 0.89f && opts.top_p < 0.91f);
+    assert(opts.top_k_set);
+    assert(opts.top_k == 40);
+    assert(opts.min_p_set);
+    assert(opts.min_p > 0.04f && opts.min_p < 0.06f);
+    assert(opts.seed_set);
+    assert(opts.seed == 42);
+}
+
+static void test_run_sampling_bad_values(void) {
+    char err[256];
+
+    /* top-p out of range */
+    char *argv1[] = {"mlxd", "run", "m", "--top-p", "1.5"};
+    cli_run_opts_t opts = {0};
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv1, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "top-p") != NULL);
+
+    /* top-k < -1 */
+    char *argv2[] = {"mlxd", "run", "m", "--top-k", "-2"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv2, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "top-k") != NULL);
+
+    /* min-p negative */
+    char *argv3[] = {"mlxd", "run", "m", "--min-p", "-0.1"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv3, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "min-p") != NULL);
+
+    /* seed non-numeric */
+    char *argv4[] = {"mlxd", "run", "m", "--seed", "abc"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv4, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "seed") != NULL);
+
+    /* seed negative */
+    char *argv5[] = {"mlxd", "run", "m", "--seed", "-5"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv5, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "seed") != NULL);
+}
+
+/* --- C3 cycle 1: cli_parse_run must fully initialize all fields ---------- */
+
+static void test_run_parse_initializes_poisoned_struct(void) {
+    char *argv[] = {"mlxd", "run", "m", "hello"};
+    cli_run_opts_t opts;
+    memset(&opts, 0xA5, sizeof(opts));
+    char err[256] = {0};
+    int rc = cli_parse_run(4, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(!opts.top_p_set);
+    assert(!opts.top_k_set);
+    assert(!opts.min_p_set);
+    assert(!opts.seed_set);
+    assert(!opts.temperature_set);
+    assert(!opts.stream);
+    assert(!opts.raw);
+    assert(!opts.token_ids);
+    assert(opts.max_tokens == 0);
+    assert(opts.temperature == 0.0f);
+    assert(opts.top_p == 0.0f);
+    assert(opts.min_p == 0.0f);
+    assert(opts.top_k == 0);
+    assert(opts.seed == 0);
+}
+
+/* --- Cycle 7 (review): run_opts_apply_sampling greedy default ----------- */
+
+static void test_run_opts_apply_sampling_defaults(void) {
+    cli_run_opts_t opts = {0};
+    gen_params_t params = {.sampling = SAMPLING_PARAMS_DEFAULT};
+    run_opts_apply_sampling(&opts, &params);
+    assert(params.sampling.temperature == 0.0f);
+    assert(params.sampling_set & SAMPLING_SET_TEMPERATURE);
+    assert(!(params.sampling_set & SAMPLING_SET_TOP_P));
+    assert(!(params.sampling_set & SAMPLING_SET_TOP_K));
+    assert(!(params.sampling_set & SAMPLING_SET_MIN_P));
+    assert(!(params.sampling_set & SAMPLING_SET_SEED));
+}
+
+static void test_run_opts_apply_sampling_explicit_temp(void) {
+    cli_run_opts_t opts = {0};
+    opts.temperature = 0.8f;
+    opts.temperature_set = true;
+    opts.top_k = 40;
+    opts.top_k_set = true;
+    gen_params_t params = {.sampling = SAMPLING_PARAMS_DEFAULT};
+    run_opts_apply_sampling(&opts, &params);
+    assert(fabsf(params.sampling.temperature - 0.8f) < 1e-6f);
+    assert(params.sampling_set & SAMPLING_SET_TEMPERATURE);
+    assert(params.sampling.top_k == 40);
+    assert(params.sampling_set & SAMPLING_SET_TOP_K);
+    assert(!(params.sampling_set & SAMPLING_SET_TOP_P));
+}
+
 int main(void) {
     /* cycle 1: cli_command */
     test_command_serve();
@@ -532,6 +650,17 @@ int main(void) {
     test_list_default();
     test_list_json();
     test_list_unknown_flag();
+
+    /* C2 cycle 17: sampling flags */
+    test_run_sampling_flags();
+    test_run_sampling_bad_values();
+
+    /* C3 cycle 1: poisoned struct initialization */
+    test_run_parse_initializes_poisoned_struct();
+
+    /* Cycle 7 (review): run_opts_apply_sampling */
+    test_run_opts_apply_sampling_defaults();
+    test_run_opts_apply_sampling_explicit_temp();
 
     printf("test_cli_args: all passed\n");
     return 0;

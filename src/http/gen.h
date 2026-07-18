@@ -1,6 +1,7 @@
 #ifndef MLXD_HTTP_GEN_H
 #define MLXD_HTTP_GEN_H
 
+#include "core/openai.h"
 #include "core/types.h"
 
 #include <stdbool.h>
@@ -33,6 +34,7 @@ typedef struct {
     const char *delta_text;
     bool final;
     finish_reason_t reason;
+    const token_logprob_t *logprob;
     bool include_usage;
     const usage_t *usage;
 } gen_sse_chunk_params_t;
@@ -46,7 +48,8 @@ char *gen_sse_chunk(const gen_sse_chunk_params_t *p);
  * Caller frees. */
 char *gen_build_chat_response(const char *id, const char *model, int64_t created,
                               const char *content, finish_reason_t reason,
-                              const usage_t *u);
+                              const usage_t *u,
+                              const token_logprob_t *logprobs, int logprobs_count);
 
 /* Build a complete text completion response JSON. u may be NULL (zeroed usage).
  * Caller frees. */

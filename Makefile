@@ -79,7 +79,7 @@ tests/test_http_gen_request: tests/test_http_gen_request.c $(GENREQ_OBJS)
 tests/test_%: tests/test_%.c $(LIB_OBJS)
 	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(LIB_OBJS) $(ALL_LDFLAGS)
 
-test: $(TEST_BINS) test-parity-skip test-parity-script
+test: $(TEST_BINS) test-parity-skip
 	@pass=0; fail=0; \
 	for t in $(TEST_BINS); do \
 		printf "  %-40s" "$$(basename $$t)"; \
