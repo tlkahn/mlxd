@@ -79,7 +79,7 @@ tests/test_http_gen_request: tests/test_http_gen_request.c $(GENREQ_OBJS)
 tests/test_%: tests/test_%.c $(LIB_OBJS)
 	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< $(LIB_OBJS) $(ALL_LDFLAGS)
 
-test: $(TEST_BINS)
+test: $(TEST_BINS) test-parity-skip
 	@pass=0; fail=0; \
 	for t in $(TEST_BINS); do \
 		printf "  %-40s" "$$(basename $$t)"; \
@@ -135,7 +135,16 @@ compile_commands.json: Makefile
 test-leaks: tests/test_http_server
 	leaks --atExit -- ./tests/test_http_server
 
-.PHONY: test test-gpu test-tsan test-leaks clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
+test-parity-skip:
+	@echo "--- parity skip: env unset ---"
+	@out=$$(env -u MLXD_MLX_SERVE_BIN sh scripts/parity_temp0.sh 2>&1) && \
+		echo "$$out" | grep -q 'skipped' || { echo "FAIL: expected 'skipped' in output"; exit 1; }
+	@echo "--- parity skip: bad binary + bad ckpt ---"
+	@out=$$(MLXD_MLX_SERVE_BIN=/nonexistent sh scripts/parity_temp0.sh /nonexistent-ckpt 2>&1) && \
+		echo "$$out" | grep -q 'skipped' || { echo "FAIL: expected 'skipped' in output"; exit 1; }
+	@echo "test-parity-skip: OK"
+
+.PHONY: test test-gpu test-tsan test-leaks test-parity-skip clean install analyze coverage coverage-gpu clean-coverage unicode-tables fixtures-tiny-ckpt
 
 # --- Thread Sanitizer tests ---------------------------------------------------
 
