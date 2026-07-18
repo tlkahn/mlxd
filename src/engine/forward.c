@@ -6,7 +6,7 @@
 #include <string.h>
 
 int fwd_linear(mlx_array *out, mlx_array x, const weight_triplet_t *tri,
-               const model_config_t *cfg, bool bias, mlx_stream s) {
+               const model_config_t *cfg, mlx_stream s) {
     if (!out || !tri) return -1;
     int rc = -1;
     mlx_array result = mlx_array_new();
@@ -106,10 +106,18 @@ int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
         }
 
         int out_shape[] = {B, S, cfg->hidden_size};
-        if (!MLXB_CHECK(mlx_reshape(&result, dq, out_shape, 3, s))) {
+        mlx_array reshaped = mlx_array_new();
+        if (!MLXB_CHECK(mlx_reshape(&reshaped, dq, out_shape, 3, s))) {
+            mlx_array_free(reshaped);
             weights_triplet_free(&tri);
             goto cleanup;
         }
+        if (!MLXB_CHECK(mlx_astype(&result, reshaped, MLX_BFLOAT16, s))) {
+            mlx_array_free(reshaped);
+            weights_triplet_free(&tri);
+            goto cleanup;
+        }
+        mlx_array_free(reshaped);
     } else {
         char wname[270];
         snprintf(wname, sizeof(wname), "%s.weight", name);
@@ -209,15 +217,15 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.q_proj");
     if (weights_get_triplet(&q_tri, w, name) != 0) goto cleanup;
-    if (fwd_linear(&q, x, &q_tri, cfg, false, s) != 0) goto cleanup;
+    if (fwd_linear(&q, x, &q_tri, cfg, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.k_proj");
     if (weights_get_triplet(&k_tri, w, name) != 0) goto cleanup;
-    if (fwd_linear(&k, x, &k_tri, cfg, false, s) != 0) goto cleanup;
+    if (fwd_linear(&k, x, &k_tri, cfg, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.v_proj");
     if (weights_get_triplet(&v_tri, w, name) != 0) goto cleanup;
-    if (fwd_linear(&v, x, &v_tri, cfg, false, s) != 0) goto cleanup;
+    if (fwd_linear(&v, x, &v_tri, cfg, s) != 0) goto cleanup;
 
     /* Reshape to [B,S,H,D] */
     int B = mlx_array_dim(x, 0);
@@ -297,7 +305,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     /* O projection */
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.o_proj");
     if (weights_get_triplet(&o_tri, w, name) != 0) goto cleanup;
-    if (fwd_linear(&result, attn_reshaped, &o_tri, cfg, false, s) != 0) goto cleanup;
+    if (fwd_linear(&result, attn_reshaped, &o_tri, cfg, s) != 0) goto cleanup;
 
     mlx_array_free(*out);
     *out = result;
@@ -352,11 +360,11 @@ int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "mlp.gate_proj");
     if (weights_get_triplet(&gate_tri, w, name) != 0) goto cleanup;
-    if (fwd_linear(&gate, x, &gate_tri, cfg, false, s) != 0) goto cleanup;
+    if (fwd_linear(&gate, x, &gate_tri, cfg, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "mlp.up_proj");
     if (weights_get_triplet(&up_tri, w, name) != 0) goto cleanup;
-    if (fwd_linear(&up, x, &up_tri, cfg, false, s) != 0) goto cleanup;
+    if (fwd_linear(&up, x, &up_tri, cfg, s) != 0) goto cleanup;
 
     /* silu(gate) = gate * sigmoid(gate) */
     if (!MLXB_CHECK(mlx_sigmoid(&gate_sig, gate, s))) goto cleanup;
@@ -368,7 +376,7 @@ int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
     /* down projection */
     weights_tensor_name(name, sizeof(name), cfg, layer, "mlp.down_proj");
     if (weights_get_triplet(&down_tri, w, name) != 0) goto cleanup;
-    if (fwd_linear(&result, down_in, &down_tri, cfg, false, s) != 0) goto cleanup;
+    if (fwd_linear(&result, down_in, &down_tri, cfg, s) != 0) goto cleanup;
 
     mlx_array_free(*out);
     *out = result;

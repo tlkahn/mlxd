@@ -6,18 +6,65 @@
 #include <stdio.h>
 #include <string.h>
 
-int engine_model_load(engine_model_t *em, const char *model_dir) {
+int engine_model_check_supported(const model_config_t *cfg,
+                                 char *err, size_t errlen) {
+    if (!cfg) return -1;
+
+#define REJECT(cond, msg) do { \
+    if (cond) { \
+        if (err && errlen > 0) snprintf(err, errlen, "%s", msg); \
+        return -1; \
+    } \
+} while (0)
+
+    REJECT(cfg->family != MODEL_QWEN3,
+           "unsupported model family (only qwen3-dense supported)");
+    REJECT(cfg->attention_bias,
+           "attention_bias not supported");
+    REJECT(cfg->has_sliding_window,
+           "sliding window attention not supported");
+    REJECT(cfg->num_experts > 0,
+           "MoE models not supported");
+    REJECT(cfg->has_hybrid_layers,
+           "hybrid layer architectures not supported");
+    REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
+           "only SiLU activation supported");
+    REJECT(cfg->norm_has_offset,
+           "norm_has_offset not supported");
+    REJECT(cfg->scale_embeddings,
+           "scale_embeddings not supported");
+    REJECT(cfg->has_pre_ff_norm,
+           "pre-feedforward norm not supported");
+    REJECT(cfg->rope_scaling_type != NULL,
+           "RoPE scaling not supported");
+    REJECT(cfg->partial_rotary_factor != 1.0f,
+           "partial rotary embedding not supported");
+    REJECT(cfg->attn_output_gate,
+           "attention output gate not supported");
+
+#undef REJECT
+
+    return 0;
+}
+
+int engine_model_load(engine_model_t *em, const char *model_dir,
+                      char *err, size_t errlen) {
     if (!em || !model_dir) return -1;
     memset(em, 0, sizeof(*em));
 
     if (model_config_load(&em->cfg, model_dir) != 0) {
-        log_error("emodel: failed to load config from %s", model_dir);
+        if (err && errlen > 0)
+            snprintf(err, errlen, "failed to load config from %s", model_dir);
         return -1;
     }
 
-    char err[256] = {0};
-    if (weights_load(&em->w, model_dir, &em->cfg, err, sizeof(err)) != 0) {
-        log_error("emodel: failed to load weights: %s", err);
+    if (engine_model_check_supported(&em->cfg, err, errlen) != 0) {
+        model_config_free(&em->cfg);
+        memset(em, 0, sizeof(*em));
+        return -1;
+    }
+
+    if (weights_load(&em->w, model_dir, &em->cfg, err, errlen) != 0) {
         model_config_free(&em->cfg);
         memset(em, 0, sizeof(*em));
         return -1;
@@ -90,32 +137,16 @@ int model_forward(engine_model_t *em, mlx_array ids, kvcache_t *kv,
         goto cleanup;
 
     /* lm_head */
-    if (cfg->tie_word_embeddings) {
-        weights_tensor_name(name, sizeof(name), cfg, -1, "embed_tokens");
-        snprintf(wname, sizeof(wname), "%s.weight", name);
-        mlx_array embed_w = mlx_array_new();
-        if (weights_get(&embed_w, w, wname) != 0) {
-            mlx_array_free(embed_w);
-            goto cleanup;
-        }
-        mlx_array embed_t = mlx_array_new();
-        if (!MLXB_CHECK(mlx_transpose(&embed_t, embed_w, s))) {
-            mlx_array_free(embed_t);
-            mlx_array_free(embed_w);
-            goto cleanup;
-        }
-        if (!MLXB_CHECK(mlx_matmul(&logits, sliced, embed_t, s))) {
-            mlx_array_free(embed_t);
-            mlx_array_free(embed_w);
-            goto cleanup;
-        }
-        mlx_array_free(embed_t);
-        mlx_array_free(embed_w);
-    } else {
+    {
+        const char *lm_base = cfg->tie_word_embeddings
+            ? name  /* reuse name buffer */
+            : "lm_head";
+        if (cfg->tie_word_embeddings)
+            weights_tensor_name(name, sizeof(name), cfg, -1, "embed_tokens");
         weight_triplet_t lm_tri;
-        if (weights_get_triplet(&lm_tri, w, "lm_head") != 0)
+        if (weights_get_triplet(&lm_tri, w, lm_base) != 0)
             goto cleanup;
-        if (fwd_linear(&logits, sliced, &lm_tri, cfg, false, s) != 0) {
+        if (fwd_linear(&logits, sliced, &lm_tri, cfg, s) != 0) {
             weights_triplet_free(&lm_tri);
             goto cleanup;
         }

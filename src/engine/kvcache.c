@@ -100,12 +100,24 @@ cleanup:
 int kvcache_update(kvcache_t *kv, int layer, mlx_array new_k, mlx_array new_v,
                    mlx_array *k_view, mlx_array *v_view, mlx_stream s) {
     if (!kv || !kv->entries || layer < 0 || layer >= kv->num_layers) return -1;
+
+    if ((int)mlx_array_ndim(new_k) != 4 || (int)mlx_array_ndim(new_v) != 4)
+        return -1;
+
+    int H = mlx_array_dim(new_k, 1);
+    int D = mlx_array_dim(new_k, 3);
+    if (H != kv->n_kv_heads || D != kv->head_dim) return -1;
+
+    if (mlx_array_dim(new_v, 1) != H || mlx_array_dim(new_v, 3) != D)
+        return -1;
+    if (mlx_array_dim(new_k, 0) != mlx_array_dim(new_v, 0) ||
+        mlx_array_dim(new_k, 2) != mlx_array_dim(new_v, 2))
+        return -1;
+
     kv_entry_t *e = &kv->entries[layer];
 
     int B = mlx_array_dim(new_k, 0);
-    int H = mlx_array_dim(new_k, 1);
     int new_len = mlx_array_dim(new_k, 2);
-    int D = mlx_array_dim(new_k, 3);
     mlx_dtype dt = mlx_array_dtype(new_k);
 
     int needed = e->offset + new_len;
@@ -119,38 +131,44 @@ int kvcache_update(kvcache_t *kv, int layer, mlx_array new_k, mlx_array new_v,
 
     mlx_array updated_k = mlx_array_new();
     mlx_array updated_v = mlx_array_new();
-    int rc = -1;
+    mlx_array local_kview = mlx_array_new();
+    mlx_array local_vview = mlx_array_new();
 
     if (!MLXB_CHECK(mlx_slice_update(&updated_k, e->keys, new_k, start, 4, stop, 4, str, 4, s)))
         goto cleanup;
     if (!MLXB_CHECK(mlx_slice_update(&updated_v, e->values, new_v, start, 4, stop, 4, str, 4, s)))
         goto cleanup;
 
+    int new_off = e->offset + new_len;
+    int vstart[] = {0, 0, 0, 0};
+    int vstop[]  = {B, H, new_off, D};
+
+    if (new_off == e->capacity) {
+        if (!MLXB_CHECK(mlx_array_set(&local_kview, updated_k))) goto cleanup;
+        if (!MLXB_CHECK(mlx_array_set(&local_vview, updated_v))) goto cleanup;
+    } else {
+        if (!MLXB_CHECK(mlx_slice(&local_kview, updated_k, vstart, 4, vstop, 4, str, 4, s)))
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_slice(&local_vview, updated_v, vstart, 4, vstop, 4, str, 4, s)))
+            goto cleanup;
+    }
+
     mlx_array_free(e->keys);
     mlx_array_free(e->values);
     e->keys = updated_k;
     e->values = updated_v;
-    e->offset += new_len;
+    e->offset = new_off;
 
-    int vstart[] = {0, 0, 0, 0};
-    int vstop[]  = {B, H, e->offset, D};
-
-    if (e->offset == e->capacity) {
-        if (!MLXB_CHECK(mlx_array_set(k_view, e->keys))) goto view_err;
-        if (!MLXB_CHECK(mlx_array_set(v_view, e->values))) goto view_err;
-    } else {
-        if (!MLXB_CHECK(mlx_slice(k_view, e->keys, vstart, 4, vstop, 4, str, 4, s)))
-            goto view_err;
-        if (!MLXB_CHECK(mlx_slice(v_view, e->values, vstart, 4, vstop, 4, str, 4, s)))
-            goto view_err;
-    }
-
+    mlx_array_free(*k_view);
+    *k_view = local_kview;
+    mlx_array_free(*v_view);
+    *v_view = local_vview;
     return 0;
 
-view_err:
-    return -1;
 cleanup:
+    mlx_array_free(local_vview);
+    mlx_array_free(local_kview);
     mlx_array_free(updated_v);
     mlx_array_free(updated_k);
-    return rc;
+    return -1;
 }

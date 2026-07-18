@@ -15,7 +15,10 @@ typedef struct {
     float attn_scale;
 } engine_model_t;
 
-int engine_model_load(engine_model_t *em, const char *model_dir);
+int engine_model_check_supported(const model_config_t *cfg,
+                                 char *err, size_t errlen);
+int engine_model_load(engine_model_t *em, const char *model_dir,
+                      char *err, size_t errlen);
 void engine_model_free(engine_model_t *em);
 
 int model_forward(engine_model_t *em, mlx_array ids, kvcache_t *kv,

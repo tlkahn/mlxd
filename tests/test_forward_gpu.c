@@ -56,7 +56,7 @@ static void test_fwd_linear(void) {
     assert(!tri.quantized);
 
     mlx_array out = mlx_array_new();
-    assert(fwd_linear(&out, x, &tri, &cfg_dense, false, gpu) == 0);
+    assert(fwd_linear(&out, x, &tri, &cfg_dense, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(out)));
     assert(mlx_array_ndim(out) == 3);
     assert(mlx_array_dim(out, 0) == 1);
@@ -80,7 +80,7 @@ static void test_fwd_linear(void) {
     assert(tri.quantized);
 
     mlx_array qmm_out = mlx_array_new();
-    assert(fwd_linear(&qmm_out, x, &tri, &cfg_quant, false, gpu) == 0);
+    assert(fwd_linear(&qmm_out, x, &tri, &cfg_quant, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(qmm_out)));
     assert(mlx_array_dtype(qmm_out) == MLX_BFLOAT16);
 
@@ -181,7 +181,7 @@ static void test_fwd_embed(void) {
     mlx_array_free(out);
     mlx_array_free(ids);
 
-    /* Quantized embed */
+    /* Quantized embed: must produce bf16 output */
     int32_t ids2_data[] = {0, 1, 2};
     mlx_array ids2 = mlx_array_new_data(ids2_data, ids_shape, 2, MLX_INT32);
     mlx_array out2 = mlx_array_new();
@@ -189,6 +189,7 @@ static void test_fwd_embed(void) {
     assert(MLXB_CHECK(mlx_array_eval(out2)));
     assert(mlx_array_ndim(out2) == 3);
     assert(mlx_array_dim(out2, 2) == 64);
+    assert(mlx_array_dtype(out2) == MLX_BFLOAT16);
     assert(is_finite_f32(out2, gpu));
 
     mlx_array_free(out2);
@@ -347,12 +348,12 @@ static void test_fwd_swiglu(void) {
     mlx_array silu_g = mlx_array_new();
     mlx_array gated = mlx_array_new();
     mlx_array ref = mlx_array_new();
-    fwd_linear(&g, x, &gate_tri, &cfg_dense, false, gpu);
-    fwd_linear(&u, x, &up_tri, &cfg_dense, false, gpu);
+    fwd_linear(&g, x, &gate_tri, &cfg_dense, gpu);
+    fwd_linear(&u, x, &up_tri, &cfg_dense, gpu);
     MLXB_CHECK(mlx_sigmoid(&gs, g, gpu));
     MLXB_CHECK(mlx_multiply(&silu_g, g, gs, gpu));
     MLXB_CHECK(mlx_multiply(&gated, silu_g, u, gpu));
-    fwd_linear(&ref, gated, &down_tri, &cfg_dense, false, gpu);
+    fwd_linear(&ref, gated, &down_tri, &cfg_dense, gpu);
 
     mlx_array out_f32 = mlx_array_new();
     mlx_array ref_f32 = mlx_array_new();
@@ -420,7 +421,7 @@ static void test_decoder_layer(void) {
         weight_triplet_t lm_tri;
         assert(weights_get_triplet(&lm_tri, &w_dense, "lm_head") == 0);
         mlx_array logits = mlx_array_new();
-        assert(fwd_linear(&logits, normed, &lm_tri, &cfg_dense, false, gpu) == 0);
+        assert(fwd_linear(&logits, normed, &lm_tri, &cfg_dense, gpu) == 0);
         assert(MLXB_CHECK(mlx_array_eval(logits)));
         assert(mlx_array_dim(logits, 2) == 256);
         assert(is_finite_f32(logits, gpu));
@@ -459,7 +460,8 @@ static void test_emodel(void) {
     snprintf(path, sizeof(path), "%s/tiny_qwen3", FIXTURES);
 
     engine_model_t em;
-    assert(engine_model_load(&em, path) == 0);
+    char lerr[256] = {0};
+    assert(engine_model_load(&em, path, lerr, sizeof(lerr)) == 0);
 
     int32_t ids_data[] = {1, 2, 3, 4, 5};
     int ids_shape[] = {1, 5};
@@ -500,9 +502,47 @@ static void test_emodel_tied(void) {
     snprintf(path, sizeof(path), "%s/tiny_qwen3", FIXTURES);
 
     engine_model_t em;
-    assert(engine_model_load(&em, path) == 0);
+    char lerr[256] = {0};
+    assert(engine_model_load(&em, path, lerr, sizeof(lerr)) == 0);
 
     em.cfg.tie_word_embeddings = true;
+
+    int32_t ids_data[] = {1, 2, 3, 4, 5};
+    int ids_shape[] = {1, 5};
+    mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, em.cfg.num_hidden_layers,
+                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+
+    mlx_array logits = mlx_array_new();
+    assert(model_forward(&em, ids, &kv, true, &logits) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(logits)));
+    assert(mlx_array_ndim(logits) == 2);
+    assert(mlx_array_dim(logits, 0) == 1);
+    assert(mlx_array_dim(logits, 1) == em.cfg.vocab_size);
+    assert(is_finite_f32(logits, gpu));
+
+    mlx_array_free(logits);
+    kvcache_free(&kv);
+    mlx_array_free(ids);
+    engine_model_free(&em);
+}
+
+/* ---- B1.7c: tied+quantized lm_head path ---- */
+
+static void test_emodel_tied_quant(void) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tiny_qwen3_tied", FIXTURES);
+
+    engine_model_t em;
+    char lerr[256] = {0};
+    int rc = engine_model_load(&em, path, lerr, sizeof(lerr));
+    if (rc != 0) {
+        fprintf(stderr, "load failed: %s\n", lerr);
+        assert(0);
+    }
+    assert(em.cfg.tie_word_embeddings);
 
     int32_t ids_data[] = {1, 2, 3, 4, 5};
     int ids_shape[] = {1, 5};
@@ -533,7 +573,8 @@ static void test_incremental_equals_full(void) {
     snprintf(path, sizeof(path), "%s/tiny_qwen3", FIXTURES);
 
     engine_model_t em;
-    assert(engine_model_load(&em, path) == 0);
+    char lerr[256] = {0};
+    assert(engine_model_load(&em, path, lerr, sizeof(lerr)) == 0);
 
     int32_t prompt[] = {10, 20, 30, 40};
 
@@ -602,6 +643,113 @@ static void test_incremental_equals_full(void) {
     engine_model_free(&em);
 }
 
+/* ---- quantized model_forward coverage ---- */
+
+static void test_emodel_quant(void) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tiny_qwen3_sharded", FIXTURES);
+
+    engine_model_t em;
+    char lerr[256] = {0};
+    int rc = engine_model_load(&em, path, lerr, sizeof(lerr));
+    if (rc != 0) {
+        fprintf(stderr, "load failed: %s\n", lerr);
+        assert(0);
+    }
+
+    int32_t ids_data[] = {1, 2, 3, 4, 5};
+    int ids_shape[] = {1, 5};
+    mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, em.cfg.num_hidden_layers,
+                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+
+    mlx_array logits = mlx_array_new();
+    assert(model_forward(&em, ids, &kv, true, &logits) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(logits)));
+    assert(mlx_array_ndim(logits) == 2);
+    assert(mlx_array_dim(logits, 0) == 1);
+    assert(mlx_array_dim(logits, 1) == em.cfg.vocab_size);
+    assert(is_finite_f32(logits, gpu));
+
+    mlx_array_free(logits);
+    kvcache_free(&kv);
+    mlx_array_free(ids);
+    engine_model_free(&em);
+}
+
+static void test_incremental_equals_full_quant(void) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tiny_qwen3_sharded", FIXTURES);
+
+    engine_model_t em;
+    char lerr[256] = {0};
+    assert(engine_model_load(&em, path, lerr, sizeof(lerr)) == 0);
+
+    int32_t prompt[] = {10, 20, 30, 40};
+
+    kvcache_t kv_a;
+    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers,
+                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+
+    int shape_all[] = {1, 4};
+    mlx_array ids_all = mlx_array_new_data(prompt, shape_all, 2, MLX_INT32);
+    mlx_array logits_a = mlx_array_new();
+    assert(model_forward(&em, ids_all, &kv_a, true, &logits_a) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(logits_a)));
+
+    kvcache_t kv_b;
+    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers,
+                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+
+    int shape_pre[] = {1, 3};
+    mlx_array ids_pre = mlx_array_new_data(prompt, shape_pre, 2, MLX_INT32);
+    assert(model_forward(&em, ids_pre, &kv_b, false, NULL) == 0);
+
+    int shape_dec[] = {1, 1};
+    mlx_array ids_dec = mlx_array_new_data(&prompt[3], shape_dec, 2, MLX_INT32);
+    mlx_array logits_b = mlx_array_new();
+    assert(model_forward(&em, ids_dec, &kv_b, true, &logits_b) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(logits_b)));
+
+    mlx_array la_f32 = mlx_array_new();
+    mlx_array lb_f32 = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&la_f32, logits_a, MLX_FLOAT32, gpu));
+    MLXB_CHECK(mlx_astype(&lb_f32, logits_b, MLX_FLOAT32, gpu));
+    assert(MLXB_CHECK(mlx_array_eval(la_f32)));
+    assert(MLXB_CHECK(mlx_array_eval(lb_f32)));
+
+    const float *da = mlx_array_data_float32(la_f32);
+    const float *db = mlx_array_data_float32(lb_f32);
+    int vocab = em.cfg.vocab_size;
+
+    int argmax_a = 0, argmax_b = 0;
+    for (int i = 1; i < vocab; i++) {
+        if (da[i] > da[argmax_a]) argmax_a = i;
+        if (db[i] > db[argmax_b]) argmax_b = i;
+    }
+    assert(argmax_a == argmax_b);
+
+    float maxdiff = 0.0f;
+    for (int i = 0; i < vocab; i++) {
+        float d = fabsf(da[i] - db[i]);
+        if (d > maxdiff) maxdiff = d;
+    }
+    assert(maxdiff < 0.1f);
+
+    mlx_array_free(lb_f32);
+    mlx_array_free(la_f32);
+    mlx_array_free(logits_b);
+    mlx_array_free(ids_dec);
+    mlx_array_free(ids_pre);
+    kvcache_free(&kv_b);
+    mlx_array_free(logits_a);
+    mlx_array_free(ids_all);
+    kvcache_free(&kv_a);
+    engine_model_free(&em);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -642,8 +790,17 @@ int main(void) {
     test_emodel_tied();
     printf("  test_emodel_tied: passed\n");
 
+    test_emodel_tied_quant();
+    printf("  test_emodel_tied_quant: passed\n");
+
     test_incremental_equals_full();
     printf("  test_incremental_equals_full: passed\n");
+
+    test_emodel_quant();
+    printf("  test_emodel_quant: passed\n");
+
+    test_incremental_equals_full_quant();
+    printf("  test_incremental_equals_full_quant: passed\n");
 
     weights_free(&w_quant);
     model_config_free(&cfg_quant);

@@ -9,7 +9,7 @@
 #include <stdbool.h>
 
 int fwd_linear(mlx_array *out, mlx_array x, const weight_triplet_t *tri,
-               const model_config_t *cfg, bool bias, mlx_stream s);
+               const model_config_t *cfg, mlx_stream s);
 
 int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
               const model_config_t *cfg, mlx_stream s);
