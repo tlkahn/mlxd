@@ -20,11 +20,13 @@ static char *serialize_mut_root(yyjson_mut_doc *mdoc, yyjson_mut_val *root) {
 
 int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
                           const char *messages_json, const char *tools_json,
+                          const char *extra_json,
                           int32_t **out_ids, const char **err) {
     chat_render_params_t p = {
         .tmpl = chat_template,
         .messages_json = messages_json,
         .tools_json = tools_json,
+        .extra_json = extra_json,
         .add_generation_prompt = true,
     };
     *out_ids = NULL;

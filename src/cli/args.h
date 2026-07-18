@@ -44,6 +44,7 @@ typedef struct {
     bool stream;
     bool raw;
     bool token_ids;
+    bool no_think;
 } cli_run_opts_t;
 
 typedef struct {
@@ -60,5 +61,7 @@ int cli_parse_pull(int argc, char **argv, cli_pull_opts_t *out, char *err, size_
 int cli_parse_list(int argc, char **argv, cli_list_opts_t *out, char *err, size_t errsz);
 
 void run_opts_apply_sampling(const cli_run_opts_t *opts, gen_params_t *params);
+
+const char *cli_run_extra_json(const cli_run_opts_t *opts);
 
 #endif

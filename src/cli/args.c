@@ -80,6 +80,7 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
     out->stream = false;
     out->raw = false;
     out->token_ids = false;
+    out->no_think = false;
 
     int positional = 0;
     bool opts_done = false;
@@ -194,6 +195,8 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
             out->raw = true;
         } else if (!opts_done && strcmp(argv[i], "--token-ids") == 0) {
             out->token_ids = true;
+        } else if (!opts_done && strcmp(argv[i], "--no-think") == 0) {
+            out->no_think = true;
         } else if (!opts_done && argv[i][0] == '-') {
             snprintf(err, errsz, "unknown option '%s'", argv[i]);
             return -1;
@@ -283,4 +286,8 @@ void run_opts_apply_sampling(const cli_run_opts_t *opts, gen_params_t *params) {
         params->sampling.seed = opts->seed;
         params->sampling_set |= SAMPLING_SET_SEED;
     }
+}
+
+const char *cli_run_extra_json(const cli_run_opts_t *opts) {
+    return opts->no_think ? "{\"enable_thinking\":false}" : NULL;
 }

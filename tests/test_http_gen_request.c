@@ -255,6 +255,12 @@ static bool fi_stream_next(stream_t *s, chunk_t *out, int timeout_ms) {
 
 #define TRIVIAL_TMPL "{{ messages[0].content }}"
 
+#define THINK_COND_TMPL \
+    "{{ messages[0].content }}" \
+    "{% if enable_thinking is defined and enable_thinking is false %}" \
+    "<think></think>" \
+    "{% endif %}"
+
 typedef struct {
     engine_t     eng;
     tokenizer_t *tok;
@@ -812,6 +818,49 @@ static void test_normal_nonstream_completes(void) {
     fixture_down(&f);
 }
 
+/* === T15: extra_json threads through to prompt ============================= */
+
+static void test_extra_json_threads_through(void) {
+    mock_reset();
+    fi_reset();
+    test_fixture_t f = fixture_up();
+    f.sctx.chat_template = THINK_COND_TMPL;
+
+    gen_request_start_params_t p = {
+        .ctx = &f.sctx,
+        .conn = &f.dummy_conn,
+        .chat = true,
+        .stream = false,
+        .model_id = "gpt2",
+        .params = {.sampling = SAMPLING_PARAMS_DEFAULT},
+        .messages_json = "[{\"role\":\"user\",\"content\":\"hello\"}]",
+        .extra_json = "{\"enable_thinking\":false}",
+    };
+    const char *err = NULL;
+    int rc = fi_gen_request_start(&p, &err);
+    assert(rc == 0);
+
+    uv_run(&f.loop, UV_RUN_DEFAULT);
+
+    int32_t *expected = NULL;
+    int expected_n = tokenizer_encode_alloc(f.tok, "hello<think></think>",
+                                             strlen("hello<think></think>"),
+                                             false, &expected);
+    assert(expected_n > 0);
+
+    bool found = false;
+    char pt_needle[64];
+    snprintf(pt_needle, sizeof(pt_needle), "\"prompt_tokens\":%d", expected_n);
+    for (int i = 0; i < mock_write_count; i++) {
+        if (mock_writes[i].buf && strstr(mock_writes[i].buf, pt_needle))
+            found = true;
+    }
+    assert(found);
+
+    free(expected);
+    fixture_down(&f);
+}
+
 /* === main ================================================================= */
 
 int main(void) {
@@ -833,6 +882,7 @@ int main(void) {
     test_normal_nonstream_completes();
     test_context_length_nonstream_400();
     test_context_length_sse_code();
+    test_extra_json_threads_through();
     printf("test_http_gen_request: all passed\n");
     return 0;
 }

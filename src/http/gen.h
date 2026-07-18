@@ -15,10 +15,13 @@ typedef struct tokenizer tokenizer_t;
  * atomized to their canonical ids (HF apply_chat_template parity).
  * Caveat: special-token literals inside user message content are also
  * atomized; this matches HF/vLLM behavior and is pinned by test.
+ * extra_json: optional (NULL ok) JSON object string merged into the jinja
+ * template context; borrowed for the duration of the call only.
  * Returns id count (>= 0) on success, -1 on error (*err set to a static
  * literal - caller does NOT free *err). *out_ids is malloc'd; caller frees. */
 int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
                           const char *messages_json, const char *tools_json,
+                          const char *extra_json,
                           int32_t **out_ids, const char **err);
 
 /* Build a token-id prompt from a raw completion string.

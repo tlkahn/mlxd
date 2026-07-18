@@ -237,6 +237,7 @@ static void test_run_defaults(void) {
     assert(!opts.min_p_set);
     assert(!opts.seed_set);
     assert(!opts.stream);
+    assert(!opts.no_think);
 }
 
 static void test_run_flags_before_prompt(void) {
@@ -538,6 +539,7 @@ static void test_run_parse_initializes_poisoned_struct(void) {
     assert(!opts.stream);
     assert(!opts.raw);
     assert(!opts.token_ids);
+    assert(!opts.no_think);
     assert(opts.max_tokens == 0);
     assert(opts.temperature == 0.0f);
     assert(opts.top_p == 0.0f);
@@ -573,6 +575,42 @@ static void test_run_opts_apply_sampling_explicit_temp(void) {
     assert(params.sampling.top_k == 40);
     assert(params.sampling_set & SAMPLING_SET_TOP_K);
     assert(!(params.sampling_set & SAMPLING_SET_TOP_P));
+}
+
+/* --- #74 review: cli_run_extra_json helper ------------------------------- */
+
+static void test_cli_run_extra_json_no_think(void) {
+    cli_run_opts_t opts = {0};
+    opts.no_think = true;
+    const char *json = cli_run_extra_json(&opts);
+    assert(json != NULL);
+    assert(strcmp(json, "{\"enable_thinking\":false}") == 0);
+}
+
+static void test_cli_run_extra_json_default(void) {
+    cli_run_opts_t opts = {0};
+    const char *json = cli_run_extra_json(&opts);
+    assert(json == NULL);
+}
+
+/* --- #72: --no-think flag ------------------------------------------------- */
+
+static void test_run_no_think(void) {
+    char *argv[] = {"mlxd", "run", "model", "prompt", "--no-think"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(5, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(opts.no_think);
+}
+
+static void test_run_no_think_default_false(void) {
+    char *argv[] = {"mlxd", "run", "m", "hello"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(4, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(!opts.no_think);
 }
 
 int main(void) {
@@ -661,6 +699,14 @@ int main(void) {
     /* Cycle 7 (review): run_opts_apply_sampling */
     test_run_opts_apply_sampling_defaults();
     test_run_opts_apply_sampling_explicit_temp();
+
+    /* #74 review: cli_run_extra_json helper */
+    test_cli_run_extra_json_no_think();
+    test_cli_run_extra_json_default();
+
+    /* #72: --no-think flag */
+    test_run_no_think();
+    test_run_no_think_default_false();
 
     printf("test_cli_args: all passed\n");
     return 0;

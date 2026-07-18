@@ -1,7 +1,14 @@
 #include "gen_server_harness.h"
+#include "model/tokenizer.h"
 
 #include <stdio.h>
 #include <yyjson/yyjson.h>
+
+#define THINK_COND_TMPL \
+    "{{ messages[0].content }}" \
+    "{% if enable_thinking is defined and enable_thinking is false %}" \
+    "<think></think>" \
+    "{% endif %}"
 
 /* --- Helpers --------------------------------------------------------------- */
 
@@ -885,6 +892,118 @@ static void test_top_logprobs_400(void) {
     gen_fixture_down(&f);
 }
 
+/* --- enable_thinking: false suppresses thinking via prompt_tokens --------- */
+
+static void test_enable_thinking_false(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, THINK_COND_TMPL, 0);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],"
+        "\"enable_thinking\":false}");
+    assert(resp.status == 200);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *usage = yyjson_obj_get(root, "usage");
+    int pt_suppressed = (int)yyjson_get_sint(yyjson_obj_get(usage, "prompt_tokens"));
+
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+    int32_t *expected = NULL;
+    int expected_n = tokenizer_encode_alloc(tok, "hello<think></think>",
+                                             strlen("hello<think></think>"),
+                                             false, &expected);
+    assert(pt_suppressed == expected_n);
+    free(expected);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+
+    http_client_response_t resp2 = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}");
+    assert(resp2.status == 200);
+
+    yyjson_doc *doc2 = yyjson_read(resp2.body, resp2.body_len, 0);
+    assert(doc2 != NULL);
+    yyjson_val *root2 = yyjson_doc_get_root(doc2);
+    yyjson_val *usage2 = yyjson_obj_get(root2, "usage");
+    int pt_baseline = (int)yyjson_get_sint(yyjson_obj_get(usage2, "prompt_tokens"));
+
+    int32_t *baseline = NULL;
+    int baseline_n = tokenizer_encode_alloc(tok, "hello", strlen("hello"),
+                                             false, &baseline);
+    assert(pt_baseline == baseline_n);
+    free(baseline);
+
+    assert(pt_suppressed > pt_baseline);
+
+    yyjson_doc_free(doc2);
+    http_client_response_free(&resp2);
+    tokenizer_free(tok);
+    gen_fixture_down(&f);
+}
+
+/* --- enable_thinking: true matches omitted-field baseline ----------------- */
+
+static void test_enable_thinking_true(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, THINK_COND_TMPL, 0);
+
+    http_client_response_t resp_true = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],"
+        "\"enable_thinking\":true}");
+    assert(resp_true.status == 200);
+
+    yyjson_doc *doc_true = yyjson_read(resp_true.body, resp_true.body_len, 0);
+    assert(doc_true != NULL);
+    int pt_true = (int)yyjson_get_sint(
+        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc_true), "usage"),
+                       "prompt_tokens"));
+    yyjson_doc_free(doc_true);
+    http_client_response_free(&resp_true);
+
+    http_client_response_t resp_omit = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}");
+    assert(resp_omit.status == 200);
+
+    yyjson_doc *doc_omit = yyjson_read(resp_omit.body, resp_omit.body_len, 0);
+    assert(doc_omit != NULL);
+    int pt_omit = (int)yyjson_get_sint(
+        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc_omit), "usage"),
+                       "prompt_tokens"));
+    yyjson_doc_free(doc_omit);
+    http_client_response_free(&resp_omit);
+
+    assert(pt_true == pt_omit);
+
+    gen_fixture_down(&f);
+}
+
+/* --- enable_thinking: non-boolean -> 400 --------------------------------- */
+
+static void test_enable_thinking_non_boolean_400(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, THINK_COND_TMPL, 0);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"enable_thinking\":\"yes\"}");
+    assert(resp.status == 400);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err != NULL);
+    const char *type = yyjson_get_str(yyjson_obj_get(err, "type"));
+    assert(type && strcmp(type, "invalid_request_error") == 0);
+    const char *msg = yyjson_get_str(yyjson_obj_get(err, "message"));
+    assert(msg && strstr(msg, "enable_thinking must be a boolean") != NULL);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    gen_fixture_down(&f);
+}
+
 /* --- main ---------------------------------------------------------------- */
 
 int main(void) {
@@ -917,6 +1036,9 @@ int main(void) {
     test_chat_no_logprobs_null();
     test_chat_sse_logprobs();
     test_top_logprobs_400();
+    test_enable_thinking_false();
+    test_enable_thinking_true();
+    test_enable_thinking_non_boolean_400();
     printf("test_http_generate: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");
