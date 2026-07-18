@@ -20,12 +20,30 @@ typedef struct {
     weight_kind_t kind;
 } weight_expected_t;
 
+typedef struct {
+    const char   *suffix;
+    weight_kind_t kind;
+} weight_extra_t;
+
+typedef struct {
+    model_family_t     family;
+    const char *const *layer_matmuls;
+    const char *const *layer_norms;
+    const char *const *layer_qk_norms;
+    const char *const *layer_biases;
+    const weight_extra_t *extra_tensors;
+} weights_family_desc_t;
+
 /* Generate the list of expected tensor base names for a model config.
    Returns count of entries written to out, 0 if the family has no strict
    expected set (caller should fall back to generic checks), or -1 on error
    (e.g. capacity too small). If out is NULL, returns the required count. */
 int weights_expected_names(const model_config_t *cfg,
                            weight_expected_t *out, int capacity);
+
+int weights_expected_names_from_desc(const weights_family_desc_t *desc,
+                                     const model_config_t *cfg,
+                                     weight_expected_t *out, int capacity);
 
 int weights_enumerate_shards(const char *model_dir, char ***paths,
                              size_t *count, bool *from_index);

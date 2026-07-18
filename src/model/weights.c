@@ -252,15 +252,6 @@ static const char *const qwen3_layer_qk_norms[] = {
     "self_attn.q_norm", "self_attn.k_norm", NULL,
 };
 
-typedef struct {
-    model_family_t     family;
-    const char *const *layer_matmuls;
-    const char *const *layer_norms;
-    const char *const *layer_qk_norms;
-    const char *const *layer_biases;
-    const char *const *extra_tensors;
-} weights_family_desc_t;
-
 static const weights_family_desc_t family_descs[] = {
     {
         .family         = MODEL_QWEN3,
@@ -280,12 +271,10 @@ static const weights_family_desc_t *family_desc(model_family_t fam) {
     return NULL;
 }
 
-int weights_expected_names(const model_config_t *cfg,
-                           weight_expected_t *out, int capacity) {
-    if (!cfg) return -1;
-
-    const weights_family_desc_t *desc = family_desc(cfg->family);
-    if (!desc) return 0;
+int weights_expected_names_from_desc(const weights_family_desc_t *desc,
+                                     const model_config_t *cfg,
+                                     weight_expected_t *out, int capacity) {
+    if (!desc || !cfg) return -1;
 
     int pos = 0;
     char buf[256];
@@ -333,6 +322,16 @@ int weights_expected_names(const model_config_t *cfg,
     }
 
     return pos;
+}
+
+int weights_expected_names(const model_config_t *cfg,
+                           weight_expected_t *out, int capacity) {
+    if (!cfg) return -1;
+
+    const weights_family_desc_t *desc = family_desc(cfg->family);
+    if (!desc) return 0;
+
+    return weights_expected_names_from_desc(desc, cfg, out, capacity);
 }
 
 /* ---------- GPU / engine-thread helpers ---------- */

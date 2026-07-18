@@ -484,6 +484,45 @@ static void test_expected_names_other_families_zero(void) {
     }
 }
 
+/* ---- Cycle CR-A: descriptor-driven emitter seam ---- */
+
+static void test_expected_names_from_desc_synthetic(void) {
+    static const char *const syn_matmuls[] = { "attn.wq", "ffn.w1", NULL };
+    static const char *const syn_norms[]   = { "ln1", NULL };
+
+    weights_family_desc_t desc = {
+        .family         = MODEL_FAMILY_UNKNOWN,
+        .layer_matmuls  = syn_matmuls,
+        .layer_norms    = syn_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = NULL,
+        .extra_tensors  = NULL,
+    };
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_FAMILY_UNKNOWN;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.tie_word_embeddings = true;
+
+    int count = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count == 5);
+
+    weight_expected_t names[5];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names, 5) == 5);
+
+    assert(strcmp(names[0].name, "model.embed_tokens") == 0);
+    assert(names[0].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names[1].name, "model.layers.0.attn.wq") == 0);
+    assert(names[1].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[2].name, "model.layers.0.ffn.w1") == 0);
+    assert(names[2].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[3].name, "model.layers.0.ln1") == 0);
+    assert(names[3].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names[4].name, "model.norm") == 0);
+    assert(names[4].kind == WEIGHT_KIND_NORM);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -549,6 +588,9 @@ int main(void) {
 
     test_expected_names_other_families_zero();
     printf("  test_expected_names_other_families_zero: passed\n");
+
+    test_expected_names_from_desc_synthetic();
+    printf("  test_expected_names_from_desc_synthetic: passed\n");
 
     printf("test_weights: all passed\n");
     return 0;
