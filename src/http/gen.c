@@ -67,6 +67,8 @@ char *gen_sse_chunk(const gen_sse_chunk_params_t *p) {
         .has_role = p->role_first,
         .role = ROLE_ASSISTANT,
         .delta_content = (char *)p->delta_text,
+        .logprobs = (token_logprob_t *)p->logprob,
+        .logprob_count = p->logprob ? 1 : 0,
         .has_finish_reason = p->final,
         .finish_reason = p->reason,
         .has_usage = p->include_usage && p->usage,
@@ -88,7 +90,8 @@ char *gen_sse_chunk(const gen_sse_chunk_params_t *p) {
 
 char *gen_build_chat_response(const char *id, const char *model, int64_t created,
                               const char *content, finish_reason_t reason,
-                              const usage_t *u) {
+                              const usage_t *u,
+                              const token_logprob_t *logprobs, int logprobs_count) {
     usage_t zero = {0};
     chat_completion_response_t resp = {
         .id = (char *)id,
@@ -96,6 +99,8 @@ char *gen_build_chat_response(const char *id, const char *model, int64_t created
         .created = created,
         .finish_reason = reason,
         .content = (char *)content,
+        .logprobs_content = (token_logprob_t *)logprobs,
+        .logprobs_count = logprobs_count,
         .usage = u ? *u : zero,
     };
 

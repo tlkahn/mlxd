@@ -35,6 +35,7 @@ typedef struct gen_request {
     bool         chat;
     bool         sse;
     bool         include_usage;
+    bool         logprobs;
     bool         role_sent;
 
     char        *id;
@@ -47,6 +48,10 @@ typedef struct gen_request {
     char        *accum;
     size_t       accum_len;
     size_t       accum_cap;
+
+    token_logprob_t *lp_entries;
+    int          lp_count;
+    int          lp_cap;
 
     int          pending_closes;
 } gen_request_t;
@@ -165,6 +170,7 @@ int gen_request_start(const gen_request_start_params_t *p, const char **err) {
     gr->chat = p->chat;
     gr->sse = p->stream;
     gr->include_usage = p->include_usage;
+    gr->logprobs = p->params.logprobs && p->chat;
     gr->prompt_tokens = n_ids;
     gr->created = time(NULL);
 
@@ -223,14 +229,24 @@ static void notify_cb(void *ctx) {
 
 /* --- Async drain (loop thread) -------------------------------------------- */
 
-static void emit_sse_chunk(gen_request_t *gr, const char *text, size_t len) {
+static void emit_sse_chunk(gen_request_t *gr, const char *text, size_t len, float logprob) {
     if (gr->conn_gone || !gr->conn || gr->suppress_writes) return;
     if (gr->chat) {
+        token_logprob_t lp_entry;
+        token_logprob_t *lp_ptr = NULL;
+        if (gr->logprobs) {
+            lp_entry = (token_logprob_t){
+                .token = (char *)(text ? text : ""),
+                .logprob = logprob,
+            };
+            lp_ptr = &lp_entry;
+        }
         if (!gr->role_sent) {
             char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
                 .id = gr->id, .model = gr->model_id, .created = gr->created,
                 .role_first = true,
                 .delta_text = (len > 0) ? text : NULL,
+                .logprob = lp_ptr,
             });
             if (sse) {
                 http_conn_write(gr->conn, sse, strlen(sse), false);
@@ -243,6 +259,7 @@ static void emit_sse_chunk(gen_request_t *gr, const char *text, size_t len) {
             char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
                 .id = gr->id, .model = gr->model_id, .created = gr->created,
                 .delta_text = text,
+                .logprob = lp_ptr,
             });
             if (sse)
                 http_conn_write(gr->conn, sse, strlen(sse), false);
@@ -376,7 +393,8 @@ static void finish_response(gen_request_t *gr, finish_reason_t reason) {
             char *json;
             if (gr->chat) {
                 json = gen_build_chat_response(gr->id, gr->model_id, gr->created,
-                                               text, reason, &u);
+                                               text, reason, &u,
+                                               gr->lp_entries, gr->lp_count);
             } else {
                 json = gen_build_completion_response(gr->id, gr->model_id, gr->created,
                                                      text, reason, &u);
@@ -466,19 +484,39 @@ static void gen_on_async(uv_async_t *handle) {
             }
             if (gr->sse) {
                 if (piece && piece_len > 0)
-                    emit_sse_chunk(gr, piece, piece_len);
+                    emit_sse_chunk(gr, piece, piece_len, c.token.logprob);
                 if (!gr->conn_gone && !gr->suppress_writes && gr->conn &&
                     http_conn_write_queue_size(gr->conn) > BACKPRESSURE_HWM) {
                     gr->suppress_writes = true;
                     stream_cancel(gr->stream);
                 }
             } else {
-                if (piece && piece_len > 0 &&
-                    accum_append(gr, piece, piece_len) != 0) {
-                    free(piece);
-                    stream_cancel(gr->stream);
-                    finish_error(gr, strdup("out of memory"), GEN_ERR_INTERNAL);
-                    return;
+                if (piece && piece_len > 0) {
+                    if (accum_append(gr, piece, piece_len) != 0) {
+                        free(piece);
+                        stream_cancel(gr->stream);
+                        finish_error(gr, strdup("out of memory"), GEN_ERR_INTERNAL);
+                        return;
+                    }
+                    if (gr->logprobs) {
+                        if (gr->lp_count >= gr->lp_cap) {
+                            int new_cap = gr->lp_cap ? gr->lp_cap * 2 : 16;
+                            token_logprob_t *tmp = realloc(gr->lp_entries,
+                                (size_t)new_cap * sizeof(token_logprob_t));
+                            if (!tmp) {
+                                free(piece);
+                                stream_cancel(gr->stream);
+                                finish_error(gr, strdup("out of memory"), GEN_ERR_INTERNAL);
+                                return;
+                            }
+                            gr->lp_entries = tmp;
+                            gr->lp_cap = new_cap;
+                        }
+                        gr->lp_entries[gr->lp_count++] = (token_logprob_t){
+                            .token = strdup(piece),
+                            .logprob = c.token.logprob,
+                        };
+                    }
                 }
             }
             free(piece);
@@ -546,6 +584,11 @@ static void begin_close(gen_request_t *gr) {
     gr->detok = NULL;
     free(gr->accum);
     gr->accum = NULL;
+    for (int i = 0; i < gr->lp_count; i++)
+        free(gr->lp_entries[i].token);
+    free(gr->lp_entries);
+    gr->lp_entries = NULL;
+    gr->lp_count = 0;
     free(gr->id);
     gr->id = NULL;
     free(gr->model_id);

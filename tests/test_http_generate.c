@@ -765,6 +765,126 @@ static void test_chat_sse_zero_token_role_chunk(void) {
     gen_fixture_down(&f);
 }
 
+/* --- Cycle 6 (review): logprobs e2e non-streaming ----------------------- */
+
+static void test_chat_logprobs_nonstreaming(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}],"
+        "\"logprobs\":true}");
+    assert(resp.status == 200);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "choices"), 0);
+    yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+    assert(lp != NULL && !yyjson_is_null(lp));
+    yyjson_val *cont = yyjson_obj_get(lp, "content");
+    assert(cont != NULL && yyjson_arr_size(cont) > 0);
+    yyjson_val *e0 = yyjson_arr_get(cont, 0);
+    assert(yyjson_obj_get(e0, "token") != NULL);
+    assert(yyjson_obj_get(e0, "logprob") != NULL);
+    assert(yyjson_obj_get(e0, "bytes") != NULL);
+    double lp0 = yyjson_get_real(yyjson_obj_get(e0, "logprob"));
+    assert(lp0 == -0.25);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    gen_fixture_down(&f);
+}
+
+/* --- Cycle 6 (review): logprobs absent -> null -------------------------- */
+
+static void test_chat_no_logprobs_null(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]}");
+    assert(resp.status == 200);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "choices"), 0);
+    yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+    assert(lp != NULL && yyjson_is_null(lp));
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    gen_fixture_down(&f);
+}
+
+/* --- Cycle 6 (review): logprobs SSE streaming --------------------------- */
+
+static void test_chat_sse_logprobs(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
+
+    char hdrbuf[4096];
+    int fd = sse_connect_and_post(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}],"
+        "\"stream\":true,\"logprobs\":true}",
+        hdrbuf, sizeof(hdrbuf));
+    assert(strstr(hdrbuf, "200 OK") != NULL);
+
+    char evbuf[4096];
+    bool got_logprob = false;
+    bool got_done = false;
+
+    while (!got_done) {
+        int n = http_client_recv_sse_event(fd, evbuf, sizeof(evbuf));
+        assert(n > 0);
+        if (strncmp(evbuf, "data: [DONE]", 12) == 0) {
+            got_done = true;
+            break;
+        }
+        yyjson_doc *doc = parse_sse_json(evbuf);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        yyjson_val *choices = yyjson_obj_get(root, "choices");
+        if (yyjson_arr_size(choices) > 0) {
+            yyjson_val *c0 = yyjson_arr_get(choices, 0);
+            yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+            if (lp && !yyjson_is_null(lp)) {
+                yyjson_val *cont = yyjson_obj_get(lp, "content");
+                if (cont && yyjson_arr_size(cont) > 0) {
+                    yyjson_val *e = yyjson_arr_get(cont, 0);
+                    if (yyjson_obj_get(e, "logprob") != NULL)
+                        got_logprob = true;
+                }
+            }
+        }
+        yyjson_doc_free(doc);
+    }
+
+    assert(got_logprob);
+    assert(got_done);
+
+    close(fd);
+    gen_fixture_down(&f);
+}
+
+/* --- Cycle 6 (review): top_logprobs > 0 -> 400 over HTTP ---------------- */
+
+static void test_top_logprobs_400(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, TRIVIAL_TMPL, 0);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"logprobs\":true,\"top_logprobs\":2}");
+    assert(resp.status == 400);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *err = yyjson_obj_get(yyjson_doc_get_root(doc), "error");
+    assert(err != NULL);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    gen_fixture_down(&f);
+}
+
 /* --- main ---------------------------------------------------------------- */
 
 int main(void) {
@@ -793,6 +913,10 @@ int main(void) {
     test_chat_empty_generation_content_empty_string();
     test_completion_empty_generation_text_field();
     test_chat_sse_zero_token_role_chunk();
+    test_chat_logprobs_nonstreaming();
+    test_chat_no_logprobs_null();
+    test_chat_sse_logprobs();
+    test_top_logprobs_400();
     printf("test_http_generate: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

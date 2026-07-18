@@ -329,6 +329,7 @@ static void handle_generate_stub(engine_t *eng, engine_cmd_t *cmd) {
     int limit = count < max ? count : max;
     bool truncated = limit < count;
     bool aborted = false;
+    bool want_lp = cmd->generate.params.logprobs;
 
     for (int i = 0; i < limit; i++) {
         if (atomic_load(&eng->shutdown)) {
@@ -336,9 +337,10 @@ static void handle_generate_stub(engine_t *eng, engine_cmd_t *cmd) {
             aborted = true;
             break;
         }
+        float lp = want_lp ? -0.25f * (float)(i + 1) : 0.0f;
         chunk_t tok = {
             .tag = CHUNK_TOKEN,
-            .token = {.id = cmd->generate.token_ids[i], .logprob = 0},
+            .token = {.id = cmd->generate.token_ids[i], .logprob = lp},
         };
         if (!stream_push(s, tok)) {
             stream_finish_cancelled(s);
@@ -363,7 +365,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     const int32_t *token_ids = cmd->generate.token_ids;
     sampling_params_t resolved_sp = sampling_resolve(
         &cmd->generate.params.sampling, cmd->generate.params.sampling_set,
-        em ? &em->cfg : NULL);
+        &em->cfg);
     const sampling_params_t *sp = &resolved_sp;
     bool want_lp = cmd->generate.params.logprobs;
 

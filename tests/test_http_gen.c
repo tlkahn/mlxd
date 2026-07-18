@@ -5,6 +5,7 @@
 #include "model/tokenizer.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -175,7 +176,7 @@ static void test_sse_chunk_usage(void) {
 static void test_chat_response_roundtrip(void) {
     usage_t u = {.prompt_tokens = 5, .completion_tokens = 3, .total_tokens = 8};
     char *json = gen_build_chat_response("chatcmpl-1", "gpt2", 1234, "hi there",
-                                         FINISH_STOP, &u);
+                                         FINISH_STOP, &u, NULL, 0);
     assert(json != NULL);
     yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
     assert(doc != NULL);
@@ -196,7 +197,7 @@ static void test_chat_response_roundtrip(void) {
 
 static void test_chat_response_null_usage(void) {
     char *json = gen_build_chat_response("chatcmpl-1", "gpt2", 1234, "hi",
-                                          FINISH_STOP, NULL);
+                                          FINISH_STOP, NULL, NULL, 0);
     assert(json != NULL);
     yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
     assert(doc != NULL);
@@ -256,7 +257,7 @@ static void test_chat_prompt_bad_template_nulls_ids(void) {
 static void test_chat_response_null_content(void) {
     usage_t u = {.prompt_tokens = 5, .completion_tokens = 0, .total_tokens = 5};
     char *json = gen_build_chat_response("chatcmpl-1", "gpt2", 1234, NULL,
-                                          FINISH_STOP, &u);
+                                          FINISH_STOP, &u, NULL, 0);
     assert(json != NULL);
     yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
     assert(doc != NULL);
@@ -378,6 +379,80 @@ static void test_completion_response_roundtrip(void) {
     free(json);
 }
 
+static void test_sse_chunk_with_logprob(void) {
+    token_logprob_t entry = {
+        .token = "hi", .logprob = -0.25f,
+        .top_logprobs = NULL, .top_logprob_count = 0,
+    };
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-lp", .model = "gpt2", .created = 1234,
+        .delta_text = "hi",
+        .logprob = &entry,
+    });
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "choices"), 0);
+    yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+    assert(lp != NULL && !yyjson_is_null(lp));
+    yyjson_val *cont = yyjson_obj_get(lp, "content");
+    assert(yyjson_arr_size(cont) == 1);
+    yyjson_val *e0 = yyjson_arr_get(cont, 0);
+    assert(fabs(yyjson_get_real(yyjson_obj_get(e0, "logprob")) - (-0.25)) < 1e-6);
+    yyjson_doc_free(doc);
+    free(sse);
+}
+
+static void test_sse_chunk_no_logprob_null(void) {
+    char *sse = gen_sse_chunk(&(gen_sse_chunk_params_t){
+        .id = "id-nl", .model = "gpt2", .created = 1234,
+        .delta_text = "hi",
+    });
+    assert(sse != NULL);
+    yyjson_doc *doc = parse_sse_payload(sse);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "choices"), 0);
+    yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+    assert(lp != NULL && yyjson_is_null(lp));
+    yyjson_doc_free(doc);
+    free(sse);
+}
+
+static void test_chat_response_with_logprobs(void) {
+    token_logprob_t entries[1] = {{
+        .token = "ok", .logprob = -0.1f,
+        .top_logprobs = NULL, .top_logprob_count = 0,
+    }};
+    usage_t u = {.prompt_tokens = 1, .completion_tokens = 1, .total_tokens = 2};
+    char *json = gen_build_chat_response("chatcmpl-1", "gpt2", 1234, "ok",
+                                          FINISH_STOP, &u, entries, 1);
+    assert(json != NULL);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "choices"), 0);
+    yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+    assert(lp != NULL && !yyjson_is_null(lp));
+    yyjson_val *cont = yyjson_obj_get(lp, "content");
+    assert(yyjson_arr_size(cont) == 1);
+    assert(fabs(yyjson_get_real(yyjson_obj_get(yyjson_arr_get(cont, 0), "logprob")) - (-0.1)) < 1e-6);
+    yyjson_doc_free(doc);
+    free(json);
+}
+
+static void test_chat_response_no_logprobs_null(void) {
+    usage_t u = {.prompt_tokens = 1, .completion_tokens = 1, .total_tokens = 2};
+    char *json = gen_build_chat_response("chatcmpl-1", "gpt2", 1234, "ok",
+                                          FINISH_STOP, &u, NULL, 0);
+    assert(json != NULL);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *c0 = yyjson_arr_get(yyjson_obj_get(root, "choices"), 0);
+    yyjson_val *lp = yyjson_obj_get(c0, "logprobs");
+    assert(lp != NULL && yyjson_is_null(lp));
+    yyjson_doc_free(doc);
+    free(json);
+}
+
 static void test_sse_error_format(void) {
     char *sse = gen_sse_error("something went wrong");
     assert(sse != NULL);
@@ -412,6 +487,10 @@ int main(void) {
     test_sse_completion_chunk_delta();
     test_sse_completion_chunk_final();
     test_completion_response_roundtrip();
+    test_sse_chunk_with_logprob();
+    test_sse_chunk_no_logprob_null();
+    test_chat_response_with_logprobs();
+    test_chat_response_no_logprobs_null();
     test_sse_error_format();
     printf("test_http_gen: all passed\n");
     return 0;

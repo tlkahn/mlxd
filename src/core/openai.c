@@ -89,6 +89,34 @@ static void free_str_array(char **arr, int count) {
  * lifetime is independent of the mut_doc, and the copy path is where yyjson
  * performs all JSON string escaping. No manual escape helpers anywhere. */
 
+static void add_logprob_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                              const token_logprob_t *tl) {
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, o, "token", tl->token);
+    yyjson_mut_obj_add_real(doc, o, "logprob", tl->logprob);
+    yyjson_mut_val *bytes = yyjson_mut_arr(doc);
+    if (tl->token) {
+        for (const unsigned char *p = (const unsigned char *)tl->token; *p; p++)
+            yyjson_mut_arr_add_int(doc, bytes, *p);
+    }
+    yyjson_mut_obj_add_val(doc, o, "bytes", bytes);
+    yyjson_mut_val *tops = yyjson_mut_arr(doc);
+    for (int j = 0; j < tl->top_logprob_count; j++) {
+        yyjson_mut_val *to = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, to, "token", tl->top_logprobs[j].token);
+        yyjson_mut_obj_add_real(doc, to, "logprob", tl->top_logprobs[j].logprob);
+        yyjson_mut_val *tb = yyjson_mut_arr(doc);
+        if (tl->top_logprobs[j].token) {
+            for (const unsigned char *p = (const unsigned char *)tl->top_logprobs[j].token; *p; p++)
+                yyjson_mut_arr_add_int(doc, tb, *p);
+        }
+        yyjson_mut_obj_add_val(doc, to, "bytes", tb);
+        yyjson_mut_arr_add_val(tops, to);
+    }
+    yyjson_mut_obj_add_val(doc, o, "top_logprobs", tops);
+    yyjson_mut_arr_add_val(arr, o);
+}
+
 static void add_usage(yyjson_mut_doc *doc, yyjson_mut_val *parent, const usage_t *u) {
     yyjson_mut_val *usage = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_int(doc, usage, "prompt_tokens", u->prompt_tokens);
@@ -284,8 +312,8 @@ static int parse_messages(chat_completion_request_t *req, yyjson_val *msgs, cons
     return 0;
 }
 
-/* Overlay OpenAI sampling knobs (temperature, top_p, seed) present on `root`
- * onto an already-defaulted gen_params. top_k/min_p are not on the wire. */
+/* Overlay OpenAI sampling knobs (temperature, top_p, top_k, min_p, seed)
+ * present on `root` onto an already-defaulted gen_params. */
 static void parse_sampling(gen_params_t *params, yyjson_val *root) {
     yyjson_val *v;
     if ((v = yyjson_obj_get(root, "temperature")) && yyjson_is_num(v)) {
@@ -347,8 +375,18 @@ int chat_completion_request_parse(chat_completion_request_t *req, yyjson_val *ro
     if (yyjson_is_bool(lp))
         req->params.logprobs = yyjson_get_bool(lp);
     yyjson_val *tlp = yyjson_obj_get(root, "top_logprobs");
-    if (yyjson_is_int(tlp))
-        req->params.top_logprobs = (int)yyjson_get_sint(tlp);
+    if (yyjson_is_int(tlp)) {
+        int tlp_val = (int)yyjson_get_sint(tlp);
+        if (tlp_val < 0) {
+            *err = "top_logprobs must be >= 0";
+            goto fail;
+        }
+        if (tlp_val > 0) {
+            *err = "top_logprobs is not yet supported";
+            goto fail;
+        }
+        req->params.top_logprobs = tlp_val;
+    }
 
     yyjson_val *so = yyjson_obj_get(root, "stream_options");
     if (yyjson_is_obj(so)) {
@@ -425,23 +463,12 @@ yyjson_mut_val *chat_completion_response_serialize(const chat_completion_respons
     if (resp->logprobs_content) {
         yyjson_mut_val *lp = yyjson_mut_obj(doc);
         yyjson_mut_val *cont = yyjson_mut_arr(doc);
-        for (int i = 0; i < resp->logprobs_count; i++) {
-            const token_logprob_t *tl = &resp->logprobs_content[i];
-            yyjson_mut_val *o = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_strcpy(doc, o, "token", tl->token);
-            yyjson_mut_obj_add_real(doc, o, "logprob", tl->logprob);
-            yyjson_mut_val *tops = yyjson_mut_arr(doc);
-            for (int j = 0; j < tl->top_logprob_count; j++) {
-                yyjson_mut_val *to = yyjson_mut_obj(doc);
-                yyjson_mut_obj_add_strcpy(doc, to, "token", tl->top_logprobs[j].token);
-                yyjson_mut_obj_add_real(doc, to, "logprob", tl->top_logprobs[j].logprob);
-                yyjson_mut_arr_add_val(tops, to);
-            }
-            yyjson_mut_obj_add_val(doc, o, "top_logprobs", tops);
-            yyjson_mut_arr_add_val(cont, o);
-        }
+        for (int i = 0; i < resp->logprobs_count; i++)
+            add_logprob_entry(doc, cont, &resp->logprobs_content[i]);
         yyjson_mut_obj_add_val(doc, lp, "content", cont);
         yyjson_mut_obj_add_val(doc, c0, "logprobs", lp);
+    } else {
+        yyjson_mut_obj_add_null(doc, c0, "logprobs");
     }
 
     /* Wire mapping only: the internal "cancelled" tag must never reach clients. */
@@ -514,6 +541,17 @@ yyjson_mut_val *chat_completion_chunk_serialize(const chat_completion_chunk_t *c
         }
         yyjson_mut_obj_add_val(doc, c0, "delta", delta);
 
+        if (chunk->logprob_count > 0) {
+            yyjson_mut_val *lp = yyjson_mut_obj(doc);
+            yyjson_mut_val *cont = yyjson_mut_arr(doc);
+            for (int i = 0; i < chunk->logprob_count; i++)
+                add_logprob_entry(doc, cont, &chunk->logprobs[i]);
+            yyjson_mut_obj_add_val(doc, lp, "content", cont);
+            yyjson_mut_obj_add_val(doc, c0, "logprobs", lp);
+        } else {
+            yyjson_mut_obj_add_null(doc, c0, "logprobs");
+        }
+
         if (chunk->has_finish_reason)
             yyjson_mut_obj_add_strcpy(doc, c0, "finish_reason",
                                       finish_reason_wire_str(chunk->finish_reason));
@@ -533,6 +571,14 @@ void chat_completion_chunk_free(chat_completion_chunk_t *chunk) {
     free(chunk->id);
     free(chunk->model);
     free(chunk->delta_content);
+    for (int i = 0; i < chunk->logprob_count; i++) {
+        token_logprob_t *tl = &chunk->logprobs[i];
+        free(tl->token);
+        for (int j = 0; j < tl->top_logprob_count; j++)
+            free(tl->top_logprobs[j].token);
+        free(tl->top_logprobs);
+    }
+    free(chunk->logprobs);
     for (int i = 0; i < chunk->tool_call_count; i++) {
         delta_tool_call_t *tc = &chunk->tool_calls[i];
         free(tc->id);
@@ -579,6 +625,11 @@ int completion_request_parse(completion_request_t *req, yyjson_val *root, const 
     yyjson_val *stream = yyjson_obj_get(root, "stream");
     if (yyjson_is_bool(stream))
         req->params.stream = yyjson_get_bool(stream);
+    yyjson_val *clp = yyjson_obj_get(root, "logprobs");
+    if (yyjson_is_int(clp) && yyjson_get_sint(clp) >= 1) {
+        *err = "logprobs is not supported on the completions endpoint";
+        goto fail;
+    }
     if (parse_stop(yyjson_obj_get(root, "stop"), &req->params.stop, &req->params.stop_count, err) != 0)
         goto fail;
     return 0;
