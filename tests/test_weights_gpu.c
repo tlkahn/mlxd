@@ -380,6 +380,32 @@ static void test_triplet_free_helper(void) {
     model_config_free(&cfg);
 }
 
+/* ---- H2 regression: error paths must zero *out ---- */
+
+static void test_triplet_error_zeroes_out(void) {
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+    mlx_array dummy = mlx_array_new_float(1.0f);
+    mlx_map_string_to_array_insert(m, "unrelated.weight", dummy);
+    mlx_array_free(dummy);
+
+    weights_t wt = {0};
+    wt.params = m;
+    wt.count = 1;
+
+    weight_triplet_t tri;
+    memset(&tri, 0xAA, sizeof(tri));
+
+    int rc = weights_get_triplet(&tri, &wt, "no_such_key");
+    assert(rc == -1);
+    assert(tri.weight.ctx == NULL);
+    assert(tri.scales.ctx == NULL);
+    assert(tri.biases.ctx == NULL);
+
+    weights_triplet_free(&tri);
+
+    mlx_map_string_to_array_free(m);
+}
+
 /* ---- Cycle 7 (review): index lists absent shard file (L1) ---- */
 
 static void test_index_absent_shard_file(void) {
@@ -698,6 +724,9 @@ int main(void) {
 
     test_triplet_free_helper();
     printf("  test_triplet_free_helper: passed\n");
+
+    test_triplet_error_zeroes_out();
+    printf("  test_triplet_error_zeroes_out: passed\n");
 
     test_index_absent_shard_file();
     printf("  test_index_absent_shard_file: passed\n");

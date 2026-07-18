@@ -53,7 +53,7 @@ typedef struct weights {
 int    weights_load(weights_t *w, const char *model_dir,
                     const model_config_t *cfg, char *err, size_t errlen);
 int    weights_get(mlx_array *out, const weights_t *w, const char *name);
-/* On success all three arrays are live-or-empty; release via weights_triplet_free. */
+/* *out is always safe to pass to weights_triplet_free (zeroed on error). */
 int    weights_get_triplet(weight_triplet_t *out, const weights_t *w,
                            const char *base);
 void   weights_triplet_free(weight_triplet_t *t);

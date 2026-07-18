@@ -92,7 +92,7 @@ test: $(TEST_BINS)
 	printf "\n%d passed, %d failed\n" $$pass $$fail; \
 	[ $$fail -eq 0 ]
 
-test-gpu: $(TEST_GPU_BINS)
+test-gpu: $(TEST_GPU_BINS) fixtures-tiny-ckpt
 	@pass=0; fail=0; \
 	for t in $(TEST_GPU_BINS); do \
 		printf "  %-40s" "$$(basename $$t)"; \

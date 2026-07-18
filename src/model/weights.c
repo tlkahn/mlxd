@@ -317,7 +317,7 @@ int weights_expected_names(const model_config_t *cfg,
 
 /* ---------- GPU / engine-thread helpers ---------- */
 
-/* dup_key: if non-NULL, receives the first duplicate key name on collision */
+/* Ownership contract for insert/free: see mlxbridge.h. */
 static int merge_map(mlx_map_string_to_array dst,
                      mlx_map_string_to_array src,
                      const char **dup_key) {
@@ -824,6 +824,7 @@ int weights_get(mlx_array *out, const weights_t *w, const char *name) {
 int weights_get_triplet(weight_triplet_t *out, const weights_t *w,
                         const char *base) {
     if (!w || !out || !base) return -1;
+    memset(out, 0, sizeof(*out));
 
     char name[256];
     int wr = snprintf(name, sizeof(name), "%s.weight", base);
