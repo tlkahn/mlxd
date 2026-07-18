@@ -944,6 +944,31 @@ static void test_enable_thinking_false(void) {
     gen_fixture_down(&f);
 }
 
+/* --- enable_thinking: non-boolean -> 400 --------------------------------- */
+
+static void test_enable_thinking_non_boolean_400(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, THINK_COND_TMPL, 0);
+
+    http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+        "{\"model\":\"gpt2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        "\"enable_thinking\":\"yes\"}");
+    assert(resp.status == 400);
+
+    yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+    assert(doc != NULL);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *err = yyjson_obj_get(root, "error");
+    assert(err != NULL);
+    const char *type = yyjson_get_str(yyjson_obj_get(err, "type"));
+    assert(type && strcmp(type, "invalid_request_error") == 0);
+    const char *msg = yyjson_get_str(yyjson_obj_get(err, "message"));
+    assert(msg && strstr(msg, "enable_thinking must be a boolean") != NULL);
+
+    yyjson_doc_free(doc);
+    http_client_response_free(&resp);
+    gen_fixture_down(&f);
+}
+
 /* --- main ---------------------------------------------------------------- */
 
 int main(void) {
@@ -977,6 +1002,7 @@ int main(void) {
     test_chat_sse_logprobs();
     test_top_logprobs_400();
     test_enable_thinking_false();
+    test_enable_thinking_non_boolean_400();
     printf("test_http_generate: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");
