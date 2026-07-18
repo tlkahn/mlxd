@@ -237,60 +237,82 @@ static int emit_expected(weight_expected_t *out, int capacity, int *pos,
     return 0;
 }
 
-static const char *qwen3_layer_matmuls[] = {
+static const char *const qwen3_layer_matmuls[] = {
     "self_attn.q_proj", "self_attn.k_proj",
     "self_attn.v_proj", "self_attn.o_proj",
     "mlp.gate_proj",    "mlp.up_proj",
-    "mlp.down_proj",
+    "mlp.down_proj",    NULL,
 };
-static const size_t qwen3_n_matmuls = 7;
 
-static const char *qwen3_layer_norms[] = {
-    "input_layernorm", "post_attention_layernorm",
+static const char *const qwen3_layer_norms[] = {
+    "input_layernorm", "post_attention_layernorm", NULL,
 };
-static const size_t qwen3_n_norms = 2;
 
-static const char *qwen3_layer_qk_norms[] = {
-    "self_attn.q_norm", "self_attn.k_norm",
+static const char *const qwen3_layer_qk_norms[] = {
+    "self_attn.q_norm", "self_attn.k_norm", NULL,
 };
-static const size_t qwen3_n_qk_norms = 2;
+
+typedef struct {
+    model_family_t     family;
+    const char *const *layer_matmuls;
+    const char *const *layer_norms;
+    const char *const *layer_qk_norms;
+    const char *const *layer_biases;
+    const char *const *extra_tensors;
+} weights_family_desc_t;
+
+static const weights_family_desc_t family_descs[] = {
+    {
+        .family         = MODEL_QWEN3,
+        .layer_matmuls  = qwen3_layer_matmuls,
+        .layer_norms    = qwen3_layer_norms,
+        .layer_qk_norms = qwen3_layer_qk_norms,
+        .layer_biases   = NULL,
+        .extra_tensors  = NULL,
+    },
+};
+
+static const weights_family_desc_t *family_desc(model_family_t fam) {
+    for (size_t i = 0; i < sizeof(family_descs) / sizeof(family_descs[0]); i++) {
+        if (family_descs[i].family == fam)
+            return &family_descs[i];
+    }
+    return NULL;
+}
 
 int weights_expected_names(const model_config_t *cfg,
                            weight_expected_t *out, int capacity) {
     if (!cfg) return -1;
-    if (cfg->family != MODEL_QWEN3) return 0;
+
+    const weights_family_desc_t *desc = family_desc(cfg->family);
+    if (!desc) return 0;
 
     int pos = 0;
     char buf[256];
 
-    /* embed_tokens */
     if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "embed_tokens") == 0) {
         if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_EMBED) != 0)
             return -1;
     }
 
-    /* per-layer tensors */
     for (int layer = 0; layer < cfg->num_hidden_layers; layer++) {
-        for (size_t j = 0; j < qwen3_n_matmuls; j++) {
-            if (weights_tensor_name(buf, sizeof(buf), cfg, layer,
-                                    qwen3_layer_matmuls[j]) == 0) {
+        for (const char *const *p = desc->layer_matmuls; p && *p; p++) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
                 if (emit_expected(out, capacity, &pos, buf,
                                   WEIGHT_KIND_MATMUL) != 0)
                     return -1;
             }
         }
-        for (size_t j = 0; j < qwen3_n_norms; j++) {
-            if (weights_tensor_name(buf, sizeof(buf), cfg, layer,
-                                    qwen3_layer_norms[j]) == 0) {
+        for (const char *const *p = desc->layer_norms; p && *p; p++) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
                 if (emit_expected(out, capacity, &pos, buf,
                                   WEIGHT_KIND_NORM) != 0)
                     return -1;
             }
         }
         if (cfg->has_qk_norm) {
-            for (size_t j = 0; j < qwen3_n_qk_norms; j++) {
-                if (weights_tensor_name(buf, sizeof(buf), cfg, layer,
-                                        qwen3_layer_qk_norms[j]) == 0) {
+            for (const char *const *p = desc->layer_qk_norms; p && *p; p++) {
+                if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
                     if (emit_expected(out, capacity, &pos, buf,
                                       WEIGHT_KIND_NORM) != 0)
                         return -1;
@@ -299,13 +321,11 @@ int weights_expected_names(const model_config_t *cfg,
         }
     }
 
-    /* global norm */
     if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "norm") == 0) {
         if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
             return -1;
     }
 
-    /* lm_head (not prefixed, not present when tied) */
     if (!cfg->tie_word_embeddings) {
         if (emit_expected(out, capacity, &pos, "lm_head",
                           WEIGHT_KIND_MATMUL) != 0)
