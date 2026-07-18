@@ -522,6 +522,13 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         }
         mlx_array_free(lazy_token);
 
+        if (token_is_eos(&em->cfg, id)) {
+            if (have_next) mlx_array_free(next_logits);
+            if (!stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP}))
+                stream_finish_cancelled(s);
+            goto out_free;
+        }
+
         chunk_t tok = {.tag = CHUNK_TOKEN, .token = {.id = id, .logprob = 0}};
         if (!stream_push(s, tok)) {
             if (have_next) mlx_array_free(next_logits);
@@ -529,13 +536,6 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
             goto out_free;
         }
         emitted++;
-
-        if (token_is_eos(&em->cfg, id)) {
-            if (have_next) mlx_array_free(next_logits);
-            if (!stream_push(s, (chunk_t){.tag = CHUNK_DONE, .done = FINISH_STOP}))
-                stream_finish_cancelled(s);
-            goto out_free;
-        }
 
         if (emitted == max_new) {
             /* Final step never sets have_next; guard is defensive. */
