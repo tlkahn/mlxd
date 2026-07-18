@@ -76,9 +76,10 @@ fi
 
 # --- Oracle tokens ---
 
+BODY=$(python3 -c 'import json,sys; print(json.dumps({"prompt": sys.argv[1], "temperature": 0, "max_tokens": int(sys.argv[2]), "stream": False}))' "$PROMPT" "$MAX_TOKENS")
 ORACLE_TEXT=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
     -H "Content-Type: application/json" \
-    -d "{\"prompt\": \"$PROMPT\", \"temperature\": 0, \"max_tokens\": $MAX_TOKENS, \"stream\": false}" \
+    -d "$BODY" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['text'], end='')")
 
 # --- mlxd tokens ---
