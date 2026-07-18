@@ -539,6 +539,11 @@ static void test_run_parse_initializes_poisoned_struct(void) {
     assert(!opts.raw);
     assert(!opts.token_ids);
     assert(opts.max_tokens == 0);
+    assert(opts.temperature == 0.0f);
+    assert(opts.top_p == 0.0f);
+    assert(opts.min_p == 0.0f);
+    assert(opts.top_k == 0);
+    assert(opts.seed == 0);
 }
 
 /* --- Cycle 7 (review): run_opts_apply_sampling greedy default ----------- */
