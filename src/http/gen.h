@@ -19,6 +19,7 @@ typedef struct tokenizer tokenizer_t;
  * literal - caller does NOT free *err). *out_ids is malloc'd; caller frees. */
 int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
                           const char *messages_json, const char *tools_json,
+                          const char *extra_json,
                           int32_t **out_ids, const char **err);
 
 /* Build a token-id prompt from a raw completion string.

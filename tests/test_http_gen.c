@@ -18,6 +18,12 @@
 
 static const char *TRIVIAL_TMPL = "{{ messages[0].content }}";
 
+#define THINK_COND_TMPL \
+    "{{ messages[0].content }}" \
+    "{% if enable_thinking is defined and enable_thinking is false %}" \
+    "<think></think>" \
+    "{% endif %}"
+
 static void test_chat_prompt_matches_direct(void) {
     tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
     assert(tok != NULL);
@@ -25,7 +31,7 @@ static void test_chat_prompt_matches_direct(void) {
     const char *msgs = "[{\"role\":\"user\",\"content\":\"hello world\"}]";
     int32_t *ids = NULL;
     const char *err = NULL;
-    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL, &ids, &err);
+    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL, NULL, &ids, &err);
     assert(n > 0);
     assert(err == NULL);
 
@@ -66,7 +72,7 @@ static void test_bad_template(void) {
     const char *msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
     int32_t *ids = NULL;
     const char *err = NULL;
-    int n = gen_build_chat_prompt(tok, "{{ ", msgs, NULL, &ids, &err);
+    int n = gen_build_chat_prompt(tok, "{{ ", msgs, NULL, NULL, &ids, &err);
     assert(n == -1);
     assert(err != NULL);
 
@@ -246,7 +252,7 @@ static void test_chat_prompt_bad_template_nulls_ids(void) {
     const char *msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
     int32_t *ids = (int32_t *)(uintptr_t)0xDEAD;
     const char *err = NULL;
-    int n = gen_build_chat_prompt(tok, "{{ ", msgs, NULL, &ids, &err);
+    int n = gen_build_chat_prompt(tok, "{{ ", msgs, NULL, NULL, &ids, &err);
     assert(n == -1);
     assert(err != NULL);
     assert(ids == NULL);
@@ -280,7 +286,7 @@ static void test_chat_prompt_special_tokens(void) {
     const char *msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
     int32_t *ids = NULL;
     const char *err = NULL;
-    int n = gen_build_chat_prompt(tok, tmpl, msgs, NULL, &ids, &err);
+    int n = gen_build_chat_prompt(tok, tmpl, msgs, NULL, NULL, &ids, &err);
     assert(n > 0);
     assert(err == NULL);
     assert(ids[0] == 50256);
@@ -296,7 +302,7 @@ static void test_chat_prompt_user_content_specials(void) {
     const char *msgs = "[{\"role\":\"user\",\"content\":\"<|endoftext|>\"}]";
     int32_t *ids = NULL;
     const char *err = NULL;
-    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL, &ids, &err);
+    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL, NULL, &ids, &err);
     assert(n > 0);
     assert(err == NULL);
     assert(ids[0] == 50256);
@@ -466,6 +472,46 @@ static void test_sse_error_format(void) {
     free(sse);
 }
 
+static void test_chat_prompt_extra_json(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *msgs = "[{\"role\":\"user\",\"content\":\"hello world\"}]";
+
+    int32_t *ids = NULL;
+    const char *err = NULL;
+    int n = gen_build_chat_prompt(tok, THINK_COND_TMPL, msgs, NULL,
+                                  "{\"enable_thinking\":false}", &ids, &err);
+    assert(n > 0);
+    assert(err == NULL);
+
+    int32_t *expected = NULL;
+    int expected_n = tokenizer_encode_alloc(tok, "hello world<think></think>",
+                                             strlen("hello world<think></think>"),
+                                             false, &expected);
+    assert(expected_n == n);
+    assert(memcmp(ids, expected, (size_t)n * sizeof(int32_t)) == 0);
+    free(ids);
+    free(expected);
+
+    ids = NULL;
+    err = NULL;
+    n = gen_build_chat_prompt(tok, THINK_COND_TMPL, msgs, NULL, NULL, &ids, &err);
+    assert(n > 0);
+    assert(err == NULL);
+
+    expected = NULL;
+    expected_n = tokenizer_encode_alloc(tok, "hello world",
+                                         strlen("hello world"),
+                                         false, &expected);
+    assert(expected_n == n);
+    assert(memcmp(ids, expected, (size_t)n * sizeof(int32_t)) == 0);
+    free(ids);
+    free(expected);
+
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_chat_prompt_matches_direct();
     test_completion_prompt();
@@ -492,6 +538,7 @@ int main(void) {
     test_chat_response_with_logprobs();
     test_chat_response_no_logprobs_null();
     test_sse_error_format();
+    test_chat_prompt_extra_json();
     printf("test_http_gen: all passed\n");
     return 0;
 }
