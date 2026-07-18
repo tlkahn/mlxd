@@ -109,6 +109,70 @@ int cli_parse_run(int argc, char **argv, cli_run_opts_t *out, char *err, size_t 
             }
             out->temperature = v;
             out->temperature_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--top-p") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--top-p requires a value");
+                return -1;
+            }
+            char *end;
+            float v = strtof(argv[++i], &end);
+            if (*end != '\0' || !isfinite(v)) {
+                snprintf(err, errsz, "invalid top-p '%s'", argv[i]);
+                return -1;
+            }
+            if (v < 0.0f || v > 1.0f) {
+                snprintf(err, errsz, "top-p must be in [0, 1]");
+                return -1;
+            }
+            out->top_p = v;
+            out->top_p_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--top-k") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--top-k requires a value");
+                return -1;
+            }
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || errno == ERANGE) {
+                snprintf(err, errsz, "invalid top-k '%s'", argv[i]);
+                return -1;
+            }
+            if (v < -1 || v > INT_MAX) {
+                snprintf(err, errsz, "top-k must be >= -1");
+                return -1;
+            }
+            out->top_k = (int)v;
+            out->top_k_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--min-p") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--min-p requires a value");
+                return -1;
+            }
+            char *end;
+            float v = strtof(argv[++i], &end);
+            if (*end != '\0' || !isfinite(v)) {
+                snprintf(err, errsz, "invalid min-p '%s'", argv[i]);
+                return -1;
+            }
+            if (v < 0.0f || v > 1.0f) {
+                snprintf(err, errsz, "min-p must be in [0, 1]");
+                return -1;
+            }
+            out->min_p = v;
+            out->min_p_set = true;
+        } else if (!opts_done && strcmp(argv[i], "--seed") == 0) {
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "--seed requires a value");
+                return -1;
+            }
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || errno == ERANGE) {
+                snprintf(err, errsz, "invalid seed '%s'", argv[i]);
+                return -1;
+            }
+            out->seed = (int)v;
+            out->seed_set = true;
         } else if (!opts_done && strcmp(argv[i], "--stream") == 0) {
             out->stream = true;
         } else if (!opts_done && strcmp(argv[i], "--raw") == 0) {

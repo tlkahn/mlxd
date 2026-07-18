@@ -38,6 +38,10 @@ static void usage(void) {
             "  [PROMPT]                prompt text (reads stdin if omitted)\n"
             "  --max-tokens <N>        maximum tokens to generate (0 or unset: unlimited)\n"
             "  --temperature <F>       sampling temperature\n"
+            "  --top-p <F>            nucleus sampling threshold [0,1]\n"
+            "  --top-k <N>            top-k filter (-1 to disable)\n"
+            "  --min-p <F>            minimum probability filter [0,1]\n"
+            "  --seed <N>             random seed for reproducibility\n"
             "  --stream                flush each token to stdout as generated\n"
             "  --raw                   force raw completion even when a chat template is present\n"
             "  --token-ids             print generated token IDs instead of text\n"
@@ -469,8 +473,26 @@ static int cmd_run(int argc, char **argv) {
         .n = 1,
         .stream = true,
     };
-    if (opts.temperature_set)
+    if (opts.temperature_set) {
         params.sampling.temperature = opts.temperature;
+        params.sampling_set |= SAMPLING_SET_TEMPERATURE;
+    }
+    if (opts.top_p_set) {
+        params.sampling.top_p = opts.top_p;
+        params.sampling_set |= SAMPLING_SET_TOP_P;
+    }
+    if (opts.top_k_set) {
+        params.sampling.top_k = opts.top_k;
+        params.sampling_set |= SAMPLING_SET_TOP_K;
+    }
+    if (opts.min_p_set) {
+        params.sampling.min_p = opts.min_p;
+        params.sampling_set |= SAMPLING_SET_MIN_P;
+    }
+    if (opts.seed_set) {
+        params.sampling.seed = opts.seed;
+        params.sampling_set |= SAMPLING_SET_SEED;
+    }
 
     engine_cmd_t *gen_cmd = calloc(1, sizeof(*gen_cmd));
     if (!gen_cmd) {

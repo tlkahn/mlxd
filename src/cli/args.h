@@ -31,6 +31,14 @@ typedef struct {
     int max_tokens;
     float temperature;
     bool temperature_set;
+    float top_p;
+    bool top_p_set;
+    int top_k;
+    bool top_k_set;
+    float min_p;
+    bool min_p_set;
+    int seed;
+    bool seed_set;
     bool stream;
     bool raw;
     bool token_ids;

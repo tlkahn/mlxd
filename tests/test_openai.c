@@ -845,6 +845,42 @@ static void test_parse_sampling_set_mask(void) {
     yyjson_doc_free(doc);
 }
 
+/* --- Cycle 16 (C2): top_k validation ---- */
+
+static void test_sampling_params_validate_top_k(void) {
+    const char *err = NULL;
+    sampling_params_t sp = SAMPLING_PARAMS_DEFAULT;
+
+    /* top_k < -1 rejected */
+    sp.top_k = -2;
+    assert(!sampling_params_validate(&sp, &err));
+    assert(err != NULL);
+
+    /* top_k = -1 accepted (disabled) */
+    sp.top_k = -1;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* top_k = 0 accepted (disabled) */
+    sp.top_k = 0;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* top_k = 1 accepted */
+    sp.top_k = 1;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* top_k = 50 accepted */
+    sp.top_k = 50;
+    assert(sampling_params_validate(&sp, &err));
+
+    /* any seed accepted */
+    sp.seed = -1;
+    assert(sampling_params_validate(&sp, &err));
+    sp.seed = 0;
+    assert(sampling_params_validate(&sp, &err));
+    sp.seed = 999999;
+    assert(sampling_params_validate(&sp, &err));
+}
+
 int main(void) {
     test_helper_reads_and_parses_error_envelope();
     test_error_envelope_serialize();
@@ -871,6 +907,8 @@ int main(void) {
     test_parse_free_after_early_error_is_safe();
     test_chat_request_parse_stop_non_string_element();
     test_parse_sampling_set_mask();
+    test_sampling_params_validate_top_k();
+    printf("  test_sampling_params_validate_top_k: passed\n");
     printf("test_openai: all passed\n");
     return 0;
 }

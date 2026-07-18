@@ -457,6 +457,57 @@ static void test_list_unknown_flag(void) {
     assert(rc == -1);
 }
 
+/* --- C2 cycle 17: sampling flags ------------------------------------------ */
+
+static void test_run_sampling_flags(void) {
+    char *argv[] = {"mlxd", "run", "m", "hi",
+                    "--top-p", "0.9", "--top-k", "40", "--min-p", "0.05", "--seed", "42"};
+    cli_run_opts_t opts = {0};
+    char err[256] = {0};
+    int rc = cli_parse_run(12, argv, &opts, err, sizeof(err));
+    assert(rc == 0);
+    assert(opts.top_p_set);
+    assert(opts.top_p > 0.89f && opts.top_p < 0.91f);
+    assert(opts.top_k_set);
+    assert(opts.top_k == 40);
+    assert(opts.min_p_set);
+    assert(opts.min_p > 0.04f && opts.min_p < 0.06f);
+    assert(opts.seed_set);
+    assert(opts.seed == 42);
+}
+
+static void test_run_sampling_bad_values(void) {
+    char err[256];
+
+    /* top-p out of range */
+    char *argv1[] = {"mlxd", "run", "m", "--top-p", "1.5"};
+    cli_run_opts_t opts = {0};
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv1, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "top-p") != NULL);
+
+    /* top-k < -1 */
+    char *argv2[] = {"mlxd", "run", "m", "--top-k", "-2"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv2, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "top-k") != NULL);
+
+    /* min-p negative */
+    char *argv3[] = {"mlxd", "run", "m", "--min-p", "-0.1"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv3, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "min-p") != NULL);
+
+    /* seed non-numeric */
+    char *argv4[] = {"mlxd", "run", "m", "--seed", "abc"};
+    memset(&opts, 0, sizeof(opts));
+    memset(err, 0, sizeof(err));
+    assert(cli_parse_run(5, argv4, &opts, err, sizeof(err)) == -1);
+    assert(strstr(err, "seed") != NULL);
+}
+
 int main(void) {
     /* cycle 1: cli_command */
     test_command_serve();
@@ -532,6 +583,10 @@ int main(void) {
     test_list_default();
     test_list_json();
     test_list_unknown_flag();
+
+    /* C2 cycle 17: sampling flags */
+    test_run_sampling_flags();
+    test_run_sampling_bad_values();
 
     printf("test_cli_args: all passed\n");
     return 0;
