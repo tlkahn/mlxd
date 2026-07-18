@@ -19,7 +19,7 @@ typedef struct {
     /* chat mode */
     const char  *messages_json;
     const char  *tools_json;
-    const char  *extra_json;
+    const char  *extra_json; /* borrowed; consumed synchronously during prompt build */
     /* completion mode */
     const char  *prompt;
 } gen_request_start_params_t;

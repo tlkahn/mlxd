@@ -46,7 +46,10 @@ make install      # install to /usr/local/bin/mlxd
 mlxd serve --model ~/.cache/mlxd/Qwen3-0.6B-MLX
 
 # One-shot generation
-mlxd run --model ~/.cache/mlxd/Qwen3-0.6B-MLX "Explain quicksort in one paragraph"
+mlxd run ~/.cache/mlxd/Qwen3-0.6B-MLX "Explain quicksort in one paragraph"
+
+# One-shot generation with thinking disabled
+mlxd run ~/.cache/mlxd/Qwen3-0.6B-MLX --no-think "Explain quicksort"
 
 # Download a model from HuggingFace
 mlxd pull mlx-community/Qwen3-0.6B-MLX
@@ -64,6 +67,18 @@ curl http://localhost:8080/v1/chat/completions \
     "model": "Qwen3-0.6B-MLX",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
+  }'
+```
+
+The chat completions endpoint accepts an optional `"enable_thinking": false` field (non-standard extension) to suppress thinking for models whose chat template checks the `enable_thinking` variable. Templates default thinking on when the variable is undefined, so there is no `--think` flag or `"enable_thinking": true` needed to enable it.
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen3-0.6B-MLX",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "enable_thinking": false
   }'
 ```
 
