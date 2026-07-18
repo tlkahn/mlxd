@@ -181,7 +181,7 @@ static void test_fwd_embed(void) {
     mlx_array_free(out);
     mlx_array_free(ids);
 
-    /* Quantized embed: must produce bf16 output */
+    /* Quantized embed: must produce bf16 output + match manual dequant reference */
     int32_t ids2_data[] = {0, 1, 2};
     mlx_array ids2 = mlx_array_new_data(ids2_data, ids_shape, 2, MLX_INT32);
     mlx_array out2 = mlx_array_new();
@@ -192,6 +192,57 @@ static void test_fwd_embed(void) {
     assert(mlx_array_dtype(out2) == MLX_BFLOAT16);
     assert(is_finite_f32(out2, gpu));
 
+    /* Reference: manual take on weight/scales/biases rows, dequantize, cast bf16 */
+    char qname[256];
+    weights_tensor_name(qname, sizeof(qname), &cfg_quant, -1, "embed_tokens");
+    weight_triplet_t etri;
+    assert(weights_get_triplet(&etri, &w_quant, qname) == 0);
+    assert(etri.quantized);
+
+    int flat2_shape[] = {3};
+    mlx_array flat2 = mlx_array_new();
+    MLXB_CHECK(mlx_reshape(&flat2, ids2, flat2_shape, 1, gpu));
+
+    mlx_array tw = mlx_array_new();
+    mlx_array ts = mlx_array_new();
+    mlx_array tb = mlx_array_new();
+    MLXB_CHECK(mlx_take_axis(&tw, etri.weight, flat2, 0, gpu));
+    MLXB_CHECK(mlx_take_axis(&ts, etri.scales, flat2, 0, gpu));
+    MLXB_CHECK(mlx_take_axis(&tb, etri.biases, flat2, 0, gpu));
+
+    mlx_array dq2 = mlx_array_new();
+    MLXB_CHECK(mlx_dequantize(&dq2, tw, ts, tb,
+        (mlx_optional_int){.value = cfg_quant.quant_group_size, .has_value = true},
+        (mlx_optional_int){.value = cfg_quant.quant_bits, .has_value = true},
+        "affine", (mlx_array){.ctx = NULL}, (mlx_optional_dtype){.has_value = false}, gpu));
+
+    mlx_array dq2_bf16 = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&dq2_bf16, dq2, MLX_BFLOAT16, gpu));
+    int ref2_shape[] = {1, 3, 64};
+    mlx_array ref2 = mlx_array_new();
+    MLXB_CHECK(mlx_reshape(&ref2, dq2_bf16, ref2_shape, 3, gpu));
+
+    mlx_array out2_f32 = mlx_array_new();
+    mlx_array ref2_f32 = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&out2_f32, out2, MLX_FLOAT32, gpu));
+    MLXB_CHECK(mlx_astype(&ref2_f32, ref2, MLX_FLOAT32, gpu));
+    assert(MLXB_CHECK(mlx_array_eval(out2_f32)));
+    assert(MLXB_CHECK(mlx_array_eval(ref2_f32)));
+    const float *qod = mlx_array_data_float32(out2_f32);
+    const float *qrd = mlx_array_data_float32(ref2_f32);
+    for (size_t qi = 0; qi < 192; qi++)
+        assert(fabsf(qod[qi] - qrd[qi]) < 1e-3f);
+
+    mlx_array_free(ref2_f32);
+    mlx_array_free(out2_f32);
+    mlx_array_free(ref2);
+    mlx_array_free(dq2_bf16);
+    mlx_array_free(dq2);
+    mlx_array_free(tb);
+    mlx_array_free(ts);
+    mlx_array_free(tw);
+    mlx_array_free(flat2);
+    weights_triplet_free(&etri);
     mlx_array_free(out2);
     mlx_array_free(ids2);
 }
@@ -750,6 +801,82 @@ static void test_incremental_equals_full_quant(void) {
     engine_model_free(&em);
 }
 
+/* ---- B2.6: chunked prefill (S>1 with nonempty cache) ---- */
+
+static void test_chunked_prefill_equals_full(void) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tiny_qwen3", FIXTURES);
+
+    engine_model_t em;
+    char lerr[256] = {0};
+    assert(engine_model_load(&em, path, lerr, sizeof(lerr)) == 0);
+
+    int32_t prompt[] = {10, 20, 30, 40};
+
+    /* Path A: full context, 4 tokens at once */
+    kvcache_t kv_a;
+    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers,
+                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+
+    int shape_all[] = {1, 4};
+    mlx_array ids_all = mlx_array_new_data(prompt, shape_all, 2, MLX_INT32);
+    mlx_array logits_a = mlx_array_new();
+    assert(model_forward(&em, ids_all, &kv_a, true, &logits_a) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(logits_a)));
+
+    /* Path B: chunk 1 = tokens 0-1 (S=2, empty cache), chunk 2 = tokens 2-3 (S=2, offset 2) */
+    kvcache_t kv_b;
+    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers,
+                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+
+    int shape_c[] = {1, 2};
+    mlx_array ids_c1 = mlx_array_new_data(prompt, shape_c, 2, MLX_INT32);
+    assert(model_forward(&em, ids_c1, &kv_b, false, NULL) == 0);
+    assert(kvcache_layer_offset(&kv_b, 0) == 2);
+
+    mlx_array ids_c2 = mlx_array_new_data(&prompt[2], shape_c, 2, MLX_INT32);
+    mlx_array logits_b = mlx_array_new();
+    assert(model_forward(&em, ids_c2, &kv_b, true, &logits_b) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(logits_b)));
+
+    /* Compare: argmax should match */
+    mlx_array la_f32 = mlx_array_new();
+    mlx_array lb_f32 = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&la_f32, logits_a, MLX_FLOAT32, gpu));
+    MLXB_CHECK(mlx_astype(&lb_f32, logits_b, MLX_FLOAT32, gpu));
+    assert(MLXB_CHECK(mlx_array_eval(la_f32)));
+    assert(MLXB_CHECK(mlx_array_eval(lb_f32)));
+
+    const float *da = mlx_array_data_float32(la_f32);
+    const float *db = mlx_array_data_float32(lb_f32);
+    int vocab = em.cfg.vocab_size;
+
+    int argmax_a = 0, argmax_b = 0;
+    for (int i = 1; i < vocab; i++) {
+        if (da[i] > da[argmax_a]) argmax_a = i;
+        if (db[i] > db[argmax_b]) argmax_b = i;
+    }
+    assert(argmax_a == argmax_b);
+
+    float maxdiff = 0.0f;
+    for (int i = 0; i < vocab; i++) {
+        float d = fabsf(da[i] - db[i]);
+        if (d > maxdiff) maxdiff = d;
+    }
+    assert(maxdiff < 5e-2f);
+
+    mlx_array_free(lb_f32);
+    mlx_array_free(la_f32);
+    mlx_array_free(logits_b);
+    mlx_array_free(ids_c2);
+    mlx_array_free(ids_c1);
+    kvcache_free(&kv_b);
+    mlx_array_free(logits_a);
+    mlx_array_free(ids_all);
+    kvcache_free(&kv_a);
+    engine_model_free(&em);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -801,6 +928,9 @@ int main(void) {
 
     test_incremental_equals_full_quant();
     printf("  test_incremental_equals_full_quant: passed\n");
+
+    test_chunked_prefill_equals_full();
+    printf("  test_chunked_prefill_equals_full: passed\n");
 
     weights_free(&w_quant);
     model_config_free(&cfg_quant);

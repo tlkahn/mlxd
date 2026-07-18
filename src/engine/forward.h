@@ -8,6 +8,9 @@
 
 #include <stdbool.h>
 
+/* *out must be a live mlx_array (e.g. from mlx_array_new()). On success the
+   previous value is freed and replaced; unchanged on failure. */
+
 int fwd_linear(mlx_array *out, mlx_array x, const weight_triplet_t *tri,
                const model_config_t *cfg, mlx_stream s);
 

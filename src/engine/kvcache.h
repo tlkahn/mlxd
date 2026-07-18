@@ -29,6 +29,8 @@ void kvcache_free(kvcache_t *kv);
 /* Pre-update offset for a layer == rope offset for the incoming tokens. */
 int kvcache_layer_offset(const kvcache_t *kv, int layer);
 
+/* *k_view and *v_view must be live mlx_array (e.g. from mlx_array_new()); on
+   success the previous values are freed and replaced; unchanged on failure. */
 int kvcache_update(kvcache_t *kv, int layer, mlx_array new_k, mlx_array new_v,
                    mlx_array *k_view, mlx_array *v_view, mlx_stream s);
 
