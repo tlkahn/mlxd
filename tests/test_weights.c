@@ -426,6 +426,64 @@ static void test_expected_names_non_qwen3(void) {
     assert(weights_expected_names(&cfg, NULL, 0) == 0);
 }
 
+/* ---- Cycle D0-1: pin exact emission order ---- */
+
+static void test_expected_names_qwen3_exact_order(void) {
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.has_qk_norm = true;
+    cfg.tie_word_embeddings = false;
+
+    int count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 14);
+
+    weight_expected_t names[14];
+    int rc = weights_expected_names(&cfg, names, 14);
+    assert(rc == 14);
+
+    typedef struct { const char *name; weight_kind_t kind; } expect_t;
+    static const expect_t expected[] = {
+        {"model.embed_tokens",                          WEIGHT_KIND_EMBED},
+        {"model.layers.0.self_attn.q_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.self_attn.k_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.self_attn.v_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.self_attn.o_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.mlp.gate_proj",                WEIGHT_KIND_MATMUL},
+        {"model.layers.0.mlp.up_proj",                  WEIGHT_KIND_MATMUL},
+        {"model.layers.0.mlp.down_proj",                WEIGHT_KIND_MATMUL},
+        {"model.layers.0.input_layernorm",              WEIGHT_KIND_NORM},
+        {"model.layers.0.post_attention_layernorm",     WEIGHT_KIND_NORM},
+        {"model.layers.0.self_attn.q_norm",             WEIGHT_KIND_NORM},
+        {"model.layers.0.self_attn.k_norm",             WEIGHT_KIND_NORM},
+        {"model.norm",                                  WEIGHT_KIND_NORM},
+        {"lm_head",                                     WEIGHT_KIND_MATMUL},
+    };
+
+    for (int i = 0; i < 14; i++) {
+        assert(strcmp(names[i].name, expected[i].name) == 0);
+        assert(names[i].kind == expected[i].kind);
+    }
+}
+
+static void test_expected_names_other_families_zero(void) {
+    static const model_family_t others[] = {
+        MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3, MODEL_GEMMA4,
+        MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
+        MODEL_LLAMA, MODEL_MISTRAL, MODEL_LFM2,
+        MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
+    };
+
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        model_config_t cfg = {0};
+        cfg.family = others[i];
+        cfg.weight_prefix = "model";
+        cfg.num_hidden_layers = 2;
+        assert(weights_expected_names(&cfg, NULL, 0) == 0);
+    }
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -485,6 +543,12 @@ int main(void) {
 
     test_expected_names_non_qwen3();
     printf("  test_expected_names_non_qwen3: passed\n");
+
+    test_expected_names_qwen3_exact_order();
+    printf("  test_expected_names_qwen3_exact_order: passed\n");
+
+    test_expected_names_other_families_zero();
+    printf("  test_expected_names_other_families_zero: passed\n");
 
     printf("test_weights: all passed\n");
     return 0;
