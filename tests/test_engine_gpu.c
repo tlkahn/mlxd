@@ -1,5 +1,6 @@
 #include "engine/engine.h"
 #include "engine/engine_internal.h"
+#include "engine/emodel.h"
 #include "mlxbridge/mlxbridge.h"
 
 #include <assert.h>
@@ -14,6 +15,10 @@
 #endif
 
 #define FIXTURES MLXD_FIXTURES_DIR
+
+/* Pinned greedy sequence for prompt {1,2}, max_tokens=8 on tiny_qwen3.
+   Guards silent but still-deterministic decode/prefill regressions. */
+static const int32_t kOracle[] = {76, 112, 63, 76, 195, 184, 121, 189};
 
 static load_state_t poll_load_terminal(engine_t *eng, int timeout_ms) {
     for (int i = 0; i < timeout_ms; i++) {
@@ -190,11 +195,54 @@ static void test_generate_deterministic(void) {
     for (int i = 0; i < max_new; i++)
         assert(seq_a[i] == seq_b[i]);
 
+    assert(max_new == (int)(sizeof kOracle / sizeof kOracle[0]));
+    for (int i = 0; i < max_new; i++)
+        assert(seq_a[i] == kOracle[i]);
+
     printf("  deterministic seq:");
     for (int i = 0; i < max_new; i++)
         printf(" %d", seq_a[i]);
     printf("\n");
 
+    engine_destroy(&eng);
+}
+
+/* ---- B3.9: eos_token_ids -> FINISH_STOP --------------------------------- */
+
+static void test_generate_eos_finish_stop(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    /* Install a known future token id as eos without touching the fixture. */
+    const int stop_at = 2; /* third token: 63 */
+    eng.model->cfg.eos_token_ids[0] = (uint32_t)kOracle[stop_at];
+    eng.model->cfg.num_eos_tokens = 1;
+
+    stream_t *s = stream_create(32);
+    stream_retain(s);
+    int32_t prompt[] = {1, 2};
+    engine_cmd_t *gen = calloc(1, sizeof(*gen));
+    assert(gen);
+    gen->tag = CMD_GENERATE;
+    gen->generate.token_ids = malloc(sizeof(prompt));
+    memcpy(gen->generate.token_ids, prompt, sizeof(prompt));
+    gen->generate.token_count = 2;
+    gen->generate.params.max_tokens = 8; /* > stop_at+1 so length is not the reason */
+    gen->generate.stream = s;
+    engine_post(&eng, gen);
+
+    int32_t got[16];
+    finish_reason_t reason = FINISH_LENGTH;
+    int n = collect_tokens(s, got, 16, &reason);
+
+    assert(n == stop_at + 1);
+    for (int i = 0; i < n; i++)
+        assert(got[i] == kOracle[i]);
+    assert(reason == FINISH_STOP);
+
+    stream_release(s);
     engine_destroy(&eng);
 }
 
@@ -311,6 +359,9 @@ int main(void) {
 
     test_generate_deterministic();
     printf("  test_generate_deterministic: passed\n");
+
+    test_generate_eos_finish_stop();
+    printf("  test_generate_eos_finish_stop: passed\n");
 
     test_cancel_mid_generate_real();
     printf("  test_cancel_mid_generate_real: passed\n");
