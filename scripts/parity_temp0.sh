@@ -80,7 +80,7 @@ ORACLE_TEXT=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
 
 # --- mlxd tokens ---
 
-MLXD_TEXT=$("$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" --raw --temperature 0 --max-tokens "$MAX_TOKENS" | head -c -1)
+MLXD_TEXT=$("$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" --raw --temperature 0 --max-tokens "$MAX_TOKENS")
 
 # --- Compare ---
 
