@@ -390,7 +390,8 @@ static int cmd_run(int argc, char **argv) {
         goto cleanup;
     }
 
-    chat_template = read_chat_template(model_dir);
+    if (!opts.raw)
+        chat_template = read_chat_template(model_dir);
 
     prompt_buf = cli_resolve_run_prompt(opts.prompt, stdin);
     if (!prompt_buf) {
@@ -401,7 +402,7 @@ static int cmd_run(int argc, char **argv) {
     int n_ids = -1;
     const char *build_err = NULL;
 
-    if (chat_template && !opts.raw) {
+    if (chat_template) {
         char *messages_json = cli_run_messages_json(prompt_buf);
         if (!messages_json) {
             fprintf(stderr, "mlxd run: failed to build messages JSON\n");
