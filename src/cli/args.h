@@ -44,6 +44,7 @@ typedef struct {
     bool stream;
     bool raw;
     bool token_ids;
+    bool no_think;
 } cli_run_opts_t;
 
 typedef struct {
