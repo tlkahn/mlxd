@@ -149,13 +149,17 @@ int sampler_apply_top_p(mlx_array logits, float p, mlx_stream s, mlx_array *out)
 
     /* Ascending sort, softmax, inclusive cumsum: tokens whose bottom-tail mass
      * stays <= 1-p fall outside the nucleus. Recover the smallest in-nucleus
-     * logit as a scalar cutoff so the mask applies in original vocab order. */
+     * logit as a scalar cutoff so the mask applies in original vocab order.
+     * The cutoff is clamped to max(logits) so the argmax always survives -
+     * prevents empty nucleus when (1-p) rounds to 1.0 in float32. */
     mlx_array sorted = mlx_array_new();
     mlx_array probs = mlx_array_new();
     mlx_array cumsum = mlx_array_new();
     mlx_array in_nucleus = mlx_array_new();
     mlx_array nucleus_logits = mlx_array_new();
     mlx_array cutoff = mlx_array_new();
+    mlx_array max_logit = mlx_array_new();
+    mlx_array clamped = mlx_array_new();
     mlx_array mask = mlx_array_new();
     mlx_array threshold = mlx_array_new_float(1.0f - p);
     mlx_array pos_inf = mlx_array_new_float(INFINITY);
@@ -167,7 +171,9 @@ int sampler_apply_top_p(mlx_array logits, float p, mlx_stream s, mlx_array *out)
         !MLXB_CHECK(mlx_greater(&in_nucleus, cumsum, threshold, s)) ||
         !MLXB_CHECK(mlx_where(&nucleus_logits, in_nucleus, sorted, pos_inf, s)) ||
         !MLXB_CHECK(mlx_min_axis(&cutoff, nucleus_logits, -1, true, s)) ||
-        !MLXB_CHECK(mlx_greater_equal(&mask, logits, cutoff, s)))
+        !MLXB_CHECK(mlx_max_axis(&max_logit, logits, -1, true, s)) ||
+        !MLXB_CHECK(mlx_minimum(&clamped, cutoff, max_logit, s)) ||
+        !MLXB_CHECK(mlx_greater_equal(&mask, logits, clamped, s)))
         goto out;
     rc = 0;
 
@@ -178,6 +184,8 @@ out:
     mlx_array_free(in_nucleus);
     mlx_array_free(nucleus_logits);
     mlx_array_free(cutoff);
+    mlx_array_free(max_logit);
+    mlx_array_free(clamped);
     mlx_array_free(threshold);
     mlx_array_free(pos_inf);
     if (rc != 0) {

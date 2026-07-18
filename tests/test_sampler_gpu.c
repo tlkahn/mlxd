@@ -191,6 +191,47 @@ static void test_top_p_zero_greedy(void) {
     mlx_stream_free(s);
 }
 
+/* ---- Review fix E: top_p tiny-positive-p never empties the nucleus ---- */
+
+static void test_top_p_tiny_p_top1(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+    float out[VOCAB];
+
+    /* Uniform logits: softmax = 0.125 each, inclusive cumsum last = 1.0.
+     * With p=1e-9, threshold = 1.0 - 1e-9 rounds to 1.0 in float32.
+     * cumsum > 1.0 is false everywhere -> all masked to -inf at HEAD (bug).
+     * Correct: all elements survive (all tie for argmax). */
+    {
+        const float uniform[VOCAB] = {0, 0, 0, 0, 0, 0, 0, 0};
+        mlx_array logits = logits_1xv(uniform);
+        mlx_array filtered = mlx_array_new();
+        assert(sampler_apply_top_p(logits, 1e-9f, s, &filtered) == 0);
+        readback_1xv(filtered, out);
+        for (int i = 0; i < VOCAB; i++)
+            assert(out[i] == 0.0f);
+        mlx_array_free(filtered);
+        mlx_array_free(logits);
+    }
+
+    /* kLogits with p=1e-9: only idx 2 (argmax=3.5) survives, rest -inf. */
+    {
+        mlx_array logits = logits_1xv(kLogits);
+        mlx_array filtered = mlx_array_new();
+        assert(sampler_apply_top_p(logits, 1e-9f, s, &filtered) == 0);
+        readback_1xv(filtered, out);
+        for (int i = 0; i < VOCAB; i++) {
+            if (i == 2)
+                assert(out[i] == kLogits[i]);
+            else
+                assert(isinf(out[i]) && out[i] < 0);
+        }
+        mlx_array_free(filtered);
+        mlx_array_free(logits);
+    }
+
+    mlx_stream_free(s);
+}
+
 /* ---- Cycle 5: min_p filter (no oracle, pure logit-space) ---- */
 
 static void test_min_p_filter(void) {
@@ -486,6 +527,7 @@ int main(void) {
     test_top_k1_equals_greedy();
     test_top_p_filter();
     test_top_p_zero_greedy();
+    test_top_p_tiny_p_top1();
     test_min_p_filter();
     test_logprob_computation();
     test_seeded_reproducibility();

@@ -24,8 +24,8 @@ void sampler_key_free(sampler_key_t *k);
 int sampler_apply_top_k(mlx_array logits, int k, mlx_stream s, mlx_array *out);
 
 /* top_p (nucleus) filter: mask tokens outside the smallest set whose
- * probability mass reaches p. p >= 1 returns the logits unchanged (lazy copy).
- * p <= 0 degenerates to top-1 (keeps only the argmax logit).
+ * probability mass reaches p. The nucleus always contains the argmax.
+ * p >= 1 returns logits unchanged; p <= 0 degenerates to top-1.
  * Caller owns *out. */
 int sampler_apply_top_p(mlx_array logits, float p, mlx_stream s, mlx_array *out);
 
