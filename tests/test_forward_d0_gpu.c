@@ -981,6 +981,278 @@ static void test_f7c_sliding_window_attention(void) {
     weights_free(&w);
 }
 
+/* ---- Combo: F3+F5 offset norms through sandwich decoder ---- */
+
+static void test_combo_f3_f5_offset_sandwich(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+    put_mlp_weights(&w);
+    put_norm(&w, "layers.0.input_layernorm.weight", 21);
+    put_norm(&w, "layers.0.post_attention_layernorm.weight", 22);
+    put_norm(&w, "layers.0.pre_feedforward_layernorm.weight", 23);
+    put_norm(&w, "layers.0.post_feedforward_layernorm.weight", 24);
+
+    mlx_array x = det_input(3, 500);
+    model_config_t cfg = base_cfg();
+    cfg.has_pre_ff_norm = true;
+    cfg.norm_has_offset = true;
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    mlx_array out = mlx_array_new();
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    kvcache_free(&kv);
+
+    /* Manual sandwich composition with offset=true on all four norms */
+    mlx_array ln_in = get_w(&w, "layers.0.input_layernorm.weight");
+    mlx_array ln_pa = get_w(&w, "layers.0.post_attention_layernorm.weight");
+    mlx_array ln_pre = get_w(&w, "layers.0.pre_feedforward_layernorm.weight");
+    mlx_array ln_post = get_w(&w, "layers.0.post_feedforward_layernorm.weight");
+
+    kvcache_t kv2;
+    assert(kvcache_init(&kv2, 1, NKV, HD) == 0);
+    mlx_array normed1 = mlx_array_new(), attn_out = mlx_array_new();
+    mlx_array attn_normed = mlx_array_new(), h = mlx_array_new();
+    mlx_array mlp_in = mlx_array_new(), mlp_out = mlx_array_new();
+    mlx_array mlp_normed = mlx_array_new(), ref = mlx_array_new();
+    float eps = cfg.rms_norm_eps;
+    assert(fwd_rmsnorm(&normed1, x, ln_in, eps, true, gpu) == 0);
+    assert(fwd_attention(&attn_out, normed1, 0, &w, &cfg, &kv2, gpu) == 0);
+    assert(fwd_rmsnorm(&attn_normed, attn_out, ln_pa, eps, true, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&h, x, attn_normed, gpu)));
+    assert(fwd_rmsnorm(&mlp_in, h, ln_pre, eps, true, gpu) == 0);
+    assert(fwd_swiglu(&mlp_out, mlp_in, 0, &w, &cfg, gpu) == 0);
+    assert(fwd_rmsnorm(&mlp_normed, mlp_out, ln_post, eps, true, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&ref, h, mlp_normed, gpu)));
+    kvcache_free(&kv2);
+
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    /* Sensitivity: offset-true result differs from offset-false composition */
+    kvcache_t kv3;
+    assert(kvcache_init(&kv3, 1, NKV, HD) == 0);
+    mlx_array n1f = mlx_array_new(), af = mlx_array_new();
+    mlx_array anf = mlx_array_new(), hf = mlx_array_new();
+    mlx_array mif = mlx_array_new(), mof = mlx_array_new();
+    mlx_array mnf = mlx_array_new(), reff = mlx_array_new();
+    assert(fwd_rmsnorm(&n1f, x, ln_in, eps, false, gpu) == 0);
+    assert(fwd_attention(&af, n1f, 0, &w, &cfg, &kv3, gpu) == 0);
+    assert(fwd_rmsnorm(&anf, af, ln_pa, eps, false, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&hf, x, anf, gpu)));
+    assert(fwd_rmsnorm(&mif, hf, ln_pre, eps, false, gpu) == 0);
+    assert(fwd_swiglu(&mof, mif, 0, &w, &cfg, gpu) == 0);
+    assert(fwd_rmsnorm(&mnf, mof, ln_post, eps, false, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&reff, hf, mnf, gpu)));
+    kvcache_free(&kv3);
+
+    assert(max_abs_diff(out, reff) > 1e-2f);
+
+    mlx_array_free(reff);
+    mlx_array_free(mnf);
+    mlx_array_free(mof);
+    mlx_array_free(mif);
+    mlx_array_free(hf);
+    mlx_array_free(anf);
+    mlx_array_free(af);
+    mlx_array_free(n1f);
+    mlx_array_free(ref);
+    mlx_array_free(mlp_normed);
+    mlx_array_free(mlp_out);
+    mlx_array_free(mlp_in);
+    mlx_array_free(h);
+    mlx_array_free(attn_normed);
+    mlx_array_free(attn_out);
+    mlx_array_free(normed1);
+    mlx_array_free(ln_post);
+    mlx_array_free(ln_pre);
+    mlx_array_free(ln_pa);
+    mlx_array_free(ln_in);
+    mlx_array_free(out);
+    mlx_array_free(x);
+    weights_free(&w);
+}
+
+/* ---- Combo: F3 offset through qk-norm in attention ---- */
+
+static void test_combo_f3_qk_norm_offset(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+    int nw[] = {HD};
+    mlx_array q_norm_raw = det_bf16(nw, 1, 801);
+    mlx_array k_norm_raw = det_bf16(nw, 1, 802);
+    put_tensor(&w, "layers.0.self_attn.q_norm.weight", q_norm_raw);
+    put_tensor(&w, "layers.0.self_attn.k_norm.weight", k_norm_raw);
+
+    /* Build map B: pre-offset weights = bf16(1) + raw, so that
+       fwd_rmsnorm(x, W_B, offset=false) == fwd_rmsnorm(x, W_A, offset=true) */
+    weights_t wb;
+    weights_begin(&wb);
+    put_attn_weights(&wb);
+
+    mlx_array q_raw = mlx_array_new(), k_raw = mlx_array_new();
+    assert(weights_get(&q_raw, &w, "layers.0.self_attn.q_norm.weight") == 0);
+    assert(weights_get(&k_raw, &w, "layers.0.self_attn.k_norm.weight") == 0);
+    mlx_array one_f32 = mlx_array_new_float(1.0f);
+    mlx_array one_bf16 = mlx_array_new();
+    assert(MLXB_CHECK(mlx_astype(&one_bf16, one_f32, MLX_BFLOAT16, gpu)));
+    mlx_array q_pre = mlx_array_new(), k_pre = mlx_array_new();
+    assert(MLXB_CHECK(mlx_add(&q_pre, one_bf16, q_raw, gpu)));
+    assert(MLXB_CHECK(mlx_add(&k_pre, one_bf16, k_raw, gpu)));
+    put_tensor(&wb, "layers.0.self_attn.q_norm.weight", q_pre);
+    put_tensor(&wb, "layers.0.self_attn.k_norm.weight", k_pre);
+
+    mlx_array x = det_input(3, 800);
+
+    /* Config A: has_qk_norm + norm_has_offset=true, map w (raw weights) */
+    model_config_t cfg_a = base_cfg();
+    cfg_a.has_qk_norm = true;
+    cfg_a.norm_has_offset = true;
+
+    kvcache_t kv_a;
+    assert(kvcache_init(&kv_a, 1, NKV, HD) == 0);
+    mlx_array out_a = mlx_array_new();
+    assert(fwd_attention(&out_a, x, 0, &w, &cfg_a, &kv_a, gpu) == 0);
+    kvcache_free(&kv_a);
+
+    /* Config B: has_qk_norm + norm_has_offset=false, map wb (pre-offset weights) */
+    model_config_t cfg_b = base_cfg();
+    cfg_b.has_qk_norm = true;
+    cfg_b.norm_has_offset = false;
+
+    kvcache_t kv_b;
+    assert(kvcache_init(&kv_b, 1, NKV, HD) == 0);
+    mlx_array out_b = mlx_array_new();
+    assert(fwd_attention(&out_b, x, 0, &wb, &cfg_b, &kv_b, gpu) == 0);
+    kvcache_free(&kv_b);
+
+    /* Metamorphic: offset-true on raw == offset-false on pre-offset */
+    assert(max_abs_diff(out_a, out_b) < 2e-3f);
+
+    /* Sensitivity: offset-true vs offset-false on the SAME map A differ */
+    model_config_t cfg_no = base_cfg();
+    cfg_no.has_qk_norm = true;
+    cfg_no.norm_has_offset = false;
+
+    kvcache_t kv_no;
+    assert(kvcache_init(&kv_no, 1, NKV, HD) == 0);
+    mlx_array out_no = mlx_array_new();
+    assert(fwd_attention(&out_no, x, 0, &w, &cfg_no, &kv_no, gpu) == 0);
+    kvcache_free(&kv_no);
+
+    assert(max_abs_diff(out_a, out_no) > 1e-2f);
+
+    mlx_array_free(out_no);
+    mlx_array_free(out_b);
+    mlx_array_free(out_a);
+    mlx_array_free(x);
+    mlx_array_free(one_bf16);
+    mlx_array_free(one_f32);
+    mlx_array_free(k_raw);
+    mlx_array_free(q_raw);
+    weights_free(&wb);
+    weights_free(&w);
+}
+
+/* ---- Combo: gemma3-profile decoder (F1+F3+F5+F6+F7) ---- */
+
+static void test_combo_gemma3_profile_decoder(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+    put_mlp_weights(&w);
+    put_norm(&w, "layers.0.input_layernorm.weight", 21);
+    put_norm(&w, "layers.0.post_attention_layernorm.weight", 22);
+    put_norm(&w, "layers.0.pre_feedforward_layernorm.weight", 23);
+    put_norm(&w, "layers.0.post_feedforward_layernorm.weight", 24);
+    int nw[] = {HD};
+    put_tensor(&w, "layers.0.self_attn.q_norm.weight", det_bf16(nw, 1, 901));
+    put_tensor(&w, "layers.0.self_attn.k_norm.weight", det_bf16(nw, 1, 902));
+
+    model_config_t cfg = base_cfg();
+    cfg.query_pre_attn_scalar = 4 * HD;
+    cfg.norm_has_offset = true;
+    cfg.has_pre_ff_norm = true;
+    cfg.has_qk_norm = true;
+    cfg.has_sliding_window = true;
+    cfg.sliding_window = 3;
+    cfg.sliding_window_pattern = 6;
+    cfg.has_explicit_layer_types = true;
+    cfg.layer_is_global[0] = false;
+    cfg.rope_local_base_freq = 5000.0f;
+
+    mlx_array x = det_input(4, 900);
+    float eps = cfg.rms_norm_eps;
+
+    /* Prefill: full decoder layer with gemma3-like config */
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    mlx_array out = mlx_array_new();
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+
+    /* Manual sandwich reference with offset norms */
+    mlx_array ln_in = get_w(&w, "layers.0.input_layernorm.weight");
+    mlx_array ln_pa = get_w(&w, "layers.0.post_attention_layernorm.weight");
+    mlx_array ln_pre = get_w(&w, "layers.0.pre_feedforward_layernorm.weight");
+    mlx_array ln_post = get_w(&w, "layers.0.post_feedforward_layernorm.weight");
+
+    kvcache_t kv2;
+    assert(kvcache_init(&kv2, 1, NKV, HD) == 0);
+    mlx_array normed1 = mlx_array_new(), attn_out = mlx_array_new();
+    mlx_array attn_normed = mlx_array_new(), h = mlx_array_new();
+    mlx_array mlp_in = mlx_array_new(), mlp_out = mlx_array_new();
+    mlx_array mlp_normed = mlx_array_new(), ref = mlx_array_new();
+    assert(fwd_rmsnorm(&normed1, x, ln_in, eps, true, gpu) == 0);
+    assert(fwd_attention(&attn_out, normed1, 0, &w, &cfg, &kv2, gpu) == 0);
+    assert(fwd_rmsnorm(&attn_normed, attn_out, ln_pa, eps, true, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&h, x, attn_normed, gpu)));
+    assert(fwd_rmsnorm(&mlp_in, h, ln_pre, eps, true, gpu) == 0);
+    assert(fwd_swiglu(&mlp_out, mlp_in, 0, &w, &cfg, gpu) == 0);
+    assert(fwd_rmsnorm(&mlp_normed, mlp_out, ln_post, eps, true, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&ref, h, mlp_normed, gpu)));
+    kvcache_free(&kv2);
+
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    /* Decode step: one token after the prefill */
+    mlx_array x1 = det_input(1, 901);
+    mlx_array out1 = mlx_array_new();
+    assert(fwd_decoder_layer(&out1, x1, 0, &w, &cfg, &kv, gpu) == 0);
+    assert(mlx_array_dim(out1, 1) == 1);
+
+    /* Decode reference via second kvcache */
+    kvcache_t kv3;
+    assert(kvcache_init(&kv3, 1, NKV, HD) == 0);
+    mlx_array dec_pre_out = mlx_array_new();
+    assert(fwd_decoder_layer(&dec_pre_out, x, 0, &w, &cfg, &kv3, gpu) == 0);
+    mlx_array dec_out = mlx_array_new();
+    assert(fwd_decoder_layer(&dec_out, x1, 0, &w, &cfg, &kv3, gpu) == 0);
+    assert(max_abs_diff(out1, dec_out) < 1e-6f);
+    kvcache_free(&kv3);
+
+    mlx_array_free(dec_out);
+    mlx_array_free(dec_pre_out);
+    mlx_array_free(out1);
+    mlx_array_free(x1);
+    mlx_array_free(ref);
+    mlx_array_free(mlp_normed);
+    mlx_array_free(mlp_out);
+    mlx_array_free(mlp_in);
+    mlx_array_free(h);
+    mlx_array_free(attn_normed);
+    mlx_array_free(attn_out);
+    mlx_array_free(normed1);
+    mlx_array_free(ln_post);
+    mlx_array_free(ln_pre);
+    mlx_array_free(ln_pa);
+    mlx_array_free(ln_in);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+    mlx_array_free(x);
+    weights_free(&w);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -1007,6 +1279,15 @@ int main(void) {
 
     test_f7c_sliding_window_attention();
     printf("test_f7c_sliding_window_attention passed\n");
+
+    test_combo_f3_f5_offset_sandwich();
+    printf("test_combo_f3_f5_offset_sandwich passed\n");
+
+    test_combo_f3_qk_norm_offset();
+    printf("test_combo_f3_qk_norm_offset passed\n");
+
+    test_combo_gemma3_profile_decoder();
+    printf("test_combo_gemma3_profile_decoder passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;
