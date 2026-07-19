@@ -163,16 +163,38 @@ cleanup:
 }
 
 int fwd_rmsnorm(mlx_array *out, mlx_array x, mlx_array weight, float eps,
-                mlx_stream s) {
+                bool add_unit_offset, mlx_stream s) {
     if (!out) return -1;
+    int rc = -1;
     mlx_array result = mlx_array_new();
-    if (!MLXB_CHECK(mlx_fast_rms_norm(&result, x, weight, eps, s))) {
-        mlx_array_free(result);
-        return -1;
+    mlx_array w_eff = mlx_array_new();
+
+    if (add_unit_offset) {
+        mlx_array one_f32 = mlx_array_new_float(1.0f);
+        mlx_array one = mlx_array_new();
+        if (!MLXB_CHECK(mlx_astype(&one, one_f32, MLX_BFLOAT16, s)) ||
+            !MLXB_CHECK(mlx_add(&w_eff, one, weight, s))) {
+            mlx_array_free(one);
+            mlx_array_free(one_f32);
+            goto cleanup;
+        }
+        mlx_array_free(one);
+        mlx_array_free(one_f32);
+    } else {
+        if (!MLXB_CHECK(mlx_array_set(&w_eff, weight))) goto cleanup;
     }
+
+    if (!MLXB_CHECK(mlx_fast_rms_norm(&result, x, w_eff, eps, s)))
+        goto cleanup;
     mlx_array_free(*out);
     *out = result;
-    return 0;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(w_eff);
+    mlx_array_free(result);
+    return rc;
 }
 
 /* Add {base}.bias to *io in place (broadcast over [B,S,D]). */
@@ -281,8 +303,10 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
             mlx_array_free(q_norm_w);
             goto cleanup;
         }
-        if (fwd_rmsnorm(&q_normed, q_reshaped, q_norm_w, cfg->rms_norm_eps, s) != 0 ||
-            fwd_rmsnorm(&k_normed, k_reshaped, k_norm_w, cfg->rms_norm_eps, s) != 0) {
+        if (fwd_rmsnorm(&q_normed, q_reshaped, q_norm_w, cfg->rms_norm_eps,
+                        cfg->norm_has_offset, s) != 0 ||
+            fwd_rmsnorm(&k_normed, k_reshaped, k_norm_w, cfg->rms_norm_eps,
+                        cfg->norm_has_offset, s) != 0) {
             mlx_array_free(k_norm_w);
             mlx_array_free(q_norm_w);
             goto cleanup;
@@ -444,7 +468,8 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
     weights_tensor_name(name, sizeof(name), cfg, layer, "input_layernorm");
     snprintf(wname, sizeof(wname), "%s.weight", name);
     if (weights_get(&ln1_w, w, wname) != 0) goto cleanup;
-    if (fwd_rmsnorm(&normed1, x, ln1_w, cfg->rms_norm_eps, s) != 0) goto cleanup;
+    if (fwd_rmsnorm(&normed1, x, ln1_w, cfg->rms_norm_eps,
+                    cfg->norm_has_offset, s) != 0) goto cleanup;
 
     /* attention */
     if (fwd_attention(&attn_out, normed1, layer, w, cfg, kv, s) != 0) goto cleanup;
@@ -456,7 +481,8 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
     weights_tensor_name(name, sizeof(name), cfg, layer, "post_attention_layernorm");
     snprintf(wname, sizeof(wname), "%s.weight", name);
     if (weights_get(&ln2_w, w, wname) != 0) goto cleanup;
-    if (fwd_rmsnorm(&normed2, h1, ln2_w, cfg->rms_norm_eps, s) != 0) goto cleanup;
+    if (fwd_rmsnorm(&normed2, h1, ln2_w, cfg->rms_norm_eps,
+                    cfg->norm_has_offset, s) != 0) goto cleanup;
 
     /* MLP */
     if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;

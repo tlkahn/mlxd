@@ -319,6 +319,49 @@ static void test_f2_qkv_bias(void) {
     weights_free(&w);
 }
 
+/* ---- F3: rmsnorm (1 + weight) offset ---- */
+
+static void test_f3_rmsnorm_offset(void) {
+    int xs[] = {1, 3, HID};
+    int ws[] = {HID};
+    mlx_array x = det_bf16(xs, 3, 300);
+    mlx_array wgt = det_bf16(ws, 1, 301);
+    float eps = 1e-6f;
+
+    /* offset on: equals fast_rms_norm(x, bf16(1) + w) */
+    mlx_array out = mlx_array_new();
+    assert(fwd_rmsnorm(&out, x, wgt, eps, true, gpu) == 0);
+
+    mlx_array one_f32 = mlx_array_new_float(1.0f);
+    mlx_array one = mlx_array_new();
+    mlx_array weff = mlx_array_new();
+    mlx_array ref = mlx_array_new();
+    assert(MLXB_CHECK(mlx_astype(&one, one_f32, MLX_BFLOAT16, gpu)));
+    assert(MLXB_CHECK(mlx_add(&weff, one, wgt, gpu)));
+    assert(MLXB_CHECK(mlx_fast_rms_norm(&ref, x, weff, eps, gpu)));
+    assert(max_abs_diff(out, ref) < 1e-3f);
+
+    /* differs from the no-offset result */
+    mlx_array plain = mlx_array_new();
+    assert(MLXB_CHECK(mlx_fast_rms_norm(&plain, x, wgt, eps, gpu)));
+    assert(max_abs_diff(out, plain) > 1e-2f);
+
+    /* offset off: unchanged plain fast_rms_norm */
+    mlx_array out_plain = mlx_array_new();
+    assert(fwd_rmsnorm(&out_plain, x, wgt, eps, false, gpu) == 0);
+    assert(max_abs_diff(out_plain, plain) < 1e-6f);
+
+    mlx_array_free(out_plain);
+    mlx_array_free(plain);
+    mlx_array_free(ref);
+    mlx_array_free(weff);
+    mlx_array_free(one);
+    mlx_array_free(one_f32);
+    mlx_array_free(out);
+    mlx_array_free(wgt);
+    mlx_array_free(x);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -327,6 +370,9 @@ int main(void) {
 
     test_f2_qkv_bias();
     printf("test_f2_qkv_bias passed\n");
+
+    test_f3_rmsnorm_offset();
+    printf("test_f3_rmsnorm_offset passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;

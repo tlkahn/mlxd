@@ -17,8 +17,10 @@ int fwd_linear(mlx_array *out, mlx_array x, const weight_triplet_t *tri,
 int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
               const model_config_t *cfg, mlx_stream s);
 
+/* add_unit_offset applies the gemma-style (1 + weight) variant: bf16 1.0 is
+   added to the raw weight before the norm. */
 int fwd_rmsnorm(mlx_array *out, mlx_array x, mlx_array weight, float eps,
-                mlx_stream s);
+                bool add_unit_offset, mlx_stream s);
 
 int fwd_attention(mlx_array *out, mlx_array x, int layer,
                   const weights_t *w, const model_config_t *cfg,
