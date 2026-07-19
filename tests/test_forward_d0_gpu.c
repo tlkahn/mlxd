@@ -210,6 +210,133 @@ static mlx_array manual_attention(mlx_array x, const weights_t *w,
                                mask_mode, mask_arr, false);
 }
 
+/* Manual decode-step reference: prefills x_pre (S tokens at offset 0), then
+ * decodes x_dec (1 token at offset S), trimming K/V to the last kv_keep
+ * positions before SDPA. Pass kv_keep=0 to use all positions (no trim). */
+static mlx_array manual_decode_ref(mlx_array x_pre, mlx_array x_dec,
+                                   const weights_t *w, float scale,
+                                   float base, float rope_scale,
+                                   int kv_keep) {
+    int S = mlx_array_dim(x_pre, 1);
+    int decode_offset = S;
+
+    const char *names[] = {"layers.0.self_attn.q_proj.weight",
+                           "layers.0.self_attn.k_proj.weight",
+                           "layers.0.self_attn.v_proj.weight"};
+
+    /* Project prefill and decode tokens */
+    mlx_array proj_pre[3], proj_dec[3];
+    for (int i = 0; i < 3; i++) {
+        mlx_array wt = mlx_array_new(), wtt = mlx_array_new();
+        proj_pre[i] = mlx_array_new();
+        proj_dec[i] = mlx_array_new();
+        assert(weights_get(&wt, w, names[i]) == 0);
+        assert(MLXB_CHECK(mlx_transpose(&wtt, wt, gpu)));
+        assert(MLXB_CHECK(mlx_matmul(&proj_pre[i], x_pre, wtt, gpu)));
+        assert(MLXB_CHECK(mlx_matmul(&proj_dec[i], x_dec, wtt, gpu)));
+        mlx_array_free(wtt);
+        mlx_array_free(wt);
+    }
+
+    int B = 1;
+    int q_pre_shape[] = {B, S, NH, HD};
+    int kv_pre_shape[] = {B, S, NKV, HD};
+    int q_dec_shape[] = {B, 1, NH, HD};
+    int kv_dec_shape[] = {B, 1, NKV, HD};
+    int perm[] = {0, 2, 1, 3};
+
+    /* Reshape and transpose prefill projections */
+    mlx_array qr_pre = mlx_array_new(), kr_pre = mlx_array_new(), vr_pre = mlx_array_new();
+    mlx_array qt_pre = mlx_array_new(), kt_pre = mlx_array_new(), vt_pre = mlx_array_new();
+    assert(MLXB_CHECK(mlx_reshape(&qr_pre, proj_pre[0], q_pre_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&kr_pre, proj_pre[1], kv_pre_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&vr_pre, proj_pre[2], kv_pre_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&qt_pre, qr_pre, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&kt_pre, kr_pre, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&vt_pre, vr_pre, perm, 4, gpu)));
+
+    /* Reshape and transpose decode projections */
+    mlx_array qr_dec = mlx_array_new(), kr_dec = mlx_array_new(), vr_dec = mlx_array_new();
+    mlx_array qt_dec = mlx_array_new(), kt_dec = mlx_array_new(), vt_dec = mlx_array_new();
+    assert(MLXB_CHECK(mlx_reshape(&qr_dec, proj_dec[0], q_dec_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&kr_dec, proj_dec[1], kv_dec_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&vr_dec, proj_dec[2], kv_dec_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&qt_dec, qr_dec, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&kt_dec, kr_dec, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&vt_dec, vr_dec, perm, 4, gpu)));
+
+    /* Apply rope: prefill at offset 0, decode at offset S */
+    mlx_array qrope_dec = mlx_array_new(), krope_pre = mlx_array_new(), krope_dec = mlx_array_new();
+    assert(MLXB_CHECK(mlx_fast_rope(&krope_pre, kt_pre, HD, false,
+        (mlx_optional_float){.value = base, .has_value = true},
+        rope_scale, 0, (mlx_array){.ctx = NULL}, gpu)));
+    assert(MLXB_CHECK(mlx_fast_rope(&krope_dec, kt_dec, HD, false,
+        (mlx_optional_float){.value = base, .has_value = true},
+        rope_scale, decode_offset, (mlx_array){.ctx = NULL}, gpu)));
+    assert(MLXB_CHECK(mlx_fast_rope(&qrope_dec, qt_dec, HD, false,
+        (mlx_optional_float){.value = base, .has_value = true},
+        rope_scale, decode_offset, (mlx_array){.ctx = NULL}, gpu)));
+
+    /* Concatenate K/V: [prefill, decode] along seq dim (axis 2 after transpose) */
+    mlx_array k_all = mlx_array_new(), v_all = mlx_array_new();
+    mlx_vector_array k_va = mlx_vector_array_new_value(krope_pre);
+    assert(MLXB_CHECK(mlx_vector_array_append_value(k_va, krope_dec)));
+    assert(MLXB_CHECK(mlx_concatenate_axis(&k_all, k_va, 2, gpu)));
+    mlx_vector_array_free(k_va);
+    mlx_vector_array v_va = mlx_vector_array_new_value(vt_pre);
+    assert(MLXB_CHECK(mlx_vector_array_append_value(v_va, vt_dec)));
+    assert(MLXB_CHECK(mlx_concatenate_axis(&v_all, v_va, 2, gpu)));
+    mlx_vector_array_free(v_va);
+
+    /* Trim to last kv_keep positions if requested */
+    mlx_array k_use, v_use;
+    if (kv_keep > 0 && kv_keep < S + 1) {
+        int start = S + 1 - kv_keep;
+        int sl_start[] = {0, 0, start, 0};
+        int sl_stop[] = {1, NKV, S + 1, HD};
+        int sl_strides[] = {1, 1, 1, 1};
+        k_use = mlx_array_new();
+        v_use = mlx_array_new();
+        assert(MLXB_CHECK(mlx_slice(&k_use, k_all, sl_start, 4, sl_stop, 4, sl_strides, 4, gpu)));
+        assert(MLXB_CHECK(mlx_slice(&v_use, v_all, sl_start, 4, sl_stop, 4, sl_strides, 4, gpu)));
+    } else {
+        k_use = k_all;
+        k_all = mlx_array_new();
+        v_use = v_all;
+        v_all = mlx_array_new();
+    }
+
+    /* SDPA: decode query against (trimmed) K/V, no mask */
+    mlx_array attn = mlx_array_new();
+    assert(MLXB_CHECK(mlx_fast_scaled_dot_product_attention(
+        &attn, qrope_dec, k_use, v_use, scale, "",
+        (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu)));
+
+    /* Transpose back and o_proj */
+    mlx_array back = mlx_array_new(), flat = mlx_array_new();
+    int out_shape[] = {B, 1, NH * HD};
+    assert(MLXB_CHECK(mlx_transpose_axes(&back, attn, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&flat, back, out_shape, 3, gpu)));
+
+    mlx_array ow = mlx_array_new(), owt = mlx_array_new();
+    mlx_array result = mlx_array_new();
+    assert(weights_get(&ow, w, "layers.0.self_attn.o_proj.weight") == 0);
+    assert(MLXB_CHECK(mlx_transpose(&owt, ow, gpu)));
+    assert(MLXB_CHECK(mlx_matmul(&result, flat, owt, gpu)));
+
+    mlx_array_free(owt); mlx_array_free(ow);
+    mlx_array_free(flat); mlx_array_free(back); mlx_array_free(attn);
+    mlx_array_free(k_use); mlx_array_free(v_use);
+    mlx_array_free(k_all); mlx_array_free(v_all);
+    mlx_array_free(qrope_dec); mlx_array_free(krope_dec); mlx_array_free(krope_pre);
+    mlx_array_free(qt_dec); mlx_array_free(kt_dec); mlx_array_free(vt_dec);
+    mlx_array_free(qr_dec); mlx_array_free(kr_dec); mlx_array_free(vr_dec);
+    mlx_array_free(qt_pre); mlx_array_free(kt_pre); mlx_array_free(vt_pre);
+    mlx_array_free(qr_pre); mlx_array_free(kr_pre); mlx_array_free(vr_pre);
+    for (int i = 0; i < 3; i++) { mlx_array_free(proj_pre[i]); mlx_array_free(proj_dec[i]); }
+    return result;
+}
+
 /* ---- F1: attention scale from config ---- */
 
 static void test_f1_attn_scale_from_config(void) {
@@ -654,11 +781,16 @@ static void test_f6_per_layer_rope(void) {
                            (mlx_array){.ctx = NULL});
     assert(max_abs_diff(out, ref) < 2e-3f);
 
-    /* decode step keeps absolute positions (offset via kvcache) */
+    /* decode step: numerical reference at offset=3 over full KV */
     mlx_array x1 = det_input(1, 601);
     mlx_array out1 = mlx_array_new();
     assert(fwd_attention(&out1, x1, 0, &w, &cfg, &kv, gpu) == 0);
     assert(mlx_array_dim(out1, 1) == 1);
+    mlx_array dec_ref = manual_decode_ref(x, x1, &w, scale, cfg.rope_theta,
+                                          0.25f, 0);
+    assert(max_abs_diff(out1, dec_ref) < 2e-3f);
+    assert(kvcache_layer_offset(&kv, 0) == 4);
+    mlx_array_free(dec_ref);
     mlx_array_free(out1);
     mlx_array_free(x1);
 
@@ -808,7 +940,8 @@ static void test_f7c_sliding_window_attention(void) {
     mlx_array_free(out);
     kvcache_free(&kv);
 
-    /* Decode 1 token after prefill: kv view trimmed to window */
+    /* Decode 1 token after prefill: kv view trimmed to window=2;
+       numerical reference proves trim + rope offset advance */
     assert(kvcache_init(&kv, 1, NKV, HD) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
@@ -818,6 +951,11 @@ static void test_f7c_sliding_window_attention(void) {
     out = mlx_array_new();
     assert(fwd_attention(&out, x1, 0, &w, &cfg, &kv, gpu) == 0);
     assert(mlx_array_dim(out, 1) == 1);
+    mlx_array dec_ref = manual_decode_ref(x, x1, &w, scale, cfg.rope_theta,
+                                          1.0f, 2);
+    assert(max_abs_diff(out, dec_ref) < 2e-3f);
+    assert(kvcache_layer_offset(&kv, 0) == 5);
+    mlx_array_free(dec_ref);
     mlx_array_free(out);
     mlx_array_free(x1);
     kvcache_free(&kv);
