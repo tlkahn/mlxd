@@ -124,9 +124,11 @@ def gen_softcap():
 
 
 def gen_ple_inputs():
-    """Golden for fwd_ple_inputs: mirrors _get_per_layer_inputs + _project_per_layer_inputs.
+    """Golden for fwd_ple_inputs: reimplements _get_per_layer_inputs + _project_per_layer_inputs.
 
-    Uses small fixed tensors to lock the three scale factors:
+    Faithful reimplementation of the mlx-lm gemma4_text PLE math using raw mlx
+    primitives - not a live call into mlx_lm modules. Uses small fixed tensors
+    to lock the three scale factors:
       sqrt(ple_dim), 1/sqrt(hidden_size), 1/sqrt(2)
     and the RMSNorm + residual combination.
     """
@@ -189,7 +191,12 @@ def gen_ple_inputs():
 
 
 def gen_ple_apply():
-    """Golden for fwd_ple_apply: per-layer gate -> gelu -> multiply -> project -> norm -> residual."""
+    """Golden for fwd_ple_apply: reimplements the DecoderLayer PLE residual path.
+
+    Faithful reimplementation of the mlx-lm gemma4_text DecoderLayer PLE math
+    (gate -> gelu -> multiply -> project -> norm -> residual) using raw mlx
+    primitives - not a live call into mlx_lm modules.
+    """
     print("/* --- PLE apply golden (per-layer gate/project/norm/residual) --- */")
 
     B, S = 1, 2
