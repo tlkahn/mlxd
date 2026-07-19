@@ -475,38 +475,59 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
 
     mlx_array ln1_w = mlx_array_new();
     mlx_array ln2_w = mlx_array_new();
+    mlx_array ln_pre_w = mlx_array_new();
+    mlx_array ln_post_w = mlx_array_new();
     mlx_array normed1 = mlx_array_new();
     mlx_array normed2 = mlx_array_new();
     mlx_array attn_out = mlx_array_new();
+    mlx_array attn_normed = mlx_array_new();
     mlx_array mlp_out = mlx_array_new();
+    mlx_array mlp_normed = mlx_array_new();
     mlx_array h1 = mlx_array_new();
     mlx_array result = mlx_array_new();
+    float eps = cfg->rms_norm_eps;
+    bool offs = cfg->norm_has_offset;
 
     /* input_layernorm */
     weights_tensor_name(name, sizeof(name), cfg, layer, "input_layernorm");
     snprintf(wname, sizeof(wname), "%s.weight", name);
     if (weights_get(&ln1_w, w, wname) != 0) goto cleanup;
-    if (fwd_rmsnorm(&normed1, x, ln1_w, cfg->rms_norm_eps,
-                    cfg->norm_has_offset, s) != 0) goto cleanup;
+    if (fwd_rmsnorm(&normed1, x, ln1_w, eps, offs, s) != 0) goto cleanup;
 
     /* attention */
     if (fwd_attention(&attn_out, normed1, layer, w, cfg, kv, s) != 0) goto cleanup;
 
-    /* residual */
-    if (!MLXB_CHECK(mlx_add(&h1, x, attn_out, s))) goto cleanup;
-
-    /* post_attention_layernorm */
     weights_tensor_name(name, sizeof(name), cfg, layer, "post_attention_layernorm");
     snprintf(wname, sizeof(wname), "%s.weight", name);
     if (weights_get(&ln2_w, w, wname) != 0) goto cleanup;
-    if (fwd_rmsnorm(&normed2, h1, ln2_w, cfg->rms_norm_eps,
-                    cfg->norm_has_offset, s) != 0) goto cleanup;
 
-    /* MLP */
-    if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;
+    if (cfg->has_pre_ff_norm) {
+        /* sandwich: h = x + norm(attn_out); out = h + norm(mlp(norm(h))) */
+        weights_tensor_name(name, sizeof(name), cfg, layer,
+                            "pre_feedforward_layernorm");
+        snprintf(wname, sizeof(wname), "%s.weight", name);
+        if (weights_get(&ln_pre_w, w, wname) != 0) goto cleanup;
+        weights_tensor_name(name, sizeof(name), cfg, layer,
+                            "post_feedforward_layernorm");
+        snprintf(wname, sizeof(wname), "%s.weight", name);
+        if (weights_get(&ln_post_w, w, wname) != 0) goto cleanup;
 
-    /* residual */
-    if (!MLXB_CHECK(mlx_add(&result, h1, mlp_out, s))) goto cleanup;
+        if (fwd_rmsnorm(&attn_normed, attn_out, ln2_w, eps, offs, s) != 0)
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_add(&h1, x, attn_normed, s))) goto cleanup;
+        if (fwd_rmsnorm(&normed2, h1, ln_pre_w, eps, offs, s) != 0)
+            goto cleanup;
+        if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;
+        if (fwd_rmsnorm(&mlp_normed, mlp_out, ln_post_w, eps, offs, s) != 0)
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_add(&result, h1, mlp_normed, s))) goto cleanup;
+    } else {
+        /* pre-norm: h = x + attn_out; out = h + mlp(norm(h)) */
+        if (!MLXB_CHECK(mlx_add(&h1, x, attn_out, s))) goto cleanup;
+        if (fwd_rmsnorm(&normed2, h1, ln2_w, eps, offs, s) != 0) goto cleanup;
+        if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;
+        if (!MLXB_CHECK(mlx_add(&result, h1, mlp_out, s))) goto cleanup;
+    }
 
     mlx_array_free(*out);
     *out = result;
@@ -516,10 +537,14 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
 cleanup:
     mlx_array_free(result);
     mlx_array_free(h1);
+    mlx_array_free(mlp_normed);
     mlx_array_free(mlp_out);
+    mlx_array_free(attn_normed);
     mlx_array_free(attn_out);
     mlx_array_free(normed2);
     mlx_array_free(normed1);
+    mlx_array_free(ln_post_w);
+    mlx_array_free(ln_pre_w);
     mlx_array_free(ln2_w);
     mlx_array_free(ln1_w);
     return rc;

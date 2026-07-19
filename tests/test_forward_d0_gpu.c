@@ -489,6 +489,121 @@ static void test_f4_embed_scaling(void) {
     mlx_array_free(ids);
 }
 
+/* ---- F5: sandwich decoder wiring (has_pre_ff_norm) ---- */
+
+enum { FF = 48 };
+
+static void put_mlp_weights(weights_t *w) {
+    int gu[] = {FF, HID};
+    int dn[] = {HID, FF};
+    put_tensor(w, "layers.0.mlp.gate_proj.weight", det_bf16(gu, 2, 11));
+    put_tensor(w, "layers.0.mlp.up_proj.weight", det_bf16(gu, 2, 12));
+    put_tensor(w, "layers.0.mlp.down_proj.weight", det_bf16(dn, 2, 13));
+}
+
+/* Norm weights scaled down so det_val's [-0.5,0.5) range stays well-behaved. */
+static void put_norm(weights_t *w, const char *name, size_t seed) {
+    int ns[] = {HID};
+    put_tensor(w, name, det_bf16(ns, 1, seed));
+}
+
+static mlx_array get_w(const weights_t *w, const char *name) {
+    mlx_array a = mlx_array_new();
+    assert(weights_get(&a, w, name) == 0);
+    return a;
+}
+
+static void test_f5_sandwich_decoder(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+    put_mlp_weights(&w);
+    put_norm(&w, "layers.0.input_layernorm.weight", 21);
+    put_norm(&w, "layers.0.post_attention_layernorm.weight", 22);
+    put_norm(&w, "layers.0.pre_feedforward_layernorm.weight", 23);
+    put_norm(&w, "layers.0.post_feedforward_layernorm.weight", 24);
+
+    mlx_array x = det_input(3, 500);
+    model_config_t cfg = base_cfg();
+    cfg.has_pre_ff_norm = true;
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    mlx_array out = mlx_array_new();
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    kvcache_free(&kv);
+
+    /* manual sandwich composition from tested primitives */
+    mlx_array ln_in = get_w(&w, "layers.0.input_layernorm.weight");
+    mlx_array ln_pa = get_w(&w, "layers.0.post_attention_layernorm.weight");
+    mlx_array ln_pre = get_w(&w, "layers.0.pre_feedforward_layernorm.weight");
+    mlx_array ln_post = get_w(&w, "layers.0.post_feedforward_layernorm.weight");
+
+    kvcache_t kv2;
+    assert(kvcache_init(&kv2, 1, NKV, HD) == 0);
+    mlx_array normed1 = mlx_array_new(), attn_out = mlx_array_new();
+    mlx_array attn_normed = mlx_array_new(), h = mlx_array_new();
+    mlx_array mlp_in = mlx_array_new(), mlp_out = mlx_array_new();
+    mlx_array mlp_normed = mlx_array_new(), ref = mlx_array_new();
+    float eps = cfg.rms_norm_eps;
+    assert(fwd_rmsnorm(&normed1, x, ln_in, eps, false, gpu) == 0);
+    assert(fwd_attention(&attn_out, normed1, 0, &w, &cfg, &kv2, gpu) == 0);
+    assert(fwd_rmsnorm(&attn_normed, attn_out, ln_pa, eps, false, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&h, x, attn_normed, gpu)));
+    assert(fwd_rmsnorm(&mlp_in, h, ln_pre, eps, false, gpu) == 0);
+    assert(fwd_swiglu(&mlp_out, mlp_in, 0, &w, &cfg, gpu) == 0);
+    assert(fwd_rmsnorm(&mlp_normed, mlp_out, ln_post, eps, false, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&ref, h, mlp_normed, gpu)));
+    kvcache_free(&kv2);
+
+    assert(max_abs_diff(out, ref) < 2e-3f);
+    mlx_array_free(out);
+
+    /* flag off: default wiring untouched */
+    cfg.has_pre_ff_norm = false;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    out = mlx_array_new();
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    kvcache_free(&kv);
+
+    kvcache_t kv3;
+    assert(kvcache_init(&kv3, 1, NKV, HD) == 0);
+    mlx_array h1 = mlx_array_new(), normed2 = mlx_array_new();
+    mlx_array mlp_std = mlx_array_new(), ref_std = mlx_array_new();
+    mlx_array attn_std = mlx_array_new();
+    assert(fwd_attention(&attn_std, normed1, 0, &w, &cfg, &kv3, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&h1, x, attn_std, gpu)));
+    assert(fwd_rmsnorm(&normed2, h1, ln_pa, eps, false, gpu) == 0);
+    assert(fwd_swiglu(&mlp_std, normed2, 0, &w, &cfg, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&ref_std, h1, mlp_std, gpu)));
+    kvcache_free(&kv3);
+
+    assert(max_abs_diff(out, ref_std) < 2e-3f);
+    /* and the two wirings genuinely differ */
+    assert(max_abs_diff(ref, ref_std) > 1e-2f);
+
+    mlx_array_free(ref_std);
+    mlx_array_free(mlp_std);
+    mlx_array_free(normed2);
+    mlx_array_free(h1);
+    mlx_array_free(attn_std);
+    mlx_array_free(out);
+    mlx_array_free(ref);
+    mlx_array_free(mlp_normed);
+    mlx_array_free(mlp_out);
+    mlx_array_free(mlp_in);
+    mlx_array_free(h);
+    mlx_array_free(attn_normed);
+    mlx_array_free(attn_out);
+    mlx_array_free(normed1);
+    mlx_array_free(ln_post);
+    mlx_array_free(ln_pre);
+    mlx_array_free(ln_pa);
+    mlx_array_free(ln_in);
+    mlx_array_free(x);
+    weights_free(&w);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -503,6 +618,9 @@ int main(void) {
 
     test_f4_embed_scaling();
     printf("test_f4_embed_scaling passed\n");
+
+    test_f5_sandwich_decoder();
+    printf("test_f5_sandwich_decoder passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;
