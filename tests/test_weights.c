@@ -426,6 +426,201 @@ static void test_expected_names_non_qwen3(void) {
     assert(weights_expected_names(&cfg, NULL, 0) == 0);
 }
 
+/* ---- Cycle D0-1: pin exact emission order ---- */
+
+static void test_expected_names_qwen3_exact_order(void) {
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.has_qk_norm = true;
+    cfg.tie_word_embeddings = false;
+
+    int count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 14);
+
+    weight_expected_t names[14];
+    int rc = weights_expected_names(&cfg, names, 14);
+    assert(rc == 14);
+
+    typedef struct { const char *name; weight_kind_t kind; } expect_t;
+    static const expect_t expected[] = {
+        {"model.embed_tokens",                          WEIGHT_KIND_EMBED},
+        {"model.layers.0.self_attn.q_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.self_attn.k_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.self_attn.v_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.self_attn.o_proj",             WEIGHT_KIND_MATMUL},
+        {"model.layers.0.mlp.gate_proj",                WEIGHT_KIND_MATMUL},
+        {"model.layers.0.mlp.up_proj",                  WEIGHT_KIND_MATMUL},
+        {"model.layers.0.mlp.down_proj",                WEIGHT_KIND_MATMUL},
+        {"model.layers.0.input_layernorm",              WEIGHT_KIND_NORM},
+        {"model.layers.0.post_attention_layernorm",     WEIGHT_KIND_NORM},
+        {"model.layers.0.self_attn.q_norm",             WEIGHT_KIND_NORM},
+        {"model.layers.0.self_attn.k_norm",             WEIGHT_KIND_NORM},
+        {"model.norm",                                  WEIGHT_KIND_NORM},
+        {"lm_head",                                     WEIGHT_KIND_MATMUL},
+    };
+
+    for (int i = 0; i < 14; i++) {
+        assert(strcmp(names[i].name, expected[i].name) == 0);
+        assert(names[i].kind == expected[i].kind);
+    }
+}
+
+static void test_expected_names_other_families_zero(void) {
+    static const model_family_t others[] = {
+        MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3, MODEL_GEMMA4,
+        MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
+        MODEL_LLAMA, MODEL_MISTRAL, MODEL_LFM2,
+        MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
+    };
+
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        model_config_t cfg = {0};
+        cfg.family = others[i];
+        cfg.weight_prefix = "model";
+        cfg.num_hidden_layers = 2;
+        assert(weights_expected_names(&cfg, NULL, 0) == 0);
+    }
+}
+
+/* ---- Cycle CR-A: descriptor-driven emitter seam ---- */
+
+static void test_expected_names_from_desc_synthetic(void) {
+    static const char *const syn_matmuls[] = { "attn.wq", "ffn.w1", NULL };
+    static const char *const syn_norms[]   = { "ln1", NULL };
+
+    weights_family_desc_t desc = {
+        .family         = MODEL_FAMILY_UNKNOWN,
+        .layer_matmuls  = syn_matmuls,
+        .layer_norms    = syn_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = NULL,
+        .extra_tensors  = NULL,
+    };
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_FAMILY_UNKNOWN;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.tie_word_embeddings = true;
+
+    int count = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count == 5);
+
+    weight_expected_t names[5];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names, 5) == 5);
+
+    assert(strcmp(names[0].name, "model.embed_tokens") == 0);
+    assert(names[0].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names[1].name, "model.layers.0.attn.wq") == 0);
+    assert(names[1].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[2].name, "model.layers.0.ffn.w1") == 0);
+    assert(names[2].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[3].name, "model.layers.0.ln1") == 0);
+    assert(names[3].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names[4].name, "model.norm") == 0);
+    assert(names[4].kind == WEIGHT_KIND_NORM);
+}
+
+/* ---- Cycle CR-B: wire layer_biases ---- */
+
+static void test_expected_names_from_desc_biases(void) {
+    static const char *const syn_matmuls[] = { "attn.wq", NULL };
+    static const char *const syn_norms[]   = { "ln1", NULL };
+    static const char *const syn_biases[]  = { "attn.wq.bias", NULL };
+
+    weights_family_desc_t desc = {
+        .family         = MODEL_FAMILY_UNKNOWN,
+        .layer_matmuls  = syn_matmuls,
+        .layer_norms    = syn_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = syn_biases,
+        .extra_tensors  = NULL,
+    };
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_FAMILY_UNKNOWN;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.tie_word_embeddings = true;
+
+    cfg.attention_bias = false;
+    int count_no_bias = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count_no_bias == 4);
+
+    weight_expected_t names_no_bias[4];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names_no_bias, 4) == 4);
+    for (int i = 0; i < 4; i++)
+        assert(names_no_bias[i].kind != WEIGHT_KIND_BIAS);
+
+    cfg.attention_bias = true;
+    int count_bias = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count_bias == 5);
+
+    weight_expected_t names_bias[5];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names_bias, 5) == 5);
+
+    assert(strcmp(names_bias[0].name, "model.embed_tokens") == 0);
+    assert(names_bias[0].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names_bias[1].name, "model.layers.0.attn.wq") == 0);
+    assert(names_bias[1].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names_bias[2].name, "model.layers.0.attn.wq.bias") == 0);
+    assert(names_bias[2].kind == WEIGHT_KIND_BIAS);
+    assert(strcmp(names_bias[3].name, "model.layers.0.ln1") == 0);
+    assert(names_bias[3].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names_bias[4].name, "model.norm") == 0);
+    assert(names_bias[4].kind == WEIGHT_KIND_NORM);
+}
+
+/* ---- Cycle CR-C: wire extra_tensors ---- */
+
+static void test_expected_names_from_desc_extras(void) {
+    static const char *const syn_matmuls[] = { "attn.wq", NULL };
+    static const char *const syn_norms[]   = { "ln1", NULL };
+    static const weight_extra_t syn_extras[] = {
+        {"embed_tokens_per_layer", WEIGHT_KIND_EMBED},
+        {"v_norm_global",          WEIGHT_KIND_NORM},
+        {NULL, 0},
+    };
+
+    weights_family_desc_t desc = {
+        .family         = MODEL_FAMILY_UNKNOWN,
+        .layer_matmuls  = syn_matmuls,
+        .layer_norms    = syn_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = NULL,
+        .extra_tensors  = syn_extras,
+    };
+
+    model_config_t cfg = {0};
+    cfg.family = MODEL_FAMILY_UNKNOWN;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 1;
+    cfg.tie_word_embeddings = false;
+
+    int count = weights_expected_names_from_desc(&desc, &cfg, NULL, 0);
+    assert(count == 7);
+
+    weight_expected_t names[7];
+    assert(weights_expected_names_from_desc(&desc, &cfg, names, 7) == 7);
+
+    assert(strcmp(names[0].name, "model.embed_tokens") == 0);
+    assert(names[0].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names[1].name, "model.layers.0.attn.wq") == 0);
+    assert(names[1].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[2].name, "model.layers.0.ln1") == 0);
+    assert(names[2].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names[3].name, "model.norm") == 0);
+    assert(names[3].kind == WEIGHT_KIND_NORM);
+    assert(strcmp(names[4].name, "lm_head") == 0);
+    assert(names[4].kind == WEIGHT_KIND_MATMUL);
+    assert(strcmp(names[5].name, "model.embed_tokens_per_layer") == 0);
+    assert(names[5].kind == WEIGHT_KIND_EMBED);
+    assert(strcmp(names[6].name, "model.v_norm_global") == 0);
+    assert(names[6].kind == WEIGHT_KIND_NORM);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -485,6 +680,21 @@ int main(void) {
 
     test_expected_names_non_qwen3();
     printf("  test_expected_names_non_qwen3: passed\n");
+
+    test_expected_names_qwen3_exact_order();
+    printf("  test_expected_names_qwen3_exact_order: passed\n");
+
+    test_expected_names_other_families_zero();
+    printf("  test_expected_names_other_families_zero: passed\n");
+
+    test_expected_names_from_desc_synthetic();
+    printf("  test_expected_names_from_desc_synthetic: passed\n");
+
+    test_expected_names_from_desc_biases();
+    printf("  test_expected_names_from_desc_biases: passed\n");
+
+    test_expected_names_from_desc_extras();
+    printf("  test_expected_names_from_desc_extras: passed\n");
 
     printf("test_weights: all passed\n");
     return 0;

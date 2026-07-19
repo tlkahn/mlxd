@@ -26,7 +26,7 @@ static void test_reject_unsupported_family(void) {
     cfg.family = MODEL_GEMMA3;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "unsupported model family (only qwen3-dense supported)") == 0);
 }
 
 static void test_reject_attention_bias(void) {
@@ -34,7 +34,7 @@ static void test_reject_attention_bias(void) {
     cfg.attention_bias = true;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "attention_bias not supported") == 0);
 }
 
 static void test_reject_sliding_window(void) {
@@ -42,7 +42,7 @@ static void test_reject_sliding_window(void) {
     cfg.has_sliding_window = true;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "sliding window attention not supported") == 0);
 }
 
 static void test_reject_moe(void) {
@@ -50,7 +50,7 @@ static void test_reject_moe(void) {
     cfg.num_experts = 8;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "MoE models not supported") == 0);
 }
 
 static void test_reject_hybrid_layers(void) {
@@ -58,7 +58,7 @@ static void test_reject_hybrid_layers(void) {
     cfg.has_hybrid_layers = true;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "hybrid layer architectures not supported") == 0);
 }
 
 static void test_reject_non_silu(void) {
@@ -66,7 +66,7 @@ static void test_reject_non_silu(void) {
     cfg.hidden_act = HIDDEN_ACT_GELU_APPROX;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "only SiLU activation supported") == 0);
 }
 
 static void test_reject_norm_offset(void) {
@@ -74,7 +74,7 @@ static void test_reject_norm_offset(void) {
     cfg.norm_has_offset = true;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "norm_has_offset not supported") == 0);
 }
 
 static void test_reject_scale_embeddings(void) {
@@ -82,7 +82,7 @@ static void test_reject_scale_embeddings(void) {
     cfg.scale_embeddings = true;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "scale_embeddings not supported") == 0);
 }
 
 static void test_reject_pre_ff_norm(void) {
@@ -90,7 +90,7 @@ static void test_reject_pre_ff_norm(void) {
     cfg.has_pre_ff_norm = true;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "pre-feedforward norm not supported") == 0);
 }
 
 static void test_reject_rope_scaling(void) {
@@ -98,7 +98,7 @@ static void test_reject_rope_scaling(void) {
     cfg.rope_scaling_type = "linear";
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "RoPE scaling not supported") == 0);
 }
 
 static void test_reject_partial_rotary(void) {
@@ -106,7 +106,7 @@ static void test_reject_partial_rotary(void) {
     cfg.partial_rotary_factor = 0.5f;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "partial rotary embedding not supported") == 0);
 }
 
 static void test_reject_attn_output_gate(void) {
@@ -114,7 +114,23 @@ static void test_reject_attn_output_gate(void) {
     cfg.attn_output_gate = true;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(err[0] != '\0');
+    assert(strcmp(err, "attention output gate not supported") == 0);
+}
+
+static void test_reject_all_other_families(void) {
+    static const model_family_t others[] = {
+        MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3, MODEL_GEMMA4,
+        MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
+        MODEL_LLAMA, MODEL_MISTRAL, MODEL_LFM2,
+        MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
+    };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        model_config_t cfg = make_supported();
+        cfg.family = others[i];
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strcmp(err, "unsupported model family (only qwen3-dense supported)") == 0);
+    }
 }
 
 int main(void) {
@@ -156,6 +172,9 @@ int main(void) {
 
     test_reject_attn_output_gate();
     printf("  test_reject_attn_output_gate: passed\n");
+
+    test_reject_all_other_families();
+    printf("  test_reject_all_other_families: passed\n");
 
     printf("test_emodel_gate: all passed\n");
     return 0;

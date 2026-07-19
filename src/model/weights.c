@@ -2,6 +2,7 @@
 #include "core/log.h"
 #include "mlxbridge/mlxbridge.h"
 
+#include <assert.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -237,60 +238,84 @@ static int emit_expected(weight_expected_t *out, int capacity, int *pos,
     return 0;
 }
 
-static const char *qwen3_layer_matmuls[] = {
+static const char *const qwen3_layer_matmuls[] = {
     "self_attn.q_proj", "self_attn.k_proj",
     "self_attn.v_proj", "self_attn.o_proj",
     "mlp.gate_proj",    "mlp.up_proj",
-    "mlp.down_proj",
+    "mlp.down_proj",    NULL,
 };
-static const size_t qwen3_n_matmuls = 7;
 
-static const char *qwen3_layer_norms[] = {
-    "input_layernorm", "post_attention_layernorm",
+static const char *const qwen3_layer_norms[] = {
+    "input_layernorm", "post_attention_layernorm", NULL,
 };
-static const size_t qwen3_n_norms = 2;
 
-static const char *qwen3_layer_qk_norms[] = {
-    "self_attn.q_norm", "self_attn.k_norm",
+static const char *const qwen3_layer_qk_norms[] = {
+    "self_attn.q_norm", "self_attn.k_norm", NULL,
 };
-static const size_t qwen3_n_qk_norms = 2;
 
-int weights_expected_names(const model_config_t *cfg,
-                           weight_expected_t *out, int capacity) {
-    if (!cfg) return -1;
-    if (cfg->family != MODEL_QWEN3) return 0;
+static const weights_family_desc_t family_descs[] = {
+    {
+        .family         = MODEL_QWEN3,
+        .layer_matmuls  = qwen3_layer_matmuls,
+        .layer_norms    = qwen3_layer_norms,
+        .layer_qk_norms = qwen3_layer_qk_norms,
+        .layer_biases   = NULL,
+        .extra_tensors  = NULL,
+    },
+};
+
+static const weights_family_desc_t *family_desc(model_family_t fam) {
+    for (size_t i = 0; i < sizeof(family_descs) / sizeof(family_descs[0]); i++) {
+        if (family_descs[i].family == fam)
+            return &family_descs[i];
+    }
+    return NULL;
+}
+
+int weights_expected_names_from_desc(const weights_family_desc_t *desc,
+                                     const model_config_t *cfg,
+                                     weight_expected_t *out, int capacity) {
+    if (!desc || !cfg) return -1;
+
+    assert(!cfg->has_qk_norm || (desc->layer_qk_norms && desc->layer_qk_norms[0]));
+    assert(!cfg->attention_bias || !desc->layer_biases ||
+           desc->layer_biases[0]);
 
     int pos = 0;
     char buf[256];
 
-    /* embed_tokens */
     if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "embed_tokens") == 0) {
         if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_EMBED) != 0)
             return -1;
     }
 
-    /* per-layer tensors */
     for (int layer = 0; layer < cfg->num_hidden_layers; layer++) {
-        for (size_t j = 0; j < qwen3_n_matmuls; j++) {
-            if (weights_tensor_name(buf, sizeof(buf), cfg, layer,
-                                    qwen3_layer_matmuls[j]) == 0) {
+        for (const char *const *p = desc->layer_matmuls; p && *p; p++) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
                 if (emit_expected(out, capacity, &pos, buf,
                                   WEIGHT_KIND_MATMUL) != 0)
                     return -1;
             }
         }
-        for (size_t j = 0; j < qwen3_n_norms; j++) {
-            if (weights_tensor_name(buf, sizeof(buf), cfg, layer,
-                                    qwen3_layer_norms[j]) == 0) {
+        if (cfg->attention_bias) {
+            for (const char *const *p = desc->layer_biases; p && *p; p++) {
+                if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
+                    if (emit_expected(out, capacity, &pos, buf,
+                                      WEIGHT_KIND_BIAS) != 0)
+                        return -1;
+                }
+            }
+        }
+        for (const char *const *p = desc->layer_norms; p && *p; p++) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
                 if (emit_expected(out, capacity, &pos, buf,
                                   WEIGHT_KIND_NORM) != 0)
                     return -1;
             }
         }
         if (cfg->has_qk_norm) {
-            for (size_t j = 0; j < qwen3_n_qk_norms; j++) {
-                if (weights_tensor_name(buf, sizeof(buf), cfg, layer,
-                                        qwen3_layer_qk_norms[j]) == 0) {
+            for (const char *const *p = desc->layer_qk_norms; p && *p; p++) {
+                if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0) {
                     if (emit_expected(out, capacity, &pos, buf,
                                       WEIGHT_KIND_NORM) != 0)
                         return -1;
@@ -299,20 +324,35 @@ int weights_expected_names(const model_config_t *cfg,
         }
     }
 
-    /* global norm */
     if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "norm") == 0) {
         if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
             return -1;
     }
 
-    /* lm_head (not prefixed, not present when tied) */
     if (!cfg->tie_word_embeddings) {
         if (emit_expected(out, capacity, &pos, "lm_head",
                           WEIGHT_KIND_MATMUL) != 0)
             return -1;
     }
 
+    for (const weight_extra_t *e = desc->extra_tensors; e && e->suffix; e++) {
+        if (weights_tensor_name(buf, sizeof(buf), cfg, -1, e->suffix) == 0) {
+            if (emit_expected(out, capacity, &pos, buf, e->kind) != 0)
+                return -1;
+        }
+    }
+
     return pos;
+}
+
+int weights_expected_names(const model_config_t *cfg,
+                           weight_expected_t *out, int capacity) {
+    if (!cfg) return -1;
+
+    const weights_family_desc_t *desc = family_desc(cfg->family);
+    if (!desc) return 0;
+
+    return weights_expected_names_from_desc(desc, cfg, out, capacity);
 }
 
 /* ---------- GPU / engine-thread helpers ---------- */
@@ -449,6 +489,104 @@ static bool map_has_prefix(mlx_map_string_to_array map, const char *prefix) {
     mlx_array_free(val);
     mlx_map_string_to_array_iterator_free(it);
     return found;
+}
+
+int weights_validate_expected(mlx_map_string_to_array merged,
+                              const model_config_t *cfg,
+                              const weight_expected_t *expected, int n,
+                              char *err, size_t errlen) {
+    for (int i = 0; i < n; i++) {
+        if (expected[i].kind == WEIGHT_KIND_BIAS) {
+            if (!map_has_key(merged, expected[i].name)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "missing expected tensor \"%s\"",
+                             expected[i].name);
+                return -1;
+            }
+            mlx_dtype bdt;
+            if (map_get_dtype(merged, expected[i].name, &bdt) == 0 &&
+                !dtype_is_floating(bdt)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "bias tensor \"%s\" has non-float dtype %d",
+                             expected[i].name, bdt);
+                return -1;
+            }
+            continue;
+        }
+
+        char wname[270];
+        snprintf(wname, sizeof(wname), "%s.weight", expected[i].name);
+
+        if (!map_has_key(merged, wname)) {
+            if (err && errlen > 0)
+                snprintf(err, errlen,
+                         "missing expected tensor \"%s\"", wname);
+            return -1;
+        }
+
+        mlx_dtype wdt;
+        if (map_get_dtype(merged, wname, &wdt) != 0) continue;
+
+        if (expected[i].kind == WEIGHT_KIND_NORM) {
+            if (!dtype_is_floating(wdt)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "norm tensor \"%s\" has non-float dtype %d",
+                             wname, wdt);
+                return -1;
+            }
+        } else {
+            if (wdt == MLX_UINT32) {
+                if (cfg->quant_bits <= 0) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "tensor \"%s\" is uint32 but config has no quantization",
+                                 wname);
+                    return -1;
+                }
+                char sname[270], bname[270];
+                snprintf(sname, sizeof(sname), "%s.scales",
+                         expected[i].name);
+                snprintf(bname, sizeof(bname), "%s.biases",
+                         expected[i].name);
+                if (!map_has_key(merged, sname) ||
+                    !map_has_key(merged, bname)) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "quantized tensor \"%s\" missing scales/biases",
+                                 expected[i].name);
+                    return -1;
+                }
+                mlx_dtype sdt, bdt;
+                if (map_get_dtype(merged, sname, &sdt) == 0 &&
+                    !dtype_is_floating(sdt)) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "scales \"%s\" has non-float dtype %d",
+                                 sname, sdt);
+                    return -1;
+                }
+                if (map_get_dtype(merged, bname, &bdt) == 0 &&
+                    !dtype_is_floating(bdt)) {
+                    if (err && errlen > 0)
+                        snprintf(err, errlen,
+                                 "biases \"%s\" has non-float dtype %d",
+                                 bname, bdt);
+                    return -1;
+                }
+            } else if (!dtype_is_floating(wdt)) {
+                if (err && errlen > 0)
+                    snprintf(err, errlen,
+                             "tensor \"%s\" has unexpected dtype %d "
+                             "(expected float or uint32)",
+                             wname, wdt);
+                return -1;
+            }
+        }
+    }
+    return 0;
 }
 
 static int weights_validate(mlx_map_string_to_array merged,
@@ -609,7 +747,7 @@ static int weights_validate(mlx_map_string_to_array merged,
         mlx_map_string_to_array_iterator_free(it);
     }
 
-    /* Strict expected-set validation (qwen3 only) */
+    /* Strict expected-set validation */
     {
         int n_expected = weights_expected_names(cfg, NULL, 0);
         if (n_expected > 0) {
@@ -629,86 +767,9 @@ static int weights_validate(mlx_map_string_to_array merged,
                 return -1;
             }
 
-            int strict_rc = 0;
-            for (int i = 0; i < erc; i++) {
-                char wname[270];
-                snprintf(wname, sizeof(wname), "%s.weight", expected[i].name);
-
-                if (!map_has_key(merged, wname)) {
-                    if (err && errlen > 0)
-                        snprintf(err, errlen,
-                                 "missing expected tensor \"%s\"", wname);
-                    strict_rc = -1;
-                    break;
-                }
-
-                mlx_dtype wdt;
-                if (map_get_dtype(merged, wname, &wdt) != 0) continue;
-
-                if (expected[i].kind == WEIGHT_KIND_NORM) {
-                    if (!dtype_is_floating(wdt)) {
-                        if (err && errlen > 0)
-                            snprintf(err, errlen,
-                                     "norm tensor \"%s\" has non-float dtype %d",
-                                     wname, wdt);
-                        strict_rc = -1;
-                        break;
-                    }
-                } else {
-                    /* MATMUL or EMBED: dense (float) or quantized triplet */
-                    if (wdt == MLX_UINT32) {
-                        if (cfg->quant_bits <= 0) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "tensor \"%s\" is uint32 but config has no quantization",
-                                         wname);
-                            strict_rc = -1;
-                            break;
-                        }
-                        char sname[270], bname[270];
-                        snprintf(sname, sizeof(sname), "%s.scales",
-                                 expected[i].name);
-                        snprintf(bname, sizeof(bname), "%s.biases",
-                                 expected[i].name);
-                        if (!map_has_key(merged, sname) ||
-                            !map_has_key(merged, bname)) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "quantized tensor \"%s\" missing scales/biases",
-                                         expected[i].name);
-                            strict_rc = -1;
-                            break;
-                        }
-                        mlx_dtype sdt, bdt;
-                        if (map_get_dtype(merged, sname, &sdt) == 0 &&
-                            !dtype_is_floating(sdt)) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "scales \"%s\" has non-float dtype %d",
-                                         sname, sdt);
-                            strict_rc = -1;
-                            break;
-                        }
-                        if (map_get_dtype(merged, bname, &bdt) == 0 &&
-                            !dtype_is_floating(bdt)) {
-                            if (err && errlen > 0)
-                                snprintf(err, errlen,
-                                         "biases \"%s\" has non-float dtype %d",
-                                         bname, bdt);
-                            strict_rc = -1;
-                            break;
-                        }
-                    } else if (!dtype_is_floating(wdt)) {
-                        if (err && errlen > 0)
-                            snprintf(err, errlen,
-                                     "tensor \"%s\" has unexpected dtype %d "
-                                     "(expected float or uint32)",
-                                     wname, wdt);
-                        strict_rc = -1;
-                        break;
-                    }
-                }
-            }
+            int strict_rc = weights_validate_expected(merged, cfg,
+                                                      expected, erc,
+                                                      err, errlen);
             free(expected);
             if (strict_rc != 0)
                 return -1;

@@ -13,6 +13,7 @@ typedef enum {
     WEIGHT_KIND_EMBED = 0,
     WEIGHT_KIND_MATMUL,
     WEIGHT_KIND_NORM,
+    WEIGHT_KIND_BIAS,
 } weight_kind_t;
 
 typedef struct {
@@ -20,12 +21,41 @@ typedef struct {
     weight_kind_t kind;
 } weight_expected_t;
 
+/* Typed extra-tensor entry; NULL-suffix-terminated array. */
+typedef struct {
+    const char   *suffix;
+    weight_kind_t kind;
+} weight_extra_t;
+
+/* Per-family descriptor for the expected-tensor emitter.
+   Emission order: embed_tokens, then per layer (matmuls, biases if
+   attention_bias, norms, qk-norms if has_qk_norm), global norm,
+   lm_head unless tie_word_embeddings, extras last (global scope).
+   embed_tokens / norm / lm_head globals are family-agnostic by design. */
+typedef struct {
+    model_family_t     family;
+    const char *const *layer_matmuls;
+    const char *const *layer_norms;
+    const char *const *layer_qk_norms;
+    const char *const *layer_biases;
+    const weight_extra_t *extra_tensors;
+} weights_family_desc_t;
+
 /* Generate the list of expected tensor base names for a model config.
    Returns count of entries written to out, 0 if the family has no strict
    expected set (caller should fall back to generic checks), or -1 on error
    (e.g. capacity too small). If out is NULL, returns the required count. */
 int weights_expected_names(const model_config_t *cfg,
                            weight_expected_t *out, int capacity);
+
+int weights_expected_names_from_desc(const weights_family_desc_t *desc,
+                                     const model_config_t *cfg,
+                                     weight_expected_t *out, int capacity);
+
+int weights_validate_expected(mlx_map_string_to_array merged,
+                              const model_config_t *cfg,
+                              const weight_expected_t *expected, int n,
+                              char *err, size_t errlen);
 
 int weights_enumerate_shards(const char *model_dir, char ***paths,
                              size_t *count, bool *from_index);

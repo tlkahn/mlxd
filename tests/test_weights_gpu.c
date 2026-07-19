@@ -689,6 +689,121 @@ static void test_real_model_optional(void) {
     free(dir);
 }
 
+/* ---- Cycle CR-D: bias-aware validation via weights_validate_expected ---- */
+
+static void test_validate_expected_bias_float_ok(void) {
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+
+    float d[] = {1.0f};
+    int shape[] = {1};
+    mlx_array w = mlx_array_new_data(d, shape, 1, MLX_FLOAT32);
+    assert(MLXB_CHECK(mlx_array_eval(w)));
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+        m, "model.layers.0.attn.wq.weight", w)));
+
+    mlx_array b = mlx_array_new_data(d, shape, 1, MLX_FLOAT32);
+    assert(MLXB_CHECK(mlx_array_eval(b)));
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+        m, "model.layers.0.attn.wq.bias", b)));
+
+    weight_expected_t expected[2];
+    strcpy(expected[0].name, "model.layers.0.attn.wq");
+    expected[0].kind = WEIGHT_KIND_MATMUL;
+    strcpy(expected[1].name, "model.layers.0.attn.wq.bias");
+    expected[1].kind = WEIGHT_KIND_BIAS;
+
+    model_config_t cfg = {0};
+    char err[256] = {0};
+    int rc = weights_validate_expected(m, &cfg, expected, 2, err, sizeof(err));
+    assert(rc == 0);
+
+    mlx_array_free(b);
+    mlx_array_free(w);
+    mlx_map_string_to_array_free(m);
+}
+
+static void test_validate_expected_bias_absent(void) {
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+
+    float d[] = {1.0f};
+    int shape[] = {1};
+    mlx_array w = mlx_array_new_data(d, shape, 1, MLX_FLOAT32);
+    assert(MLXB_CHECK(mlx_array_eval(w)));
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+        m, "model.layers.0.attn.wq.weight", w)));
+
+    weight_expected_t expected[2];
+    strcpy(expected[0].name, "model.layers.0.attn.wq");
+    expected[0].kind = WEIGHT_KIND_MATMUL;
+    strcpy(expected[1].name, "model.layers.0.attn.wq.bias");
+    expected[1].kind = WEIGHT_KIND_BIAS;
+
+    model_config_t cfg = {0};
+    char err[256] = {0};
+    int rc = weights_validate_expected(m, &cfg, expected, 2, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "model.layers.0.attn.wq.bias") != NULL);
+
+    mlx_array_free(w);
+    mlx_map_string_to_array_free(m);
+}
+
+static void test_validate_expected_bias_uint32(void) {
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+
+    float d[] = {1.0f};
+    int shape[] = {1};
+    mlx_array w = mlx_array_new_data(d, shape, 1, MLX_FLOAT32);
+    assert(MLXB_CHECK(mlx_array_eval(w)));
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+        m, "model.layers.0.attn.wq.weight", w)));
+
+    uint32_t ud[] = {1};
+    mlx_array b = mlx_array_new_data(ud, shape, 1, MLX_UINT32);
+    assert(MLXB_CHECK(mlx_array_eval(b)));
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+        m, "model.layers.0.attn.wq.bias", b)));
+
+    weight_expected_t expected[2];
+    strcpy(expected[0].name, "model.layers.0.attn.wq");
+    expected[0].kind = WEIGHT_KIND_MATMUL;
+    strcpy(expected[1].name, "model.layers.0.attn.wq.bias");
+    expected[1].kind = WEIGHT_KIND_BIAS;
+
+    model_config_t cfg = {0};
+    char err[256] = {0};
+    int rc = weights_validate_expected(m, &cfg, expected, 2, err, sizeof(err));
+    assert(rc == -1);
+    assert(strstr(err, "dtype") != NULL || strstr(err, "float") != NULL);
+
+    mlx_array_free(b);
+    mlx_array_free(w);
+    mlx_map_string_to_array_free(m);
+}
+
+static void test_validate_expected_matmul_still_appends_weight(void) {
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+
+    float d[] = {1.0f};
+    int shape[] = {1};
+    mlx_array w = mlx_array_new_data(d, shape, 1, MLX_FLOAT32);
+    assert(MLXB_CHECK(mlx_array_eval(w)));
+    assert(MLXB_CHECK(mlx_map_string_to_array_insert(
+        m, "model.layers.0.attn.wq.weight", w)));
+
+    weight_expected_t expected[1];
+    strcpy(expected[0].name, "model.layers.0.attn.wq");
+    expected[0].kind = WEIGHT_KIND_MATMUL;
+
+    model_config_t cfg = {0};
+    char err[256] = {0};
+    int rc = weights_validate_expected(m, &cfg, expected, 1, err, sizeof(err));
+    assert(rc == 0);
+
+    mlx_array_free(w);
+    mlx_map_string_to_array_free(m);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -739,6 +854,18 @@ int main(void) {
 
     test_validate_norm_dtype();
     printf("  test_validate_norm_dtype: passed\n");
+
+    test_validate_expected_bias_float_ok();
+    printf("  test_validate_expected_bias_float_ok: passed\n");
+
+    test_validate_expected_bias_absent();
+    printf("  test_validate_expected_bias_absent: passed\n");
+
+    test_validate_expected_bias_uint32();
+    printf("  test_validate_expected_bias_uint32: passed\n");
+
+    test_validate_expected_matmul_still_appends_weight();
+    printf("  test_validate_expected_matmul_still_appends_weight: passed\n");
 
     test_real_model_optional();
 
