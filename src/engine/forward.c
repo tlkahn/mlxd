@@ -919,17 +919,9 @@ static int embed_take(mlx_array *out, mlx_array flat_ids,
         mlx_array_free(dq_w);
         if (!ok) goto cleanup;
     } else {
-        char wname[270];
-        snprintf(wname, sizeof(wname), "%s.weight", base_name);
-        mlx_array embed_w = mlx_array_new();
-        if (weights_get(&embed_w, w, wname) != 0) {
-            mlx_array_free(embed_w);
-            goto cleanup;
-        }
         mlx_array bf16 = mlx_array_new();
-        bool ok = MLXB_CHECK(mlx_take_axis(&taken, embed_w, flat_ids, 0, s)) &&
+        bool ok = MLXB_CHECK(mlx_take_axis(&taken, tri.weight, flat_ids, 0, s)) &&
                   MLXB_CHECK(mlx_astype(&bf16, taken, MLX_BFLOAT16, s));
-        mlx_array_free(embed_w);
         if (!ok) { mlx_array_free(bf16); goto cleanup; }
         mlx_array_free(result);
         result = bf16;

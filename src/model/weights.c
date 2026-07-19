@@ -354,7 +354,8 @@ int weights_expected_names_from_desc(const weights_family_desc_t *desc,
 }
 
 /* gemma4 expected names: custom emitter because per-layer tensor presence
-   depends on KV sharing and k_eq_v status, and PLE adds extra tensors. */
+   depends on KV sharing and k_eq_v status, and PLE adds extra tensors.
+   Conditional-tensor rules derived from mlx-lm Attention.has_kv / use_k_eq_v. */
 static int weights_expected_names_gemma4(const model_config_t *cfg,
                                          weight_expected_t *out, int capacity) {
     int pos = 0;
