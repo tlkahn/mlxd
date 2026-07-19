@@ -363,8 +363,9 @@ static void test_f1_attn_scale_from_config(void) {
     mlx_array_free(out);
     kvcache_free(&kv);
 
-    /* gemma4 family -> fixed scale 1.0 regardless of query_pre_attn_scalar */
+    /* attn_scale_one -> fixed scale 1.0 regardless of query_pre_attn_scalar */
     cfg.family = MODEL_GEMMA4;
+    cfg.attn_scale_one = true;
     cfg.query_pre_attn_scalar = HD;
     assert(kvcache_init(&kv, 1, NKV, HD) == 0);
     out = mlx_array_new();

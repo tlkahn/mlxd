@@ -263,6 +263,189 @@ static const recipe_t LLAMA3 = {
     .fixture_base = "tiny_llama3",
 };
 
+/* --- gemma4 recipe (custom build - not table driven) --------------------- */
+
+/* Plan shape: vocab=256, hidden=64, inter=128, layers=4,
+   layer_types=[sliding, full, sliding, full],
+   heads=4, head_dim=16, kv_heads=2,
+   global_head_dim=32, num_global_key_value_heads=1,
+   num_kv_shared_layers=2 (layers 2,3 shared from 0,1),
+   sliding_window=4, attention_k_eq_v=true */
+
+#define G4_VOCAB   256
+#define G4_HIDDEN  64
+#define G4_INTER   128
+#define G4_LAYERS  4
+#define G4_HEADS   4
+#define G4_HD      16
+#define G4_KV      2
+#define G4_GHD     32
+#define G4_GKV     1
+
+static const bool G4_IS_GLOBAL[G4_LAYERS] = {false, true, false, true};
+static const int G4_NUM_KV_SHARED = 2;
+
+static int g4_layer_is_shared(int layer) {
+    return layer >= (G4_LAYERS - G4_NUM_KV_SHARED);
+}
+
+static int g4_layer_hd(int layer) {
+    return G4_IS_GLOBAL[layer] ? G4_GHD : G4_HD;
+}
+
+static int g4_layer_kv(int layer) {
+    return G4_IS_GLOBAL[layer] ? G4_GKV : G4_KV;
+}
+
+static mlx_map_string_to_array build_gemma4_tensors(mlx_stream s) {
+    mlx_array key = mlx_array_new();
+    CHECK(mlx_random_key(&key, 77));
+
+    mlx_map_string_to_array m = mlx_map_string_to_array_new();
+
+    /* Top-level: embed_tokens (tied, no lm_head), norm */
+    int emb_shape[] = {G4_VOCAB, G4_HIDDEN};
+    insert(m, "language_model.model.embed_tokens.weight",
+           rand_bf16(&key, emb_shape, 2, s));
+    int norm_shape[] = {G4_HIDDEN};
+    insert(m, "language_model.model.norm.weight",
+           ones_bf16(norm_shape, 1, s));
+
+    for (int L = 0; L < G4_LAYERS; L++) {
+        char name[256];
+        int hd_l = g4_layer_hd(L);
+        int kv_l = g4_layer_kv(L);
+        bool global = G4_IS_GLOBAL[L];
+        bool shared = g4_layer_is_shared(L);
+
+        /* input_layernorm + post_attention_layernorm always present */
+        int ln_shape[] = {G4_HIDDEN};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.input_layernorm.weight", L);
+        insert(m, name, ones_bf16(ln_shape, 1, s));
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.post_attention_layernorm.weight", L);
+        insert(m, name, ones_bf16(ln_shape, 1, s));
+
+        /* pre/post feedforward norms (gemma4 has_pre_ff_norm=true) */
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.pre_feedforward_layernorm.weight", L);
+        insert(m, name, ones_bf16(ln_shape, 1, s));
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.post_feedforward_layernorm.weight", L);
+        insert(m, name, ones_bf16(ln_shape, 1, s));
+
+        /* Q projection always present */
+        int q_shape[] = {G4_HEADS * hd_l, G4_HIDDEN};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.self_attn.q_proj.weight", L);
+        insert(m, name, rand_bf16(&key, q_shape, 2, s));
+
+        /* q_norm always present (shape = per-layer head_dim) */
+        int qn_shape[] = {hd_l};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.self_attn.q_norm.weight", L);
+        insert(m, name, ones_bf16(qn_shape, 1, s));
+
+        /* K/V projections + k_norm: omitted on shared layers */
+        if (!shared) {
+            int k_shape[] = {kv_l * hd_l, G4_HIDDEN};
+            snprintf(name, sizeof(name),
+                     "language_model.model.layers.%d.self_attn.k_proj.weight", L);
+            insert(m, name, rand_bf16(&key, k_shape, 2, s));
+
+            int kn_shape[] = {hd_l};
+            snprintf(name, sizeof(name),
+                     "language_model.model.layers.%d.self_attn.k_norm.weight", L);
+            insert(m, name, ones_bf16(kn_shape, 1, s));
+
+            /* v_proj: omitted on k_eq_v global layers */
+            if (!(global)) {
+                int v_shape[] = {kv_l * hd_l, G4_HIDDEN};
+                snprintf(name, sizeof(name),
+                         "language_model.model.layers.%d.self_attn.v_proj.weight", L);
+                insert(m, name, rand_bf16(&key, v_shape, 2, s));
+            }
+        }
+
+        /* O projection always present */
+        int o_shape[] = {G4_HIDDEN, G4_HEADS * hd_l};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.self_attn.o_proj.weight", L);
+        insert(m, name, rand_bf16(&key, o_shape, 2, s));
+
+        /* MLP always present */
+        int gate_shape[] = {G4_INTER, G4_HIDDEN};
+        int down_shape[] = {G4_HIDDEN, G4_INTER};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.mlp.gate_proj.weight", L);
+        insert(m, name, rand_bf16(&key, gate_shape, 2, s));
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.mlp.up_proj.weight", L);
+        insert(m, name, rand_bf16(&key, gate_shape, 2, s));
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.mlp.down_proj.weight", L);
+        insert(m, name, rand_bf16(&key, down_shape, 2, s));
+    }
+
+    mlx_array_free(key);
+    return m;
+}
+
+static void write_gemma4_config(const char *dir) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    yyjson_mut_obj_add_str(doc, root, "model_type", "gemma4");
+    yyjson_mut_obj_add_int(doc, root, "vocab_size", G4_VOCAB);
+    yyjson_mut_obj_add_int(doc, root, "hidden_size", G4_HIDDEN);
+    yyjson_mut_obj_add_int(doc, root, "num_hidden_layers", G4_LAYERS);
+    yyjson_mut_obj_add_int(doc, root, "num_attention_heads", G4_HEADS);
+    yyjson_mut_obj_add_int(doc, root, "num_key_value_heads", G4_KV);
+    yyjson_mut_obj_add_int(doc, root, "head_dim", G4_HD);
+    yyjson_mut_obj_add_int(doc, root, "intermediate_size", G4_INTER);
+    yyjson_mut_obj_add_int(doc, root, "max_position_embeddings", 512);
+    yyjson_mut_obj_add_real(doc, root, "rms_norm_eps", 1e-6);
+    yyjson_mut_obj_add_bool(doc, root, "tie_word_embeddings", true);
+    yyjson_mut_obj_add_int(doc, root, "sliding_window", 4);
+    yyjson_mut_obj_add_int(doc, root, "global_head_dim", G4_GHD);
+    yyjson_mut_obj_add_int(doc, root, "num_global_key_value_heads", G4_GKV);
+    yyjson_mut_obj_add_int(doc, root, "num_kv_shared_layers", G4_NUM_KV_SHARED);
+    yyjson_mut_obj_add_bool(doc, root, "attention_k_eq_v", true);
+
+    /* layer_types */
+    yyjson_mut_val *lt = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_str(doc, lt, "sliding_attention");
+    yyjson_mut_arr_add_str(doc, lt, "full_attention");
+    yyjson_mut_arr_add_str(doc, lt, "sliding_attention");
+    yyjson_mut_arr_add_str(doc, lt, "full_attention");
+    yyjson_mut_obj_add_val(doc, root, "layer_types", lt);
+
+    /* rope_parameters */
+    yyjson_mut_val *rp = yyjson_mut_obj(doc);
+    yyjson_mut_val *full_attn = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_real(doc, full_attn, "rope_theta", 1000000.0);
+    yyjson_mut_obj_add_real(doc, full_attn, "partial_rotary_factor", 0.5);
+    yyjson_mut_obj_add_str(doc, full_attn, "rope_type", "proportional");
+    yyjson_mut_obj_add_real(doc, full_attn, "factor", 8.0);
+    yyjson_mut_obj_add_val(doc, rp, "full_attention", full_attn);
+    yyjson_mut_val *slid_attn = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_real(doc, slid_attn, "rope_theta", 10000.0);
+    yyjson_mut_obj_add_val(doc, rp, "sliding_attention", slid_attn);
+    yyjson_mut_obj_add_val(doc, root, "rope_parameters", rp);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/config.json", dir);
+    yyjson_write_err werr;
+    if (!yyjson_mut_write_file(path, doc, YYJSON_WRITE_PRETTY, NULL, &werr)) {
+        fprintf(stderr, "failed to write %s: %s\n", path, werr.msg);
+        exit(1);
+    }
+    append_newline(path);
+    yyjson_mut_doc_free(doc);
+}
+
 static const recipe_t *RECIPES[] = { &QWEN3, &GEMMA3, &LLAMA3 };
 static const int N_RECIPES = 3;
 
@@ -617,6 +800,22 @@ int main(void) {
             save_tied(r, tied_dir, tensors2, cpu);
             mlx_map_string_to_array_free(tensors2);
         }
+    }
+
+    /* gemma4: custom build (per-layer shape variation) */
+    {
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s/tiny_gemma4", fixtures_dir);
+        mkdir(dir, 0755);
+        mlx_map_string_to_array tensors = build_gemma4_tensors(cpu);
+        char path[512];
+        snprintf(path, sizeof(path), "%s/model.safetensors", dir);
+        mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+        CHECK(mlx_save_safetensors(path, tensors, meta));
+        mlx_map_string_to_string_free(meta);
+        mlx_map_string_to_array_free(tensors);
+        write_gemma4_config(dir);
+        printf("  wrote %s\n", dir);
     }
 
     mlx_stream_free(cpu);

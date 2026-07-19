@@ -143,6 +143,7 @@ typedef struct {
     int   hidden_size_per_layer_input;
     bool  has_v_norm;
     bool  attention_k_eq_v;
+    bool  attn_scale_one;
 
     /* bert */
     bool  is_encoder_only;
@@ -170,6 +171,19 @@ model_family_t model_family_from_type(const char *model_type);
  * NULL cfg or OOB with explicit map returns true (safe default).
  * Total for any int layer: modulo path wraps; no bounds check needed. */
 bool model_layer_is_global(const model_config_t *cfg, int layer);
+
+/* Per-layer head dim: returns global_head_dim for global layers when set,
+ * else base head_dim. */
+int model_layer_head_dim(const model_config_t *cfg, int layer);
+
+/* Per-layer KV heads: returns num_global_key_value_heads for global layers
+ * when set, else base num_key_value_heads. */
+int model_layer_kv_heads(const model_config_t *cfg, int layer);
+
+/* Returns the source layer index for KV-shared layers, or -1 if this layer
+ * owns its own KV state. Shared layers reuse the cache of an earlier layer
+ * of the same kind (global/local), scanning downward from the boundary. */
+int model_kv_source_layer(const model_config_t *cfg, int layer);
 
 /* Load model config from a directory (reads config.json + generation_config.json).
  * Returns 0 on success, -1 on error. */

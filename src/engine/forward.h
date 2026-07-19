@@ -44,6 +44,7 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       kvcache_t *kv, mlx_array rope_freqs, mlx_stream s);
 
 int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n);
+int fwd_rope_proportional_freqs(const model_config_t *cfg, float *out, int n);
 
 /* Build precomputed freqs array for the model's rope scaling type.
    rc 0 + out->ctx == NULL: family needs no custom freqs.
