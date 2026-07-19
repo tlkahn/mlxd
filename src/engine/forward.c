@@ -1,5 +1,7 @@
 #include "engine/forward.h"
 
+#include "core/log.h"
+
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -554,7 +556,10 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     int perm[] = {0, 2, 1, 3};
     if (!MLXB_CHECK(mlx_transpose_axes(&q_transposed, q_normed, perm, 4, s))) goto cleanup;
 
-    if (model_layer_kv_shared(cfg, layer) && kv_src < 0) goto cleanup;
+    if (model_layer_kv_shared(cfg, layer) && kv_src < 0) {
+        log_error("fwd_attention: kv-shared layer %d has no same-type source", layer);
+        goto cleanup;
+    }
 
     if (kv_src >= 0) {
         /* KV-shared layer: skip K/V projection, read from source layer's cache.
@@ -798,7 +803,6 @@ int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
     mlx_array up = mlx_array_new();
     mlx_array gate_sig = mlx_array_new();
     mlx_array silu = mlx_array_new();
-    mlx_array gated = mlx_array_new();
     mlx_array down_in = mlx_array_new();
     mlx_array result = mlx_array_new();
 
@@ -842,7 +846,6 @@ cleanup:
     weights_triplet_free(&gate_tri);
     mlx_array_free(result);
     mlx_array_free(down_in);
-    mlx_array_free(gated);
     mlx_array_free(silu);
     mlx_array_free(gate_sig);
     mlx_array_free(up);

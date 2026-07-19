@@ -6,12 +6,19 @@ Oracle output is ground truth: a C-side mismatch is a C bug; vectors are
 never edited to fit.
 
 Run from the repo root:
-    uv run --with mlx python tests/tools/gen_gemma4_goldens.py
+    uv run --with mlx-lm python tests/tools/gen_gemma4_goldens.py
 """
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+
+try:
+    from mlx_lm.models.rope_utils import ProportionalRoPE
+except ImportError:
+    raise SystemExit(
+        "mlx-lm is required: pip install mlx-lm (or uv run --with mlx-lm)"
+    )
 
 
 def fmt_c_array(name: str, arr: np.ndarray) -> str:
@@ -49,11 +56,12 @@ def gen_gelu_approx():
 def gen_proportional_rope():
     """Golden for fwd_rope_apply with proportional freqs.
 
-    Two cases matching the plan:
+    Uses the real mlx_lm.models.rope_utils.ProportionalRoPE as oracle.
+    Two cases:
     1) fixture-shaped: partial_rotary=0.5, factor=8.0, head_dim=16
     2) E2B-shaped: partial_rotary=0.25, factor=1.0, head_dim=16
     """
-    print("/* --- Proportional RoPE golden (manual, matching mlx-lm rope_utils) --- */")
+    print("/* --- Proportional RoPE golden (mlx_lm ProportionalRoPE oracle) --- */")
 
     for case_name, partial_rotary, factor, base in [
         ("fixture", 0.5, 8.0, 1000000.0),
@@ -61,33 +69,26 @@ def gen_proportional_rope():
     ]:
         head_dim = 16
         rotated_dims = int(partial_rotary * head_dim)
-        n_freqs = rotated_dims // 2
+        n_freqs = head_dim // 2
         H = 2
         S = 3
         offset = 2
 
-        # Compute freqs the same way mlxd does: base^(2i/d) * factor
-        freqs = np.array(
-            [base ** (2.0 * i / rotated_dims) * factor for i in range(n_freqs)],
-            dtype=np.float32,
+        rope = ProportionalRoPE(
+            dims=head_dim,
+            rotated_dims=rotated_dims,
+            traditional=False,
+            base=base,
+            factor=factor,
         )
 
-        # Build deterministic bf16 input [1, H, S, head_dim]
+        freqs_np = np.array(rope._freqs)
+
         rng = np.random.default_rng(42)
         x_np = rng.standard_normal((1, H, S, head_dim)).astype(np.float32)
         x_bf16 = mx.array(x_np).astype(mx.bfloat16)
 
-        # Apply rope via mlx_fast_rope
-        freqs_mx = mx.array(freqs)
-        out = mx.fast.rope(
-            x_bf16,
-            rotated_dims,
-            traditional=False,
-            base=None,
-            scale=1.0,
-            offset=offset,
-            freqs=freqs_mx,
-        )
+        out = rope(x_bf16, offset=offset)
         out_f32 = np.array(out.astype(mx.float32))
         in_f32 = np.array(x_bf16.astype(mx.float32))
 
@@ -96,11 +97,11 @@ def gen_proportional_rope():
         print(f"#define ROPE_{tag.upper()}_H {H}")
         print(f"#define ROPE_{tag.upper()}_S {S}")
         print(f"#define ROPE_{tag.upper()}_HD {head_dim}")
-        print(f"#define ROPE_{tag.upper()}_DIMS {rotated_dims}")
+        print(f"#define ROPE_{tag.upper()}_DIMS {head_dim}")
         print(f"#define ROPE_{tag.upper()}_OFFSET {offset}")
         print(f"#define ROPE_{tag.upper()}_N {1 * H * S * head_dim}")
         print(f"#define ROPE_{tag.upper()}_NFREQS {n_freqs}")
-        print(fmt_c_array(f"rope_{tag}_freqs", freqs))
+        print(fmt_c_array(f"rope_{tag}_freqs", freqs_np))
         print(fmt_c_array(f"rope_{tag}_input", in_f32))
         print(fmt_c_array(f"rope_{tag}_expected", out_f32))
         print()

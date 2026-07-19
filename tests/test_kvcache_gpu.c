@@ -658,6 +658,9 @@ static void test_kvcache_view(void) {
     mlx_array vv = mlx_array_new();
     assert(kvcache_view(&kv, 1, 0, 2, &vk, &vv, s) == -1);
 
+    /* kvcache_view rejects negative max_kv (same contract as kvcache_update) */
+    assert(kvcache_view(&kv, 0, -1, 2, &vk, &vv, s) == -1);
+
     /* kvcache_view on initialized layer 0, no trim (max_kv=0) */
     assert(kvcache_view(&kv, 0, 0, 2, &vk, &vv, s) == 0);
     assert(MLXB_CHECK(mlx_array_eval(vk)));

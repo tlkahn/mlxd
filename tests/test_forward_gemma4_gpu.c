@@ -198,6 +198,39 @@ static void test_gemma4_incremental_parity(engine_model_t *em) {
     kvcache_free(&kv_full);
 }
 
+/* ---- fwd_attention rejects unresolved KV source ---- */
+
+static void test_gemma4_unresolved_kv_source(engine_model_t *em) {
+    /* Mutate config: set num_kv_shared_layers=3 so boundary=1.
+       Layer 1 (global) is shared but only layer 0 (local) is below boundary -
+       no global source exists, so model_kv_source_layer returns -1. */
+    model_config_t saved = em->cfg;
+
+    em->cfg.num_kv_shared_layers = 3;
+    assert(model_kv_source_layer(&em->cfg, 1) == -1);
+
+    /* Build input [1,1,D] */
+    int D = em->cfg.hidden_size_per_layer_input > 0
+                ? em->cfg.hidden_size_per_layer_input
+                : em->cfg.hidden_size;
+    int shape[] = {1, 1, D};
+    mlx_array x = mlx_array_new();
+    MLXB_CHECK(mlx_zeros(&x, shape, 3, MLX_BFLOAT16, gpu));
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, em->cfg.num_hidden_layers) == 0);
+
+    mlx_array out = mlx_array_new();
+    int rc = fwd_attention(&out, x, 1, &em->w, &em->cfg, &kv,
+                           em->rope_freqs, gpu);
+    assert(rc == -1);
+
+    mlx_array_free(out);
+    kvcache_free(&kv);
+    mlx_array_free(x);
+    em->cfg = saved;
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -216,6 +249,9 @@ int main(void) {
 
     test_gemma4_incremental_parity(&em);
     printf("  test_gemma4_incremental_parity: passed\n");
+
+    test_gemma4_unresolved_kv_source(&em);
+    printf("  test_gemma4_unresolved_kv_source: passed\n");
 
     engine_model_free(&em);
     printf("test_forward_gemma4_gpu: all passed\n");

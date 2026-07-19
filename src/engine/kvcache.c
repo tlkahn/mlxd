@@ -183,6 +183,7 @@ int kvcache_view(const kvcache_t *kv, int layer, int max_kv, int q_len,
                  mlx_array *k_view, mlx_array *v_view, mlx_stream s) {
     if (!kv || !kv->entries || layer < 0 || layer >= kv->num_layers)
         return -1;
+    if (max_kv < 0) return -1;
     if (!k_view || !v_view) return -1;
 
     const kv_entry_t *e = &kv->entries[layer];

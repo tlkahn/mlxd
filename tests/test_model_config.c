@@ -613,7 +613,7 @@ static void test_per_layer_geometry(void) {
     assert(model_layer_head_dim(&cfg, 7) == 512);  /* global */
     assert(model_layer_head_dim(&cfg, 4) == 256);  /* local */
 
-    /* model_layer_kv_heads: global layers get num_global_key_value_heads */
+    /* model_layer_kv_heads: global layers get num_global_key_value_heads when attention_k_eq_v */
     assert(model_layer_kv_heads(&cfg, 0) == 8);   /* local */
     assert(model_layer_kv_heads(&cfg, 5) == 4);   /* global */
     assert(model_layer_kv_heads(&cfg, 7) == 4);   /* global */

@@ -177,15 +177,15 @@ bool model_layer_is_global(const model_config_t *cfg, int layer);
 int model_layer_head_dim(const model_config_t *cfg, int layer);
 
 /* Per-layer KV heads: returns num_global_key_value_heads for global layers
- * when set, else base num_key_value_heads. */
+ * when attention_k_eq_v is set, else base num_key_value_heads. */
 int model_layer_kv_heads(const model_config_t *cfg, int layer);
 
 /* True if this layer is in the KV-shared tail (reuses another layer's cache). */
 bool model_layer_kv_shared(const model_config_t *cfg, int layer);
 
 /* Returns the source layer index for KV-shared layers, or -1 if this layer
- * owns its own KV state. Shared layers reuse the cache of an earlier layer
- * of the same kind (global/local), scanning downward from the boundary. */
+ * owns its own KV state OR is shared but no earlier same-type layer exists.
+ * Callers must fail closed when -1 is returned for a shared layer. */
 int model_kv_source_layer(const model_config_t *cfg, int layer);
 
 /* Load model config from a directory (reads config.json + generation_config.json).
