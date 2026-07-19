@@ -23,7 +23,7 @@ family_id() {
         qwen3)   echo "mlx-community/Qwen3-0.6B-4bit" ;;
         gemma3)  echo "" ;;
         qwen2)   echo "" ;;
-        llama)   echo "" ;;
+        llama)   echo "mlx-community/TinyLlama-1.1B-Chat-v1.0-4bit" ;;
         mistral) echo "" ;;
         gemma4)  echo "" ;;
         qwen3_5) echo "" ;;
