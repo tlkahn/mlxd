@@ -186,7 +186,10 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     int n_heads = cfg->num_attention_heads;
     int n_kv = cfg->num_key_value_heads;
     int hd = cfg->head_dim;
-    float attn_scale = 1.0f / sqrtf((float)hd);
+    /* gemma4 pins scale to 1.0; query_pre_attn_scalar defaults to head_dim */
+    int qpas = cfg->query_pre_attn_scalar > 0 ? cfg->query_pre_attn_scalar : hd;
+    float attn_scale =
+        cfg->family == MODEL_GEMMA4 ? 1.0f : 1.0f / sqrtf((float)qpas);
 
     mlx_array q = mlx_array_new();
     mlx_array k = mlx_array_new();
