@@ -1058,6 +1058,16 @@ static void test_gemma4_family_defaults(void) {
     model_config_free(&cfg);
 }
 
+static void test_gemma4_hidden_act_parsed(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg,
+                               MLXD_FIXTURES_DIR "/model_config_gemma4_silu");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_GEMMA4);
+    assert(cfg.hidden_act == HIDDEN_ACT_SILU);
+    model_config_free(&cfg);
+}
+
 int main(void) {
     test_happy_path();
     test_kv_heads_default();
@@ -1093,6 +1103,7 @@ int main(void) {
     test_tiny_gemma3_config();
     test_tiny_gemma4_config();
     test_gemma4_family_defaults();
+    test_gemma4_hidden_act_parsed();
 
     printf("test_model_config: all passed\n");
     return 0;

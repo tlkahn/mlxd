@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef MLXD_FIXTURES_DIR
+#error "MLXD_FIXTURES_DIR must be defined"
+#endif
+
 static model_config_t make_supported(void) {
     model_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -456,6 +460,19 @@ int main(void) {
         assert(strstr(err, "gelu_pytorch_tanh") != NULL);
     }
     printf("  test_gemma4_reject_hidden_act_silu: passed\n");
+
+    /* E2E: config.json with hidden_act=silu should be rejected by the gate */
+    {
+        model_config_t cfg;
+        int rc = model_config_load(&cfg,
+                                   MLXD_FIXTURES_DIR "/model_config_gemma4_silu");
+        assert(rc == 0);
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strstr(err, "gelu_pytorch_tanh") != NULL);
+        model_config_free(&cfg);
+    }
+    printf("  test_gemma4_silu_config_rejected: passed\n");
 
     test_llama_plain_passes();
     printf("  test_llama_plain_passes: passed\n");
