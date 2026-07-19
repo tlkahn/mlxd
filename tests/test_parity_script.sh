@@ -483,4 +483,111 @@ else
     fail "e2e-bounded-kill" "expected exit 0 + marker (rc=$rc, marker=$marker_exists)"
 fi
 
+# ===========================================================================
+# parity_family.sh wrapper tests
+# ===========================================================================
+
+WRAPPER="$REPO_DIR/scripts/parity_family.sh"
+
+# --- wrapper: unknown family -> exit 2 ---
+
+out=$(sh "$WRAPPER" bogus 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 2 ] && printf '%s\n' "$out" | grep -qi 'usage'; then
+    pass "wrapper-unknown-family"
+else
+    fail "wrapper-unknown-family" "expected exit 2 + usage (rc=$rc)"
+fi
+
+# --- wrapper: id mapping (qwen3 resolves via root) ---
+
+WMAP_DIR=$(mktemp -d)
+mkdir -p "$WMAP_DIR/root/mlx-community/Qwen3-0.6B-4bit"
+mkdir -p "$WMAP_DIR/scripts"
+cp "$WRAPPER" "$WMAP_DIR/scripts/parity_family.sh"
+# Stub parity_temp0.sh that records args
+cat > "$WMAP_DIR/scripts/parity_temp0.sh" <<'STUBEOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/../delegate_args.txt"
+exit 0
+STUBEOF
+chmod +x "$WMAP_DIR/scripts/parity_temp0.sh"
+
+MLXD_PARITY_CKPT_ROOT="$WMAP_DIR/root" sh "$WMAP_DIR/scripts/parity_family.sh" qwen3 "hi" >/dev/null 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$WMAP_DIR/delegate_args.txt" ]; then
+    arg1=$(sed -n '1p' "$WMAP_DIR/delegate_args.txt")
+    arg2=$(sed -n '2p' "$WMAP_DIR/delegate_args.txt")
+    if [ "$arg1" = "$WMAP_DIR/root/mlx-community/Qwen3-0.6B-4bit" ] && [ "$arg2" = "hi" ]; then
+        pass "wrapper-id-mapping"
+    else
+        fail "wrapper-id-mapping" "wrong delegate args: $arg1 / $arg2"
+    fi
+else
+    fail "wrapper-id-mapping" "delegate not called (rc=$rc)"
+fi
+rm -rf "$WMAP_DIR"
+
+# --- wrapper: skip on unset root ---
+
+out=$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_QWEN3 sh "$WRAPPER" qwen3 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped'; then
+    pass "wrapper-skip-unset-root"
+else
+    fail "wrapper-skip-unset-root" "expected exit 0 + skipped (rc=$rc)"
+fi
+
+# --- wrapper: skip on missing dir ---
+
+WMISS_DIR=$(mktemp -d)
+out=$(MLXD_PARITY_CKPT_ROOT="$WMISS_DIR/nonexistent" sh "$WRAPPER" qwen3 2>&1) && rc=0 || rc=$?
+rm -rf "$WMISS_DIR"
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped'; then
+    pass "wrapper-skip-missing-dir"
+else
+    fail "wrapper-skip-missing-dir" "expected exit 0 + skipped (rc=$rc)"
+fi
+
+# --- wrapper: skip on TBD id (gemma3) ---
+
+out=$(MLXD_PARITY_CKPT_ROOT=/tmp sh "$WRAPPER" gemma3 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped.*no canonical checkpoint id'; then
+    pass "wrapper-skip-tbd-id"
+else
+    fail "wrapper-skip-tbd-id" "expected exit 0 + skipped:no canonical (rc=$rc)"
+fi
+
+# --- wrapper: per-family override ---
+
+WOVER_DIR=$(mktemp -d)
+mkdir -p "$WOVER_DIR/custom"
+mkdir -p "$WOVER_DIR/scripts"
+cp "$WRAPPER" "$WOVER_DIR/scripts/parity_family.sh"
+cat > "$WOVER_DIR/scripts/parity_temp0.sh" <<'STUBEOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/../delegate_args.txt"
+exit 0
+STUBEOF
+chmod +x "$WOVER_DIR/scripts/parity_temp0.sh"
+
+MLXD_PARITY_CKPT_QWEN3="$WOVER_DIR/custom" sh "$WOVER_DIR/scripts/parity_family.sh" qwen3 "test" >/dev/null 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$WOVER_DIR/delegate_args.txt" ]; then
+    arg1=$(sed -n '1p' "$WOVER_DIR/delegate_args.txt")
+    if [ "$arg1" = "$WOVER_DIR/custom" ]; then
+        pass "wrapper-per-family-override"
+    else
+        fail "wrapper-per-family-override" "wrong dir: $arg1"
+    fi
+else
+    fail "wrapper-per-family-override" "delegate not called (rc=$rc)"
+fi
+rm -rf "$WOVER_DIR"
+
+# --- wrapper: run-all with nothing set -> skip all, exit 0 ---
+
+out=$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_QWEN3 -u MLXD_PARITY_CKPT_GEMMA3 -u MLXD_PARITY_CKPT_QWEN2 -u MLXD_PARITY_CKPT_LLAMA -u MLXD_PARITY_CKPT_MISTRAL -u MLXD_PARITY_CKPT_LFM2 sh "$WRAPPER" all 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped'; then
+    pass "wrapper-run-all"
+else
+    fail "wrapper-run-all" "expected exit 0 + skipped lines (rc=$rc)"
+fi
+
 exit "$FAILS"

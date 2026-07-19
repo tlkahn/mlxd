@@ -871,6 +871,39 @@ static void test_bert_explicit_head_dim_ignored(void) {
     model_config_free(&cfg);
 }
 
+/* --- Phase 3: tiny_gemma3 fixture config --------------------------------- */
+
+static void test_tiny_gemma3_config(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/tiny_gemma3");
+    assert(rc == 0);
+
+    assert(cfg.family == MODEL_GEMMA3);
+    assert(cfg.vocab_size == 256);
+    assert(cfg.hidden_size == 64);
+    assert(cfg.num_hidden_layers == 2);
+    assert(cfg.num_attention_heads == 4);
+    assert(cfg.num_key_value_heads == 2);
+    assert(cfg.head_dim == 16);
+    assert(cfg.intermediate_size == 128);
+
+    assert(cfg.has_sliding_window == true);
+    assert(cfg.sliding_window == 4);
+    assert(cfg.sliding_window_pattern == 2);
+
+    assert(cfg.rope_theta == 1000000.0f);
+    assert(cfg.rope_local_base_freq == 10000.0f);
+    assert(cfg.query_pre_attn_scalar == 64);
+
+    assert(cfg.norm_has_offset == true);
+    assert(cfg.scale_embeddings == true);
+    assert(cfg.has_pre_ff_norm == true);
+    assert(cfg.has_qk_norm == true);
+    assert(cfg.tie_word_embeddings == true);
+
+    model_config_free(&cfg);
+}
+
 int main(void) {
     test_happy_path();
     test_kv_heads_default();
@@ -902,6 +935,7 @@ int main(void) {
     test_generation_config();
     test_float_overflow();
     test_bert_explicit_head_dim_ignored();
+    test_tiny_gemma3_config();
 
     printf("test_model_config: all passed\n");
     return 0;
