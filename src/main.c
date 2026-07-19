@@ -3,6 +3,7 @@
 #include "engine/engine.h"
 #include "http/gen.h"
 #include "http/server.h"
+#include "model/chat_template.h"
 #include "model/tokenizer.h"
 #include "registry/registry.h"
 
@@ -85,51 +86,6 @@ static void run_sigint_handler(int sig) {
 }
 
 /* --- Helpers -------------------------------------------------------------- */
-
-static char *slurp_file(const char *path, size_t *out_len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long sz = ftell(f);
-    if (sz < 0) { fclose(f); return NULL; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
-    char *buf = malloc(sz > 0 ? (size_t)sz : 1);
-    if (!buf) { fclose(f); return NULL; }
-    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
-        free(buf);
-        fclose(f);
-        return NULL;
-    }
-    fclose(f);
-    if (out_len) *out_len = (size_t)sz;
-    return buf;
-}
-
-static char *read_chat_template(const char *model_dir) {
-    size_t pathlen = strlen(model_dir) + sizeof("/tokenizer_config.json");
-    char *path = malloc(pathlen);
-    if (!path) return NULL;
-    snprintf(path, pathlen, "%s/tokenizer_config.json", model_dir);
-
-    size_t len = 0;
-    char *buf = slurp_file(path, &len);
-    free(path);
-    if (!buf) return NULL;
-
-    yyjson_doc *doc = yyjson_read(buf, len, 0);
-    free(buf);
-    if (!doc) return NULL;
-
-    char *result = NULL;
-    yyjson_val *root = yyjson_doc_get_root(doc);
-    if (yyjson_is_obj(root)) {
-        yyjson_val *tmpl = yyjson_obj_get(root, "chat_template");
-        if (yyjson_is_str(tmpl))
-            result = strdup(yyjson_get_str(tmpl));
-    }
-    yyjson_doc_free(doc);
-    return result;
-}
 
 static bool file_exists(const char *dir, const char *name) {
     size_t pathlen = strlen(dir) + 1 + strlen(name) + 1;
@@ -279,7 +235,7 @@ static int cmd_serve(int argc, char **argv) {
         return 1;
     }
 
-    char *chat_template = read_chat_template(model_dir);
+    char *chat_template = model_chat_template_read(model_dir);
     if (!chat_template)
         fprintf(stderr, "mlxd serve: no chat_template found; chat endpoints will return 400\n");
 
@@ -396,7 +352,7 @@ static int cmd_run(int argc, char **argv) {
     }
 
     if (!opts.raw)
-        chat_template = read_chat_template(model_dir);
+        chat_template = model_chat_template_read(model_dir);
 
     prompt_buf = cli_resolve_run_prompt(opts.prompt, stdin);
     if (!prompt_buf) {

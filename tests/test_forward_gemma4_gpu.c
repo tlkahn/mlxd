@@ -73,32 +73,6 @@ static int argmax_f32(mlx_array a, mlx_stream s) {
     return best;
 }
 
-/* Load engine_model_t bypassing the support gate (gemma4 not yet whitelisted in PR1).
-   TODO: replace with engine_model_load once gemma4 is in engine_model_check_supported (PR2). */
-static int load_gemma4(engine_model_t *em, const char *path) {
-    memset(em, 0, sizeof(*em));
-    if (model_config_load(&em->cfg, path) != 0) return -1;
-
-    char err[256] = {0};
-    if (weights_load(&em->w, path, &em->cfg, err, sizeof(err)) != 0) {
-        fprintf(stderr, "weights_load: %s\n", err);
-        model_config_free(&em->cfg);
-        memset(em, 0, sizeof(*em));
-        return -1;
-    }
-
-    em->rope_freqs = (mlx_array){.ctx = NULL};
-    if (fwd_rope_freqs_build(&em->rope_freqs, &em->cfg) != 0) {
-        fprintf(stderr, "fwd_rope_freqs_build failed\n");
-        weights_free(&em->w);
-        model_config_free(&em->cfg);
-        memset(em, 0, sizeof(*em));
-        return -1;
-    }
-
-    em->stream = mlxbridge_gpu_stream();
-    return 0;
-}
 
 /* ---- config flags ---- */
 
@@ -114,6 +88,8 @@ static void test_gemma4_config_flags(engine_model_t *em) {
     assert(em->cfg.num_kv_shared_layers == 2);
     assert(em->cfg.global_head_dim == 32);
     assert(em->cfg.num_global_key_value_heads == 1);
+    assert(em->cfg.final_logit_softcapping == 30.0f);
+    assert(em->cfg.hidden_size_per_layer_input == 8);
 }
 
 /* ---- forward shape: logits [1, vocab=256], all finite ---- */
@@ -134,6 +110,20 @@ static void test_gemma4_forward_shape(engine_model_t *em) {
     assert(mlx_array_dim(logits, 0) == 1);
     assert(mlx_array_dim(logits, 1) == 256);
     assert(is_finite_f32(logits, gpu));
+
+    /* Softcap: all logits must satisfy |logit| <= cap */
+    if (em->cfg.final_logit_softcapping > 0) {
+        float cap = em->cfg.final_logit_softcapping;
+        mlx_array lf = mlx_array_new();
+        MLXB_CHECK(mlx_astype(&lf, logits, MLX_FLOAT32, gpu));
+        MLXB_CHECK(mlx_array_eval(lf));
+        size_t n = mlx_array_size(lf);
+        const float *ld = mlx_array_data_float32(lf);
+        for (size_t i = 0; i < n; i++) {
+            assert(fabsf(ld[i]) <= cap + 0.1f);
+        }
+        mlx_array_free(lf);
+    }
 
     /* KV sharing: only non-shared layers (0,1) should have advanced offset */
     assert(kvcache_layer_offset(&kv, 0) == 5);
@@ -209,11 +199,8 @@ static void test_gemma4_unresolved_kv_source(engine_model_t *em) {
     em->cfg.num_kv_shared_layers = 3;
     assert(model_kv_source_layer(&em->cfg, 1) == -1);
 
-    /* Build input [1,1,D] */
-    int D = em->cfg.hidden_size_per_layer_input > 0
-                ? em->cfg.hidden_size_per_layer_input
-                : em->cfg.hidden_size;
-    int shape[] = {1, 1, D};
+    /* Build input [1,1,hidden_size] */
+    int shape[] = {1, 1, em->cfg.hidden_size};
     mlx_array x = mlx_array_new();
     MLXB_CHECK(mlx_zeros(&x, shape, 3, MLX_BFLOAT16, gpu));
 
@@ -231,13 +218,107 @@ static void test_gemma4_unresolved_kv_source(engine_model_t *em) {
     em->cfg = saved;
 }
 
+/* ---- fwd_layer_scalar_apply micro-tests ---- */
+
+static void test_layer_scalar_scale_effect(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_GEMMA4;
+    cfg.weight_prefix = "language_model.model";
+
+    weights_t w;
+    memset(&w, 0, sizeof(w));
+    w.params = mlx_map_string_to_array_new();
+
+    float scalar_val = 0.5f;
+    int scalar_shape[] = {1};
+    mlx_array scalar = mlx_array_new_data(&scalar_val, scalar_shape, 1, MLX_FLOAT32);
+    mlx_map_string_to_array_insert(w.params,
+        "language_model.model.layers.0.layer_scalar", scalar);
+    mlx_array_free(scalar);
+
+    float data[] = {2.0f, 4.0f, 6.0f, 8.0f};
+    int shape[] = {1, 1, 4};
+    mlx_array io = mlx_array_new_data(data, shape, 3, MLX_FLOAT32);
+
+    int rc = fwd_layer_scalar_apply(&io, 0, &w, &cfg, gpu);
+    assert(rc == 0);
+
+    MLXB_CHECK(mlx_array_eval(io));
+    const float *out = mlx_array_data_float32(io);
+    assert(fabsf(out[0] - 1.0f) < 1e-6f);
+    assert(fabsf(out[1] - 2.0f) < 1e-6f);
+    assert(fabsf(out[2] - 3.0f) < 1e-6f);
+    assert(fabsf(out[3] - 4.0f) < 1e-6f);
+
+    mlx_array_free(io);
+    mlx_map_string_to_array_free(w.params);
+}
+
+static void test_layer_scalar_hard_error(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_GEMMA4;
+    cfg.weight_prefix = "language_model.model";
+
+    weights_t w;
+    memset(&w, 0, sizeof(w));
+    w.params = mlx_map_string_to_array_new();
+
+    float data[] = {1.0f};
+    int shape[] = {1, 1, 1};
+    mlx_array io = mlx_array_new_data(data, shape, 3, MLX_FLOAT32);
+
+    int rc = fwd_layer_scalar_apply(&io, 0, &w, &cfg, gpu);
+    assert(rc != 0);
+
+    mlx_array_free(io);
+    mlx_map_string_to_array_free(w.params);
+}
+
+static void test_layer_scalar_non_gemma4_noop(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_LLAMA;
+    cfg.weight_prefix = "model";
+
+    weights_t w;
+    memset(&w, 0, sizeof(w));
+    w.params = mlx_map_string_to_array_new();
+
+    float data[] = {7.0f, 9.0f};
+    int shape[] = {1, 1, 2};
+    mlx_array io = mlx_array_new_data(data, shape, 3, MLX_FLOAT32);
+
+    int rc = fwd_layer_scalar_apply(&io, 0, &w, &cfg, gpu);
+    assert(rc == 0);
+
+    MLXB_CHECK(mlx_array_eval(io));
+    const float *out = mlx_array_data_float32(io);
+    assert(fabsf(out[0] - 7.0f) < 1e-6f);
+    assert(fabsf(out[1] - 9.0f) < 1e-6f);
+
+    mlx_array_free(io);
+    mlx_map_string_to_array_free(w.params);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
+    test_layer_scalar_scale_effect();
+    printf("  test_layer_scalar_scale_effect: passed\n");
+
+    test_layer_scalar_hard_error();
+    printf("  test_layer_scalar_hard_error: passed\n");
+
+    test_layer_scalar_non_gemma4_noop();
+    printf("  test_layer_scalar_non_gemma4_noop: passed\n");
+
     engine_model_t em;
-    int rc = load_gemma4(&em, FIXTURES "/tiny_gemma4");
+    char err[256] = {0};
+    int rc = engine_model_load(&em, FIXTURES "/tiny_gemma4", err, sizeof(err));
     if (rc != 0) {
-        fprintf(stderr, "SKIP: failed to load tiny_gemma4 fixture\n");
+        fprintf(stderr, "SKIP: failed to load tiny_gemma4 fixture: %s\n", err);
         return 1;
     }
 

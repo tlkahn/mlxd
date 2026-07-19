@@ -722,6 +722,38 @@ cleanup:
     return rc;
 }
 
+int fwd_softcap(mlx_array *out, mlx_array logits, float cap, mlx_stream s) {
+    if (!out || cap <= 0.0f) return -1;
+    int rc = -1;
+    mlx_array cap_bf = mlx_array_new();
+    mlx_array scaled = mlx_array_new();
+    mlx_array th = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    mlx_array cap_f32 = mlx_array_new_float(cap);
+    if (!MLXB_CHECK(mlx_astype(&cap_bf, cap_f32, MLX_BFLOAT16, s))) {
+        mlx_array_free(cap_f32);
+        goto cleanup;
+    }
+    mlx_array_free(cap_f32);
+
+    if (!MLXB_CHECK(mlx_divide(&scaled, logits, cap_bf, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_tanh(&th, scaled, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_multiply(&result, th, cap_bf, s))) goto cleanup;
+
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(th);
+    mlx_array_free(scaled);
+    mlx_array_free(cap_bf);
+    return rc;
+}
+
 int fwd_gelu_approx(mlx_array *out, mlx_array x, mlx_stream s) {
     if (!out) return -1;
 
@@ -853,9 +885,338 @@ cleanup:
     return rc;
 }
 
+/* Embed-take helper: shared logic for embedding table lookup.
+   Takes flat ids from an embed weight, handles quant and non-quant paths.
+   Result is bf16 [total, embed_dim]. */
+static int embed_take(mlx_array *out, mlx_array flat_ids,
+                      const weights_t *w, const char *base_name,
+                      const model_config_t *cfg, mlx_stream s) {
+    int rc = -1;
+    weight_triplet_t tri;
+    if (weights_get_triplet(&tri, w, base_name) != 0) return -1;
+
+    mlx_array taken = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    if (tri.quantized) {
+        mlx_array dq_w = mlx_array_new();
+        mlx_array dq_s = mlx_array_new();
+        mlx_array dq_b = mlx_array_new();
+        mlx_array dq = mlx_array_new();
+        bool ok = MLXB_CHECK(mlx_take_axis(&dq_w, tri.weight, flat_ids, 0, s)) &&
+                  MLXB_CHECK(mlx_take_axis(&dq_s, tri.scales, flat_ids, 0, s)) &&
+                  MLXB_CHECK(mlx_take_axis(&dq_b, tri.biases, flat_ids, 0, s)) &&
+                  MLXB_CHECK(mlx_dequantize(
+                      &dq, dq_w, dq_s, dq_b,
+                      (mlx_optional_int){.value = cfg->quant_group_size, .has_value = true},
+                      (mlx_optional_int){.value = cfg->quant_bits, .has_value = true},
+                      "affine", (mlx_array){.ctx = NULL},
+                      (mlx_optional_dtype){.has_value = false}, s)) &&
+                  MLXB_CHECK(mlx_astype(&result, dq, MLX_BFLOAT16, s));
+        mlx_array_free(dq);
+        mlx_array_free(dq_b);
+        mlx_array_free(dq_s);
+        mlx_array_free(dq_w);
+        if (!ok) goto cleanup;
+    } else {
+        mlx_array bf16 = mlx_array_new();
+        bool ok = MLXB_CHECK(mlx_take_axis(&taken, tri.weight, flat_ids, 0, s)) &&
+                  MLXB_CHECK(mlx_astype(&bf16, taken, MLX_BFLOAT16, s));
+        if (!ok) { mlx_array_free(bf16); goto cleanup; }
+        mlx_array_free(result);
+        result = bf16;
+    }
+
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    weights_triplet_free(&tri);
+    mlx_array_free(result);
+    mlx_array_free(taken);
+    return rc;
+}
+
+int fwd_ple_inputs(mlx_array *out, mlx_array ids, mlx_array h,
+                   const weights_t *w, const model_config_t *cfg,
+                   mlx_stream s) {
+    if (!out || !w || !cfg) return -1;
+    int ple_dim = cfg->hidden_size_per_layer_input;
+    if (ple_dim <= 0) return -1;
+    int rc = -1;
+
+    int ndim = (int)mlx_array_ndim(ids);
+    int B = ndim >= 2 ? mlx_array_dim(ids, 0) : 1;
+    int S = ndim >= 2 ? mlx_array_dim(ids, 1) : mlx_array_dim(ids, 0);
+    int total = B * S;
+    int L = cfg->num_hidden_layers;
+
+    char name[256];
+    weights_tensor_name(name, sizeof(name), cfg, -1, "embed_tokens_per_layer");
+
+    mlx_array flat = mlx_array_new();
+    mlx_array ple_emb = mlx_array_new();
+    mlx_array ple_scale = mlx_array_new();
+    mlx_array ple_scaled = mlx_array_new();
+    mlx_array h_proj = mlx_array_new();
+    mlx_array h_scale = mlx_array_new();
+    mlx_array h_scaled = mlx_array_new();
+    mlx_array h_reshaped = mlx_array_new();
+    mlx_array ple_reshaped = mlx_array_new();
+    mlx_array sum = mlx_array_new();
+    mlx_array normed = mlx_array_new();
+    mlx_array combine_scale = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    int flat_shape[] = {total};
+    if (!MLXB_CHECK(mlx_reshape(&flat, ids, flat_shape, 1, s))) goto cleanup;
+
+    /* embed_tokens_per_layer take + scale by sqrt(ple_dim) */
+    if (embed_take(&ple_emb, flat, w, name, cfg, s) != 0) goto cleanup;
+    {
+        int emb_rs[] = {B, S, L * ple_dim};
+        mlx_array tmp = mlx_array_new();
+        if (!MLXB_CHECK(mlx_reshape(&tmp, ple_emb, emb_rs, 3, s))) {
+            mlx_array_free(tmp);
+            goto cleanup;
+        }
+        mlx_array_free(ple_emb);
+        ple_emb = tmp;
+    }
+    {
+        mlx_array sf32 = mlx_array_new_float(sqrtf((float)ple_dim));
+        if (!MLXB_CHECK(mlx_astype(&ple_scale, sf32, MLX_BFLOAT16, s))) {
+            mlx_array_free(sf32);
+            goto cleanup;
+        }
+        mlx_array_free(sf32);
+    }
+    if (!MLXB_CHECK(mlx_multiply(&ple_scaled, ple_emb, ple_scale, s)))
+        goto cleanup;
+
+    /* h through per_layer_model_projection, scale by 1/sqrt(hidden_size) */
+    {
+        char proj_name[256];
+        weights_tensor_name(proj_name, sizeof(proj_name), cfg, -1,
+                            "per_layer_model_projection");
+        weight_triplet_t proj_tri;
+        if (weights_get_triplet(&proj_tri, w, proj_name) != 0) goto cleanup;
+        if (fwd_linear(&h_proj, h, &proj_tri, cfg, s) != 0) {
+            weights_triplet_free(&proj_tri);
+            goto cleanup;
+        }
+        weights_triplet_free(&proj_tri);
+    }
+    {
+        mlx_array sf32 = mlx_array_new_float(1.0f / sqrtf((float)cfg->hidden_size));
+        if (!MLXB_CHECK(mlx_astype(&h_scale, sf32, MLX_BFLOAT16, s))) {
+            mlx_array_free(sf32);
+            goto cleanup;
+        }
+        mlx_array_free(sf32);
+    }
+    if (!MLXB_CHECK(mlx_multiply(&h_scaled, h_proj, h_scale, s))) goto cleanup;
+
+    /* Reshape both to [B, S, L, ple_dim] */
+    {
+        int rs[] = {B, S, L, ple_dim};
+        if (!MLXB_CHECK(mlx_reshape(&h_reshaped, h_scaled, rs, 4, s)))
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_reshape(&ple_reshaped, ple_scaled, rs, 4, s)))
+            goto cleanup;
+    }
+
+    /* RMS norm with per_layer_projection_norm on h_reshaped (the projection) */
+    {
+        char norm_name[256];
+        weights_tensor_name(norm_name, sizeof(norm_name), cfg, -1,
+                            "per_layer_projection_norm");
+        char wn[270];
+        snprintf(wn, sizeof(wn), "%s.weight", norm_name);
+        mlx_array nw = mlx_array_new();
+        if (weights_get(&nw, w, wn) != 0) {
+            mlx_array_free(nw);
+            goto cleanup;
+        }
+        if (fwd_rmsnorm(&normed, h_reshaped, nw, cfg->rms_norm_eps,
+                        cfg->norm_has_offset, s) != 0) {
+            mlx_array_free(nw);
+            goto cleanup;
+        }
+        mlx_array_free(nw);
+    }
+
+    /* (normed + scaled_emb) * (1/sqrt(2)) */
+    if (!MLXB_CHECK(mlx_add(&sum, normed, ple_reshaped, s))) goto cleanup;
+    {
+        mlx_array sf32 = mlx_array_new_float(1.0f / sqrtf(2.0f));
+        if (!MLXB_CHECK(mlx_astype(&combine_scale, sf32, MLX_BFLOAT16, s))) {
+            mlx_array_free(sf32);
+            goto cleanup;
+        }
+        mlx_array_free(sf32);
+    }
+    if (!MLXB_CHECK(mlx_multiply(&result, sum, combine_scale, s))) goto cleanup;
+
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(combine_scale);
+    mlx_array_free(normed);
+    mlx_array_free(sum);
+    mlx_array_free(ple_reshaped);
+    mlx_array_free(h_reshaped);
+    mlx_array_free(h_scaled);
+    mlx_array_free(h_scale);
+    mlx_array_free(h_proj);
+    mlx_array_free(ple_scaled);
+    mlx_array_free(ple_scale);
+    mlx_array_free(ple_emb);
+    mlx_array_free(flat);
+    return rc;
+}
+
+int fwd_ple_apply(mlx_array *io_h, int layer, mlx_array ple_inputs,
+                  const weights_t *w, const model_config_t *cfg,
+                  mlx_stream s) {
+    if (!io_h || !w || !cfg) return -1;
+    if (!ple_inputs.ctx) return 0;
+    int ple_dim = cfg->hidden_size_per_layer_input;
+    if (ple_dim <= 0) return 0;
+    int rc = -1;
+
+    int B = mlx_array_dim(ple_inputs, 0);
+    int S = mlx_array_dim(ple_inputs, 1);
+    char name[256];
+
+    mlx_array sliced = mlx_array_new();
+    mlx_array gate_in = mlx_array_new();
+    mlx_array gate_act = mlx_array_new();
+    mlx_array gated = mlx_array_new();
+    mlx_array projected = mlx_array_new();
+    mlx_array normed = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    /* Slice layer from ple_inputs: [B,S,L,ple_dim] -> [B,S,ple_dim] */
+    {
+        int start[] = {0, 0, layer, 0};
+        int stop[] = {B, S, layer + 1, ple_dim};
+        int strides[] = {1, 1, 1, 1};
+        mlx_array sl = mlx_array_new();
+        if (!MLXB_CHECK(mlx_slice(&sl, ple_inputs, start, 4, stop, 4, strides, 4, s))) {
+            mlx_array_free(sl);
+            goto cleanup;
+        }
+        int rs[] = {B, S, ple_dim};
+        if (!MLXB_CHECK(mlx_reshape(&sliced, sl, rs, 3, s))) {
+            mlx_array_free(sl);
+            goto cleanup;
+        }
+        mlx_array_free(sl);
+    }
+
+    /* gate = gelu_approx(per_layer_input_gate @ h) */
+    {
+        weights_tensor_name(name, sizeof(name), cfg, layer,
+                            "per_layer_input_gate");
+        weight_triplet_t tri;
+        if (weights_get_triplet(&tri, w, name) != 0) goto cleanup;
+        if (fwd_linear(&gate_in, *io_h, &tri, cfg, s) != 0) {
+            weights_triplet_free(&tri);
+            goto cleanup;
+        }
+        weights_triplet_free(&tri);
+    }
+    if (fwd_gelu_approx(&gate_act, gate_in, s) != 0) goto cleanup;
+
+    /* gated = sliced * gate */
+    if (!MLXB_CHECK(mlx_multiply(&gated, sliced, gate_act, s))) goto cleanup;
+
+    /* project via per_layer_projection */
+    {
+        weights_tensor_name(name, sizeof(name), cfg, layer,
+                            "per_layer_projection");
+        weight_triplet_t tri;
+        if (weights_get_triplet(&tri, w, name) != 0) goto cleanup;
+        if (fwd_linear(&projected, gated, &tri, cfg, s) != 0) {
+            weights_triplet_free(&tri);
+            goto cleanup;
+        }
+        weights_triplet_free(&tri);
+    }
+
+    /* RMS norm with post_per_layer_input_norm */
+    {
+        weights_tensor_name(name, sizeof(name), cfg, layer,
+                            "post_per_layer_input_norm");
+        char wn[270];
+        snprintf(wn, sizeof(wn), "%s.weight", name);
+        mlx_array nw = mlx_array_new();
+        if (weights_get(&nw, w, wn) != 0) {
+            mlx_array_free(nw);
+            goto cleanup;
+        }
+        if (fwd_rmsnorm(&normed, projected, nw, cfg->rms_norm_eps,
+                        cfg->norm_has_offset, s) != 0) {
+            mlx_array_free(nw);
+            goto cleanup;
+        }
+        mlx_array_free(nw);
+    }
+
+    /* h += normed */
+    if (!MLXB_CHECK(mlx_add(&result, *io_h, normed, s))) goto cleanup;
+    mlx_array_free(*io_h);
+    *io_h = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(normed);
+    mlx_array_free(projected);
+    mlx_array_free(gated);
+    mlx_array_free(gate_act);
+    mlx_array_free(gate_in);
+    mlx_array_free(sliced);
+    return rc;
+}
+
+int fwd_layer_scalar_apply(mlx_array *io, int layer, const weights_t *w,
+                           const model_config_t *cfg, mlx_stream s) {
+    char name[256];
+    weights_tensor_name(name, sizeof(name), cfg, layer, "layer_scalar");
+    mlx_array ls = mlx_array_new();
+    if (weights_get(&ls, w, name) == 0) {
+        mlx_array scaled = mlx_array_new();
+        if (!MLXB_CHECK(mlx_multiply(&scaled, *io, ls, s))) {
+            mlx_array_free(scaled);
+            mlx_array_free(ls);
+            return -1;
+        }
+        mlx_array_free(ls);
+        mlx_array_free(*io);
+        *io = scaled;
+        return 0;
+    }
+    mlx_array_free(ls);
+    if (cfg->family == MODEL_GEMMA4) {
+        log_error("missing %s weight", name);
+        return -1;
+    }
+    return 0;
+}
+
 int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       const weights_t *w, const model_config_t *cfg,
-                      kvcache_t *kv, mlx_array rope_freqs, mlx_stream s) {
+                      kvcache_t *kv, mlx_array rope_freqs,
+                      mlx_array ple_inputs, mlx_stream s) {
     if (!out || !w || !cfg || !kv) return -1;
     int rc = -1;
     char name[256], wname[270];
@@ -915,6 +1276,15 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
         if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;
         if (!MLXB_CHECK(mlx_add(&result, h1, mlp_out, s))) goto cleanup;
     }
+
+    /* PLE: apply per-layer embedding after MLP residual */
+    if (ple_inputs.ctx) {
+        if (fwd_ple_apply(&result, layer, ple_inputs, w, cfg, s) != 0)
+            goto cleanup;
+    }
+
+    if (fwd_layer_scalar_apply(&result, layer, w, cfg, s) != 0)
+        goto cleanup;
 
     mlx_array_free(*out);
     *out = result;

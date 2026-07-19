@@ -287,6 +287,7 @@ static const recipe_t LLAMA3 = {
 #define G4_KV      2
 #define G4_GHD     32
 #define G4_GKV     1
+#define G4_PLE     8
 
 static const bool G4_IS_GLOBAL[G4_LAYERS] = {false, true, false, true};
 static const int G4_NUM_KV_SHARED = 2;
@@ -316,6 +317,17 @@ static mlx_map_string_to_array build_gemma4_tensors(mlx_stream s) {
     int norm_shape[] = {G4_HIDDEN};
     insert(m, "language_model.model.norm.weight",
            ones_bf16(norm_shape, 1, s));
+
+    /* PLE globals */
+    int ple_emb_shape[] = {G4_VOCAB, G4_LAYERS * G4_PLE};
+    insert(m, "language_model.model.embed_tokens_per_layer.weight",
+           rand_bf16(&key, ple_emb_shape, 2, s));
+    int ple_proj_shape[] = {G4_LAYERS * G4_PLE, G4_HIDDEN};
+    insert(m, "language_model.model.per_layer_model_projection.weight",
+           rand_bf16(&key, ple_proj_shape, 2, s));
+    int ple_pnorm_shape[] = {G4_PLE};
+    insert(m, "language_model.model.per_layer_projection_norm.weight",
+           ones_bf16(ple_pnorm_shape, 1, s));
 
     for (int L = 0; L < G4_LAYERS; L++) {
         char name[256];
@@ -392,6 +404,31 @@ static mlx_map_string_to_array build_gemma4_tensors(mlx_stream s) {
         snprintf(name, sizeof(name),
                  "language_model.model.layers.%d.mlp.down_proj.weight", L);
         insert(m, name, rand_bf16(&key, down_shape, 2, s));
+
+        /* PLE per-layer */
+        int ple_gate_shape[] = {G4_PLE, G4_HIDDEN};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.per_layer_input_gate.weight", L);
+        insert(m, name, rand_bf16(&key, ple_gate_shape, 2, s));
+        int ple_lproj_shape[] = {G4_HIDDEN, G4_PLE};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.per_layer_projection.weight", L);
+        insert(m, name, rand_bf16(&key, ple_lproj_shape, 2, s));
+        int ple_lnorm_shape[] = {G4_HIDDEN};
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.post_per_layer_input_norm.weight", L);
+        insert(m, name, ones_bf16(ple_lnorm_shape, 1, s));
+
+        /* layer_scalar: bare scalar, 0.2*(L+1) */
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.layer_scalar", L);
+        {
+            mlx_array f32 = mlx_array_new_float(0.2f * (L + 1));
+            mlx_array bf = mlx_array_new();
+            CHECK(mlx_astype(&bf, f32, MLX_BFLOAT16, s));
+            mlx_array_free(f32);
+            insert(m, name, bf);
+        }
     }
 
     mlx_array_free(key);
@@ -419,6 +456,9 @@ static void write_gemma4_config(const char *dir) {
     yyjson_mut_obj_add_int(doc, root, "num_global_key_value_heads", G4_GKV);
     yyjson_mut_obj_add_int(doc, root, "num_kv_shared_layers", G4_NUM_KV_SHARED);
     yyjson_mut_obj_add_bool(doc, root, "attention_k_eq_v", true);
+    yyjson_mut_obj_add_bool(doc, root, "use_double_wide_mlp", false);
+    yyjson_mut_obj_add_real(doc, root, "final_logit_softcapping", 30.0);
+    yyjson_mut_obj_add_int(doc, root, "hidden_size_per_layer_input", 8);
 
     /* layer_types */
     yyjson_mut_val *lt = yyjson_mut_arr(doc);

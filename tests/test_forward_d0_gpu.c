@@ -658,7 +658,7 @@ static void test_f5_sandwich_decoder(void) {
     kvcache_t kv;
     assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
-    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv);
 
     /* manual sandwich composition from tested primitives */
@@ -691,7 +691,7 @@ static void test_f5_sandwich_decoder(void) {
     cfg.has_pre_ff_norm = false;
     assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
-    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv);
 
     kvcache_t kv3;
@@ -1044,7 +1044,7 @@ static void test_combo_f3_f5_offset_sandwich(void) {
     kvcache_t kv;
     assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
-    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv);
 
     /* Manual sandwich composition with offset=true on all four norms */
@@ -1232,7 +1232,7 @@ static void test_combo_gemma3_local_layer_decoder(void) {
     kvcache_t kv;
     assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
-    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
 
     /* Manual sandwich reference with offset norms */
     mlx_array ln_in = get_w(&w, "layers.0.input_layernorm.weight");
@@ -1261,16 +1261,16 @@ static void test_combo_gemma3_local_layer_decoder(void) {
     /* Decode step: one token after the prefill */
     mlx_array x1 = det_input(1, 901);
     mlx_array out1 = mlx_array_new();
-    assert(fwd_decoder_layer(&out1, x1, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&out1, x1, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
     assert(mlx_array_dim(out1, 1) == 1);
 
     /* Decode reference via second kvcache */
     kvcache_t kv3;
     assert(kvcache_init(&kv3, 1) == 0);
     mlx_array dec_pre_out = mlx_array_new();
-    assert(fwd_decoder_layer(&dec_pre_out, x, 0, &w, &cfg, &kv3, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&dec_pre_out, x, 0, &w, &cfg, &kv3, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
     mlx_array dec_out = mlx_array_new();
-    assert(fwd_decoder_layer(&dec_out, x1, 0, &w, &cfg, &kv3, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&dec_out, x1, 0, &w, &cfg, &kv3, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
     assert(max_abs_diff(out1, dec_out) < 1e-6f);
     kvcache_free(&kv3);
 

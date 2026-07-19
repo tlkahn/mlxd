@@ -7,7 +7,13 @@ set -eu
 CKPT="${1:-}"
 PROMPT="${2:-The capital of France is}"
 PORT="${MLXD_PARITY_PORT:-18653}"
-MAX_TOKENS=50
+MAX_TOKENS="${MLXD_PARITY_MAX_TOKENS:-50}"
+# Mode: "raw" (default) hits /v1/completions + mlxd --raw.
+#        "chat" hits /v1/chat/completions + mlxd with chat template (--no-think).
+# Chat mode is the right gate for instruct checkpoints (gemma4-it etc.) whose
+# raw completion path collapses into short loops that trip mlx-serve's
+# degenerate-loop detector and produce length-only mismatches.
+MODE="${MLXD_PARITY_MODE:-raw}"
 
 # --- Skip branch: never fails CI ---
 
@@ -81,8 +87,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "oracle flags: --no-pld --no-mtp"
-"$MLXD_MLX_SERVE_BIN" --model "$CKPT" --serve --port "$PORT" --no-pld --no-mtp >/dev/null 2>&1 &
+# MLXD_MLX_SERVE_EXTRA_ARGS: optional extra oracle flags (e.g. --skip-mem-preflight).
+# Word-split intentionally - callers pass simple flag tokens only.
+# shellcheck disable=SC2086
+echo "oracle flags: --no-pld --no-mtp ${MLXD_MLX_SERVE_EXTRA_ARGS:-}"
+"$MLXD_MLX_SERVE_BIN" --model "$CKPT" --serve --port "$PORT" --no-pld --no-mtp ${MLXD_MLX_SERVE_EXTRA_ARGS:-} >/dev/null 2>&1 &
 ORACLE_PID=$!
 
 echo "waiting for oracle on port $PORT..."
@@ -106,15 +115,36 @@ fi
 
 # --- Oracle text (via temp file, no command substitution) ---
 
-BODY=$(python3 -c 'import json,sys; print(json.dumps({"prompt": sys.argv[1], "temperature": 0, "max_tokens": int(sys.argv[2]), "stream": False}))' "$PROMPT" "$MAX_TOKENS")
-if ! curl -sf -X POST "http://127.0.0.1:$PORT/v1/completions" \
+echo "parity mode: $MODE"
+case "$MODE" in
+    raw)
+        BODY=$(python3 -c 'import json,sys; print(json.dumps({"prompt": sys.argv[1], "temperature": 0, "max_tokens": int(sys.argv[2]), "stream": False}))' "$PROMPT" "$MAX_TOKENS")
+        ORACLE_PATH="/v1/completions"
+        EXTRACT='import sys,json; d=json.load(open(sys.argv[1],"rb")); open(sys.argv[2],"wb").write(d["choices"][0]["text"].encode("utf-8"))'
+        MLXD_EXTRA="--raw"
+        ;;
+    chat)
+        BODY=$(python3 -c 'import json,sys; print(json.dumps({"messages":[{"role":"user","content":sys.argv[1]}], "temperature": 0, "max_tokens": int(sys.argv[2]), "stream": False}))' "$PROMPT" "$MAX_TOKENS")
+        ORACLE_PATH="/v1/chat/completions"
+        EXTRACT='import sys,json; d=json.load(open(sys.argv[1],"rb")); open(sys.argv[2],"wb").write(d["choices"][0]["message"]["content"].encode("utf-8"))'
+        # --no-think keeps enable_thinking=false so the rendered template matches
+        # the oracle's default non-thinking chat path for gemma4.
+        MLXD_EXTRA="--no-think"
+        ;;
+    *)
+        echo "FAIL: unknown MLXD_PARITY_MODE='$MODE' (want raw|chat)" >&2
+        exit 1
+        ;;
+esac
+
+if ! curl -sf -X POST "http://127.0.0.1:$PORT$ORACLE_PATH" \
     -H "Content-Type: application/json" \
     -d "$BODY" \
     -o "$WORK/resp.json"; then
-    echo "FAIL: oracle completion request failed" >&2
+    echo "FAIL: oracle $ORACLE_PATH request failed" >&2
     exit 1
 fi
-if ! python3 -c 'import sys,json; f=open(sys.argv[1],"rb"); d=json.load(f); open(sys.argv[2],"wb").write(d["choices"][0]["text"].encode("utf-8"))' \
+if ! python3 -c "$EXTRACT" \
     "$WORK/resp.json" "$WORK/oracle.txt" 2>/dev/null; then
     echo "FAIL: could not parse oracle response" >&2
     exit 1
@@ -123,18 +153,23 @@ fi
 stop_oracle
 
 # --- mlxd text (via temp file, no command substitution) ---
-
-"$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" --raw --temperature 0 --max-tokens "$MAX_TOKENS" \
+# shellcheck disable=SC2086
+"$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" $MLXD_EXTRA --temperature 0 --max-tokens "$MAX_TOKENS" \
     > "$WORK/mlxd.txt"
 
 # --- Compare (byte-exact via parity_compare.py) ---
 
 if python3 "$SCRIPT_DIR/parity_compare.py" "$WORK/oracle.txt" "$WORK/mlxd.txt"; then
-    echo "text parity OK ($MAX_TOKENS tokens)"
+    echo "text parity OK (mode=$MODE, max_tokens=$MAX_TOKENS)"
     exit 0
 else
     echo ""
+    echo "--- oracle text ---"
+    cat "$WORK/oracle.txt"; echo
+    echo "--- mlxd text ---"
+    cat "$WORK/mlxd.txt"
     echo "--- mlxd token ids ---"
-    "$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" --raw --temperature 0 --max-tokens "$MAX_TOKENS" --token-ids
+    # shellcheck disable=SC2086
+    "$REPO_DIR/mlxd" run "$CKPT" "$PROMPT" $MLXD_EXTRA --temperature 0 --max-tokens "$MAX_TOKENS" --token-ids
     exit 1
 fi

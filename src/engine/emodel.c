@@ -71,9 +71,34 @@ int engine_model_check_supported(const model_config_t *cfg,
                "qk_norm not supported for llama");
         return 0;
 
+    case MODEL_GEMMA4:
+        REJECT(cfg->num_experts > 0,
+               "MoE models not supported");
+        REJECT(cfg->use_double_wide_mlp,
+               "use_double_wide_mlp not supported (E2B-class unverified)");
+        REJECT(cfg->hidden_act != HIDDEN_ACT_GELU_APPROX,
+               "gemma4 requires gelu_pytorch_tanh activation");
+        REJECT(cfg->num_kv_shared_layers >= cfg->num_hidden_layers,
+               "num_kv_shared_layers must be < num_hidden_layers");
+        REJECT(cfg->rope_proportional &&
+               cfg->rope_proportional_factor <= 0.0f,
+               "rope_proportional_factor must be > 0");
+        REJECT(cfg->partial_rotary_factor_global <= 0.0f ||
+               cfg->partial_rotary_factor_global > 1.0f,
+               "partial_rotary_factor_global must be in (0, 1]");
+        /* Reject configs where a KV-shared layer has no same-type source */
+        for (int i = 0; i < cfg->num_hidden_layers; i++) {
+            if (model_layer_kv_shared(cfg, i) &&
+                model_kv_source_layer(cfg, i) < 0) {
+                REJECT(true,
+                       "KV-shared layer has no same-type source");
+            }
+        }
+        return 0;
+
     default:
         REJECT(true,
-               "unsupported model family (only qwen3/llama dense supported)");
+               "unsupported model family (only qwen3/llama/gemma4 dense supported)");
     }
 }
 
@@ -139,13 +164,21 @@ int model_forward(engine_model_t *em, mlx_array ids, kvcache_t *kv,
     mlx_array normed = mlx_array_new();
     mlx_array sliced = mlx_array_new();
     mlx_array logits = mlx_array_new();
+    mlx_array ple = (mlx_array){.ctx = NULL};
 
     /* Embedding */
     if (fwd_embed(&h, ids, w, cfg, s) != 0) goto cleanup;
 
+    /* PLE: compute ple_inputs once after embedding */
+    if (cfg->hidden_size_per_layer_input > 0) {
+        ple = mlx_array_new();
+        if (fwd_ple_inputs(&ple, ids, h, w, cfg, s) != 0)
+            goto cleanup;
+    }
+
     /* Decoder layers */
     for (int L = 0; L < cfg->num_hidden_layers; L++) {
-        if (fwd_decoder_layer(&layer_out, h, L, w, cfg, kv, em->rope_freqs, s) != 0)
+        if (fwd_decoder_layer(&layer_out, h, L, w, cfg, kv, em->rope_freqs, ple, s) != 0)
             goto cleanup;
         mlx_array_free(h);
         h = layer_out;
@@ -198,6 +231,17 @@ int model_forward(engine_model_t *em, mlx_array ids, kvcache_t *kv,
         weights_triplet_free(&lm_tri);
     }
 
+    /* Logit softcapping */
+    if (cfg->final_logit_softcapping > 0) {
+        mlx_array capped = mlx_array_new();
+        if (fwd_softcap(&capped, logits, cfg->final_logit_softcapping, s) != 0) {
+            mlx_array_free(capped);
+            goto cleanup;
+        }
+        mlx_array_free(logits);
+        logits = capped;
+    }
+
     /* Reshape to [B, vocab] */
     int B = mlx_array_dim(logits, 0);
     int reshape[] = {B, cfg->vocab_size};
@@ -221,5 +265,6 @@ cleanup:
     mlx_array_free(normed);
     mlx_array_free(layer_out);
     mlx_array_free(h);
+    if (ple.ctx) mlx_array_free(ple);
     return rc;
 }

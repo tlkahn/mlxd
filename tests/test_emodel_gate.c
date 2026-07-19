@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef MLXD_FIXTURES_DIR
+#error "MLXD_FIXTURES_DIR must be defined"
+#endif
+
 static model_config_t make_supported(void) {
     model_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -26,7 +30,7 @@ static void test_reject_unsupported_family(void) {
     cfg.family = MODEL_GEMMA3;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(strcmp(err, "unsupported model family (only qwen3/llama dense supported)") == 0);
+    assert(strcmp(err, "unsupported model family (only qwen3/llama/gemma4 dense supported)") == 0);
 }
 
 static void test_reject_attention_bias(void) {
@@ -119,7 +123,7 @@ static void test_reject_attn_output_gate(void) {
 
 static void test_reject_all_other_families(void) {
     static const model_family_t others[] = {
-        MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3, MODEL_GEMMA4,
+        MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3,
         MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
         MODEL_MISTRAL, MODEL_LFM2,
         MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
@@ -129,7 +133,7 @@ static void test_reject_all_other_families(void) {
         cfg.family = others[i];
         char err[256] = {0};
         assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-        assert(strcmp(err, "unsupported model family (only qwen3/llama dense supported)") == 0);
+        assert(strcmp(err, "unsupported model family (only qwen3/llama/gemma4 dense supported)") == 0);
     }
 }
 
@@ -229,6 +233,90 @@ static void test_llama_reject_partial_rotary(void) {
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
     assert(strcmp(err, "partial rotary embedding not supported") == 0);
+}
+
+/* --- gemma4-specific gate tests ----------------------------------------- */
+
+static model_config_t make_gemma4_supported(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_GEMMA4;
+    cfg.hidden_act = HIDDEN_ACT_GELU_APPROX;
+    cfg.use_double_wide_mlp = false;
+    cfg.norm_has_offset = false;
+    cfg.scale_embeddings = true;
+    cfg.has_pre_ff_norm = true;
+    cfg.has_sliding_window = true;
+    cfg.sliding_window = 4;
+    cfg.has_qk_norm = true;
+    cfg.partial_rotary_factor = 1.0f;
+    cfg.partial_rotary_factor_global = 0.5f;
+    cfg.rope_proportional = true;
+    cfg.rope_proportional_factor = 8.0f;
+    cfg.num_hidden_layers = 4;
+    cfg.num_kv_shared_layers = 2;
+    cfg.has_explicit_layer_types = true;
+    cfg.layer_is_global[0] = false;
+    cfg.layer_is_global[1] = true;
+    cfg.layer_is_global[2] = false;
+    cfg.layer_is_global[3] = true;
+    return cfg;
+}
+
+static void test_gemma4_supported_passes(void) {
+    model_config_t cfg = make_gemma4_supported();
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+}
+
+static void test_gemma4_reject_all_shared(void) {
+    model_config_t cfg = make_gemma4_supported();
+    cfg.num_kv_shared_layers = cfg.num_hidden_layers;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "num_kv_shared_layers") != NULL);
+}
+
+static void test_gemma4_reject_proportional_factor_zero(void) {
+    model_config_t cfg = make_gemma4_supported();
+    cfg.rope_proportional_factor = 0.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "rope_proportional_factor") != NULL);
+}
+
+static void test_gemma4_reject_partial_rotary_global_zero(void) {
+    model_config_t cfg = make_gemma4_supported();
+    cfg.partial_rotary_factor_global = 0.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial_rotary_factor_global") != NULL);
+}
+
+static void test_gemma4_reject_partial_rotary_global_over_one(void) {
+    model_config_t cfg = make_gemma4_supported();
+    cfg.partial_rotary_factor_global = 1.5f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial_rotary_factor_global") != NULL);
+}
+
+static void test_gemma4_reject_unresolved_kv_source(void) {
+    /* All shared layers global but no global non-shared layers below boundary */
+    model_config_t cfg = make_gemma4_supported();
+    cfg.num_hidden_layers = 4;
+    cfg.num_kv_shared_layers = 2;
+    cfg.has_explicit_layer_types = true;
+    /* layers 0,1 non-shared local; layers 2,3 shared global.
+       Layer 2 (shared global) needs a global source below boundary=2, but
+       layers 0,1 are both local => no source. */
+    cfg.layer_is_global[0] = false;
+    cfg.layer_is_global[1] = false;
+    cfg.layer_is_global[2] = true;
+    cfg.layer_is_global[3] = true;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "no same-type source") != NULL);
 }
 
 /* --- llama3 rope parameter validation ----------------------------------- */
@@ -334,6 +422,69 @@ int main(void) {
 
     test_reject_all_other_families();
     printf("  test_reject_all_other_families: passed\n");
+
+    test_gemma4_supported_passes();
+    printf("  test_gemma4_supported_passes: passed\n");
+
+    test_gemma4_reject_all_shared();
+    printf("  test_gemma4_reject_all_shared: passed\n");
+
+    test_gemma4_reject_proportional_factor_zero();
+    printf("  test_gemma4_reject_proportional_factor_zero: passed\n");
+
+    test_gemma4_reject_partial_rotary_global_zero();
+    printf("  test_gemma4_reject_partial_rotary_global_zero: passed\n");
+
+    test_gemma4_reject_partial_rotary_global_over_one();
+    printf("  test_gemma4_reject_partial_rotary_global_over_one: passed\n");
+
+    test_gemma4_reject_unresolved_kv_source();
+    printf("  test_gemma4_reject_unresolved_kv_source: passed\n");
+
+    /* use_double_wide_mlp rejection */
+    {
+        model_config_t cfg = make_gemma4_supported();
+        cfg.use_double_wide_mlp = true;
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strstr(err, "use_double_wide_mlp") != NULL);
+    }
+    printf("  test_gemma4_reject_use_double_wide_mlp: passed\n");
+
+    /* hidden_act rejection */
+    {
+        model_config_t cfg = make_gemma4_supported();
+        cfg.hidden_act = HIDDEN_ACT_SILU;
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strstr(err, "gelu_pytorch_tanh") != NULL);
+    }
+    printf("  test_gemma4_reject_hidden_act_silu: passed\n");
+
+    /* E2E: config.json with hidden_act=silu should be rejected by the gate */
+    {
+        model_config_t cfg;
+        int rc = model_config_load(&cfg,
+                                   MLXD_FIXTURES_DIR "/model_config_gemma4_silu");
+        assert(rc == 0);
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strstr(err, "gelu_pytorch_tanh") != NULL);
+        model_config_free(&cfg);
+    }
+    printf("  test_gemma4_silu_config_rejected: passed\n");
+
+    /* E2E: minimal config (omits use_double_wide_mlp) should pass the gate */
+    {
+        model_config_t cfg;
+        int rc = model_config_load(&cfg,
+                                   MLXD_FIXTURES_DIR "/model_config_gemma4_minimal");
+        assert(rc == 0);
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+        model_config_free(&cfg);
+    }
+    printf("  test_gemma4_minimal_config_passes: passed\n");
 
     test_llama_plain_passes();
     printf("  test_llama_plain_passes: passed\n");

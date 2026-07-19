@@ -36,7 +36,7 @@ static char *path_join(const char *dir, const char *name) {
 /* Absent = def; wrong type / n < 1 / overflow = -1. */
 static int get_dim_int(yyjson_val *obj, const char *key, int *out, int def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }
@@ -49,10 +49,10 @@ static int get_dim_int(yyjson_val *obj, const char *key, int *out, int def) {
     return 0;
 }
 
-/* Absent = def; wrong type / n < 0 / overflow = -1. 0 is legal. */
+/* Absent or null = def; wrong type / n < 0 / overflow = -1. 0 is legal. */
 static int get_int_nonneg(yyjson_val *obj, const char *key, int *out, int def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }
@@ -69,7 +69,7 @@ static int get_int_nonneg(yyjson_val *obj, const char *key, int *out, int def) {
    Rejects values that overflow float (|v| > FLT_MAX -> Inf on cast). */
 static int get_f32(yyjson_val *obj, const char *key, float *out, float def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }
@@ -85,7 +85,7 @@ static int get_f32(yyjson_val *obj, const char *key, float *out, float def) {
 /* Absent = def; wrong type = -1. */
 static int get_bool(yyjson_val *obj, const char *key, bool *out, bool def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }
@@ -313,6 +313,8 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
     case MODEL_GEMMA4:
         cfg->weight_prefix       = "language_model.model";
         cfg->hidden_act          = HIDDEN_ACT_GELU_APPROX;
+        if (apply_hidden_act_string(cfg, cfg_obj))
+            return -1;
         cfg->norm_has_offset     = false;
         cfg->scale_embeddings    = true;
         cfg->has_pre_ff_norm     = true;
@@ -327,6 +329,16 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         }
         if (yyjson_obj_get(cfg_obj, "query_pre_attn_scalar") == NULL)
             cfg->query_pre_attn_scalar = cfg->head_dim;
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "final_logit_softcapping");
+            if (!v || yyjson_is_null(v))
+                cfg->final_logit_softcapping = 30.0f;
+        }
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "hidden_size_per_layer_input");
+            if (!v || yyjson_is_null(v))
+                cfg->hidden_size_per_layer_input = 256;
+        }
         ensure_gemma_terminators(cfg);
         break;
 
@@ -882,6 +894,8 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         get_int_nonneg(cfg_obj, "num_kv_shared_layers",
                        &cfg->num_kv_shared_layers, 0) ||
         get_bool(cfg_obj, "attention_k_eq_v", &cfg->attention_k_eq_v, false) ||
+        get_bool(cfg_obj, "use_double_wide_mlp", &cfg->use_double_wide_mlp,
+                 cfg->use_double_wide_mlp) ||
         get_f32(cfg_obj, "final_logit_softcapping",
                 &cfg->final_logit_softcapping, 0.0f) ||
         get_int_nonneg(cfg_obj, "hidden_size_per_layer_input",

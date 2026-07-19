@@ -507,9 +507,129 @@ static void test_expected_names_qwen3_exact_order(void) {
     }
 }
 
+static void test_expected_names_gemma4(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_GEMMA4;
+    cfg.weight_prefix = "language_model.model";
+    cfg.num_hidden_layers = 4;
+    cfg.has_qk_norm = true;
+    cfg.has_pre_ff_norm = true;
+    cfg.tie_word_embeddings = true;
+    cfg.attention_k_eq_v = true;
+    cfg.hidden_size_per_layer_input = 8;
+    cfg.num_kv_shared_layers = 2;
+    cfg.has_explicit_layer_types = true;
+    cfg.layer_is_global[0] = false;
+    cfg.layer_is_global[1] = true;
+    cfg.layer_is_global[2] = false;
+    cfg.layer_is_global[3] = true;
+
+    int count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 66);
+
+    weight_expected_t names[66];
+    int rc = weights_expected_names(&cfg, names, 66);
+    assert(rc == 66);
+
+    /* Spot checks */
+    assert(strcmp(names[0].name, "language_model.model.embed_tokens") == 0);
+    assert(names[0].kind == WEIGHT_KIND_EMBED);
+
+    /* PLE globals should be present */
+    bool found_ple_emb = false, found_ple_proj = false, found_ple_norm = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "language_model.model.embed_tokens_per_layer") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_EMBED);
+            found_ple_emb = true;
+        }
+        if (strcmp(names[i].name, "language_model.model.per_layer_model_projection") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_MATMUL);
+            found_ple_proj = true;
+        }
+        if (strcmp(names[i].name, "language_model.model.per_layer_projection_norm") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_NORM);
+            found_ple_norm = true;
+        }
+    }
+    assert(found_ple_emb && found_ple_proj && found_ple_norm);
+
+    /* Non-shared layer 0 (local): has k_proj, k_norm, v_proj */
+    bool found_k0 = false, found_kn0 = false, found_v0 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "language_model.model.layers.0.self_attn.k_proj") == 0)
+            found_k0 = true;
+        if (strcmp(names[i].name, "language_model.model.layers.0.self_attn.k_norm") == 0)
+            found_kn0 = true;
+        if (strcmp(names[i].name, "language_model.model.layers.0.self_attn.v_proj") == 0)
+            found_v0 = true;
+    }
+    assert(found_k0 && found_kn0 && found_v0);
+
+    /* Non-shared layer 1 (global, k_eq_v): has k_proj, k_norm but no v_proj */
+    bool found_k1 = false, found_kn1 = false, found_v1 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "language_model.model.layers.1.self_attn.k_proj") == 0)
+            found_k1 = true;
+        if (strcmp(names[i].name, "language_model.model.layers.1.self_attn.k_norm") == 0)
+            found_kn1 = true;
+        if (strcmp(names[i].name, "language_model.model.layers.1.self_attn.v_proj") == 0)
+            found_v1 = true;
+    }
+    assert(found_k1 && found_kn1 && !found_v1);
+
+    /* Shared layer 2: no k_proj, k_norm, v_proj */
+    bool found_k2 = false, found_kn2 = false, found_v2 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "language_model.model.layers.2.self_attn.k_proj") == 0)
+            found_k2 = true;
+        if (strcmp(names[i].name, "language_model.model.layers.2.self_attn.k_norm") == 0)
+            found_kn2 = true;
+        if (strcmp(names[i].name, "language_model.model.layers.2.self_attn.v_proj") == 0)
+            found_v2 = true;
+    }
+    assert(!found_k2 && !found_kn2 && !found_v2);
+
+    /* PLE per-layer always present */
+    bool found_ple_gate0 = false, found_ple_gate2 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "language_model.model.layers.0.per_layer_input_gate") == 0)
+            found_ple_gate0 = true;
+        if (strcmp(names[i].name, "language_model.model.layers.2.per_layer_input_gate") == 0)
+            found_ple_gate2 = true;
+    }
+    assert(found_ple_gate0 && found_ple_gate2);
+
+    /* layer_scalar: bare weight per layer */
+    int bare_count = 0;
+    for (int i = 0; i < rc; i++) {
+        if (names[i].kind == WEIGHT_KIND_BARE) {
+            assert(strstr(names[i].name, "layer_scalar") != NULL);
+            bare_count++;
+        }
+    }
+    assert(bare_count == 4);
+    bool found_ls0 = false, found_ls3 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "language_model.model.layers.0.layer_scalar") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_BARE);
+            found_ls0 = true;
+        }
+        if (strcmp(names[i].name, "language_model.model.layers.3.layer_scalar") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_BARE);
+            found_ls3 = true;
+        }
+    }
+    assert(found_ls0 && found_ls3);
+
+    /* Capacity too small -> error */
+    weight_expected_t small[2];
+    assert(weights_expected_names(&cfg, small, 2) == -1);
+}
+
 static void test_expected_names_other_families_zero(void) {
     static const model_family_t others[] = {
-        MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3, MODEL_GEMMA4,
+        MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3,
         MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
         MODEL_MISTRAL, MODEL_LFM2,
         MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
@@ -723,6 +843,9 @@ int main(void) {
 
     test_expected_names_qwen3_exact_order();
     printf("  test_expected_names_qwen3_exact_order: passed\n");
+
+    test_expected_names_gemma4();
+    printf("  test_expected_names_gemma4: passed\n");
 
     test_expected_names_other_families_zero();
     printf("  test_expected_names_other_families_zero: passed\n");

@@ -14,6 +14,7 @@ typedef enum {
     WEIGHT_KIND_MATMUL,
     WEIGHT_KIND_NORM,
     WEIGHT_KIND_BIAS,
+    WEIGHT_KIND_BARE,
 } weight_kind_t;
 
 typedef struct {

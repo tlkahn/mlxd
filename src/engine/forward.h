@@ -36,14 +36,28 @@ int fwd_sliding_window_mask(mlx_array *out, int q_len, int kv_len, int window,
 int fwd_sliding_window_decode_mask(mlx_array *out, int kv_len, int window,
                                    mlx_stream s);
 
+int fwd_softcap(mlx_array *out, mlx_array logits, float cap, mlx_stream s);
+
 int fwd_gelu_approx(mlx_array *out, mlx_array x, mlx_stream s);
 
 int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
                const weights_t *w, const model_config_t *cfg, mlx_stream s);
 
+int fwd_ple_inputs(mlx_array *out, mlx_array ids, mlx_array h,
+                   const weights_t *w, const model_config_t *cfg,
+                   mlx_stream s);
+
+int fwd_ple_apply(mlx_array *io_h, int layer, mlx_array ple_inputs,
+                  const weights_t *w, const model_config_t *cfg,
+                  mlx_stream s);
+
+int fwd_layer_scalar_apply(mlx_array *io, int layer, const weights_t *w,
+                           const model_config_t *cfg, mlx_stream s);
+
 int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       const weights_t *w, const model_config_t *cfg,
-                      kvcache_t *kv, mlx_array rope_freqs, mlx_stream s);
+                      kvcache_t *kv, mlx_array rope_freqs,
+                      mlx_array ple_inputs, mlx_stream s);
 
 int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n);
 int fwd_rope_proportional_freqs(const model_config_t *cfg, float *out, int n);

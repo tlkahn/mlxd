@@ -136,6 +136,7 @@ typedef struct {
     hidden_act_t mamba_mlp_act;
 
     /* gemma4 extras */
+    bool  use_double_wide_mlp;
     int   global_head_dim;
     int   num_global_key_value_heads;
     int   num_kv_shared_layers;

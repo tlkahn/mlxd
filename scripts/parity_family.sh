@@ -25,7 +25,7 @@ family_id() {
         qwen2)   echo "" ;;
         llama)   echo "mlx-community/TinyLlama-1.1B-Chat-v1.0-4bit" ;;
         mistral) echo "" ;;
-        gemma4)  echo "" ;;
+        gemma4)  echo "mlx-community/gemma-4-e4b-it-4bit" ;;
         qwen3_5) echo "" ;;
         *)       return 1 ;;
     esac
@@ -74,6 +74,16 @@ run_one() {
     if [ ! -d "$_dir" ]; then
         printf 'skipped: checkpoint dir absent for %s (%s)\n' "$_fam" "$_dir"
         return 0
+    fi
+
+    # gemma4-it: use chat-template parity. Raw completion on this instruct
+    # checkpoint collapses into short token loops; mlx-serve's degenerate-loop
+    # detector then stops early and creates length-only mismatches against
+    # mlxd (no such guard). Chat mode is the real serving path and terminates
+    # cleanly. Caller can still override via MLXD_PARITY_MODE.
+    if [ "$_fam" = "gemma4" ] && [ -z "${MLXD_PARITY_MODE:-}" ]; then
+        MLXD_PARITY_MODE=chat
+        export MLXD_PARITY_MODE
     fi
 
     "$SCRIPT_DIR/parity_temp0.sh" "$_dir" "$_prompt"
