@@ -215,6 +215,44 @@ cleanup:
     return rc;
 }
 
+/* Custom rope frequency seam: when a family supplies a freqs array the rope
+   call switches to base has_value=false, scale 1.0. No family uses it yet. */
+static mlx_array fwd_rope_freqs(const model_config_t *cfg, int layer) {
+    (void)cfg;
+    (void)layer;
+    return (mlx_array){.ctx = NULL};
+}
+
+/* Per-layer rope: global layers use rope_theta (scaled by a linear factor
+   when set); local layers use rope_local_base_freq at scale 1.0. */
+static int fwd_rope_apply(mlx_array *res, mlx_array x, int dims,
+                          const model_config_t *cfg, int layer, int offset,
+                          mlx_stream s) {
+    mlx_array freqs = fwd_rope_freqs(cfg, layer);
+    if (freqs.ctx) {
+        int ok = MLXB_CHECK(mlx_fast_rope(res, x, dims, false,
+            (mlx_optional_float){.has_value = false}, 1.0f, offset, freqs, s));
+        mlx_array_free(freqs);
+        return ok ? 0 : -1;
+    }
+
+    bool global = model_layer_is_global(cfg, layer);
+    float base = cfg->rope_theta;
+    float scale = 1.0f;
+    if (global) {
+        if (cfg->rope_scaling_type &&
+            strcmp(cfg->rope_scaling_type, "linear") == 0 &&
+            cfg->rope_scaling_factor > 0.0f)
+            scale = 1.0f / cfg->rope_scaling_factor;
+    } else if (cfg->rope_local_base_freq > 0.0f) {
+        base = cfg->rope_local_base_freq;
+    }
+
+    return MLXB_CHECK(mlx_fast_rope(res, x, dims, false,
+        (mlx_optional_float){.value = base, .has_value = true},
+        scale, offset, (mlx_array){.ctx = NULL}, s)) ? 0 : -1;
+}
+
 /* Add {base}.bias to *io in place (broadcast over [B,S,D]). */
 static int add_proj_bias(mlx_array *io, const weights_t *w, const char *base,
                          mlx_stream s) {
@@ -345,12 +383,10 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     /* RoPE - offset read BEFORE kvcache_update */
     int offset = kvcache_layer_offset(kv, layer);
     assert(offset >= 0);
-    if (!MLXB_CHECK(mlx_fast_rope(&q_roped, q_transposed, hd, false,
-            (mlx_optional_float){.value = cfg->rope_theta, .has_value = true},
-            1.0f, offset, (mlx_array){.ctx = NULL}, s))) goto cleanup;
-    if (!MLXB_CHECK(mlx_fast_rope(&k_roped, k_transposed, hd, false,
-            (mlx_optional_float){.value = cfg->rope_theta, .has_value = true},
-            1.0f, offset, (mlx_array){.ctx = NULL}, s))) goto cleanup;
+    if (fwd_rope_apply(&q_roped, q_transposed, hd, cfg, layer, offset, s) != 0)
+        goto cleanup;
+    if (fwd_rope_apply(&k_roped, k_transposed, hd, cfg, layer, offset, s) != 0)
+        goto cleanup;
 
     /* KV cache update */
     if (kvcache_update(kv, layer, k_roped, v_transposed, &kview, &vview, s) != 0)

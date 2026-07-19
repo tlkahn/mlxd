@@ -604,6 +604,71 @@ static void test_f5_sandwich_decoder(void) {
     weights_free(&w);
 }
 
+/* ---- F6: per-layer rope (local base freq, linear scaling factor) ---- */
+
+static void test_f6_per_layer_rope(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+
+    mlx_array x = det_input(3, 600);
+    float scale = 1.0f / sqrtf((float)HD);
+
+    /* (a) local layer uses rope_local_base_freq: layer 0 local under
+       pattern 6; rope_theta deliberately bogus to prove it is unused */
+    model_config_t cfg = base_cfg();
+    cfg.has_sliding_window = true;
+    cfg.sliding_window = 1024; /* wider than the sequence: mask is a no-op */
+    cfg.sliding_window_pattern = 6;
+    cfg.rope_theta = 999999.0f;
+    cfg.rope_local_base_freq = 5000.0f;
+    assert(!model_layer_is_global(&cfg, 0));
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    mlx_array out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    mlx_array ref = manual_attention(x, &w, scale, 5000.0f, 1.0f, 0, "causal",
+                                     (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    /* sanity: differs from rope over the bogus global base */
+    mlx_array ref_bogus = manual_attention(x, &w, scale, 999999.0f, 1.0f, 0,
+                                           "causal", (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref_bogus) > 1e-3f);
+    mlx_array_free(ref_bogus);
+    mlx_array_free(ref);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+
+    /* (b) global layer with linear rope scaling factor f -> rope scale 1/f */
+    cfg = base_cfg();
+    cfg.rope_scaling_type = "linear";
+    cfg.rope_scaling_factor = 4.0f;
+    assert(model_layer_is_global(&cfg, 0));
+
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    ref = manual_attention(x, &w, scale, cfg.rope_theta, 0.25f, 0, "causal",
+                           (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    /* decode step keeps absolute positions (offset via kvcache) */
+    mlx_array x1 = det_input(1, 601);
+    mlx_array out1 = mlx_array_new();
+    assert(fwd_attention(&out1, x1, 0, &w, &cfg, &kv, gpu) == 0);
+    assert(mlx_array_dim(out1, 1) == 1);
+    mlx_array_free(out1);
+    mlx_array_free(x1);
+
+    mlx_array_free(ref);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+    mlx_array_free(x);
+    weights_free(&w);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -621,6 +686,9 @@ int main(void) {
 
     test_f5_sandwich_decoder();
     printf("test_f5_sandwich_decoder passed\n");
+
+    test_f6_per_layer_rope();
+    printf("test_f6_per_layer_rope passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;
