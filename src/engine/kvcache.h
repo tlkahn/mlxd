@@ -13,17 +13,17 @@ typedef struct {
     mlx_array values;
     int offset;
     int capacity;
+    int n_kv_heads;   /* recorded on first update */
+    int head_dim;     /* recorded on first update */
     bool initialized;
 } kv_entry_t;
 
 typedef struct {
     kv_entry_t *entries; /* one per layer */
     int num_layers;
-    int n_kv_heads;
-    int head_dim;
 } kvcache_t;
 
-int kvcache_init(kvcache_t *kv, int num_layers, int n_kv_heads, int head_dim);
+int kvcache_init(kvcache_t *kv, int num_layers);
 void kvcache_free(kvcache_t *kv);
 
 /* Pre-update offset for a layer == rope offset for the incoming tokens. */
@@ -42,5 +42,12 @@ int kvcache_update(kvcache_t *kv, int layer, mlx_array new_k, mlx_array new_v,
                    mlx_stream s);
 
 int kvcache_capacity(const kvcache_t *kv, int layer);
+
+/* Read-only view into an already-updated layer's cache. Returns the
+   [B,H,len,D] slice, optionally trimmed to the last max_kv rows on decode
+   (q_len == 1). Fails if the layer has never been updated (not initialized).
+   q_len==1 must stay aligned with kvcache_update's new_len==1 trim logic. */
+int kvcache_view(const kvcache_t *kv, int layer, int max_kv, int q_len,
+                 mlx_array *k_view, mlx_array *v_view, mlx_stream s);
 
 #endif /* MLXD_ENGINE_KVCACHE_H */

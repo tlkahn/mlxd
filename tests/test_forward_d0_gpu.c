@@ -351,7 +351,7 @@ static void test_f1_attn_scale_from_config(void) {
     cfg.query_pre_attn_scalar = 4 * HD;
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
 
@@ -363,10 +363,11 @@ static void test_f1_attn_scale_from_config(void) {
     mlx_array_free(out);
     kvcache_free(&kv);
 
-    /* gemma4 family -> fixed scale 1.0 regardless of query_pre_attn_scalar */
+    /* attn_scale_one -> fixed scale 1.0 regardless of query_pre_attn_scalar */
     cfg.family = MODEL_GEMMA4;
+    cfg.attn_scale_one = true;
     cfg.query_pre_attn_scalar = HD;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     ref = manual_attention(x, &w, 1.0f, cfg.rope_theta, 1.0f, 0, "causal",
@@ -378,7 +379,7 @@ static void test_f1_attn_scale_from_config(void) {
 
     /* baseline: query_pre_attn_scalar == head_dim keeps default behavior */
     cfg = base_cfg();
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     ref = manual_attention(x, &w, 1.0f / sqrtf((float)HD), cfg.rope_theta,
@@ -412,7 +413,7 @@ static void test_f2_qkv_bias(void) {
     cfg.attention_bias = true;
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     mlx_array ref = manual_attention_ex(x, &w, scale, cfg.rope_theta, 1.0f, 0,
@@ -432,7 +433,7 @@ static void test_f2_qkv_bias(void) {
 
     /* flag off: bias tensors present in the map are ignored */
     cfg.attention_bias = false;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     ref = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f, 0, "causal",
@@ -655,7 +656,7 @@ static void test_f5_sandwich_decoder(void) {
     cfg.has_pre_ff_norm = true;
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv);
@@ -667,7 +668,7 @@ static void test_f5_sandwich_decoder(void) {
     mlx_array ln_post = get_w(&w, "layers.0.post_feedforward_layernorm.weight");
 
     kvcache_t kv2;
-    assert(kvcache_init(&kv2, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv2, 1) == 0);
     mlx_array normed1 = mlx_array_new(), attn_out = mlx_array_new();
     mlx_array attn_normed = mlx_array_new(), h = mlx_array_new();
     mlx_array mlp_in = mlx_array_new(), mlp_out = mlx_array_new();
@@ -688,13 +689,13 @@ static void test_f5_sandwich_decoder(void) {
 
     /* flag off: default wiring untouched */
     cfg.has_pre_ff_norm = false;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv);
 
     kvcache_t kv3;
-    assert(kvcache_init(&kv3, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv3, 1) == 0);
     mlx_array h1 = mlx_array_new(), normed2 = mlx_array_new();
     mlx_array mlp_std = mlx_array_new(), ref_std = mlx_array_new();
     mlx_array attn_std = mlx_array_new();
@@ -751,7 +752,7 @@ static void test_f6_per_layer_rope(void) {
     assert(!model_layer_is_global(&cfg, 0));
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     mlx_array ref = manual_attention(x, &w, scale, 5000.0f, 1.0f, 0, "causal",
@@ -773,7 +774,7 @@ static void test_f6_per_layer_rope(void) {
     cfg.rope_scaling_factor = 4.0f;
     assert(model_layer_is_global(&cfg, 0));
 
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     ref = manual_attention(x, &w, scale, cfg.rope_theta, 0.25f, 0, "causal",
@@ -804,7 +805,7 @@ static void test_f6_per_layer_rope(void) {
     cfg.rope_scaling_factor = 8.0f;
     assert(model_layer_is_global(&cfg, 0));
 
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     ref = manual_attention(x, &w, scale, cfg.rope_theta, 0.125f, 0, "causal",
@@ -922,7 +923,7 @@ static void test_f7c_sliding_window_attention(void) {
 
     /* Prefill S=4 with local sliding window: must match manual with sw mask */
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
 
@@ -944,7 +945,7 @@ static void test_f7c_sliding_window_attention(void) {
 
     /* Decode 1 token after prefill: kv view trimmed to window=2;
        numerical reference proves trim + rope offset advance */
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     mlx_array_free(out);
@@ -967,7 +968,7 @@ static void test_f7c_sliding_window_attention(void) {
     cfg.layer_is_global[0] = true;
     assert(model_layer_is_global(&cfg, 0));
 
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     ref = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f, 0, "causal",
@@ -988,7 +989,7 @@ static void test_f7c_sliding_window_attention(void) {
     cfg.rope_local_base_freq = 5000.0f;
     assert(!model_layer_is_global(&cfg, 0));
 
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
 
@@ -1041,7 +1042,7 @@ static void test_combo_f3_f5_offset_sandwich(void) {
     cfg.norm_has_offset = true;
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv);
@@ -1053,7 +1054,7 @@ static void test_combo_f3_f5_offset_sandwich(void) {
     mlx_array ln_post = get_w(&w, "layers.0.post_feedforward_layernorm.weight");
 
     kvcache_t kv2;
-    assert(kvcache_init(&kv2, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv2, 1) == 0);
     mlx_array normed1 = mlx_array_new(), attn_out = mlx_array_new();
     mlx_array attn_normed = mlx_array_new(), h = mlx_array_new();
     mlx_array mlp_in = mlx_array_new(), mlp_out = mlx_array_new();
@@ -1073,7 +1074,7 @@ static void test_combo_f3_f5_offset_sandwich(void) {
 
     /* Sensitivity: offset-true result differs from offset-false composition */
     kvcache_t kv3;
-    assert(kvcache_init(&kv3, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv3, 1) == 0);
     mlx_array n1f = mlx_array_new(), af = mlx_array_new();
     mlx_array anf = mlx_array_new(), hf = mlx_array_new();
     mlx_array mif = mlx_array_new(), mof = mlx_array_new();
@@ -1153,7 +1154,7 @@ static void test_combo_f3_qk_norm_offset(void) {
     cfg_a.norm_has_offset = true;
 
     kvcache_t kv_a;
-    assert(kvcache_init(&kv_a, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv_a, 1) == 0);
     mlx_array out_a = mlx_array_new();
     assert(fwd_attention(&out_a, x, 0, &w, &cfg_a, &kv_a, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv_a);
@@ -1164,7 +1165,7 @@ static void test_combo_f3_qk_norm_offset(void) {
     cfg_b.norm_has_offset = false;
 
     kvcache_t kv_b;
-    assert(kvcache_init(&kv_b, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv_b, 1) == 0);
     mlx_array out_b = mlx_array_new();
     assert(fwd_attention(&out_b, x, 0, &wb, &cfg_b, &kv_b, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv_b);
@@ -1178,7 +1179,7 @@ static void test_combo_f3_qk_norm_offset(void) {
     cfg_no.norm_has_offset = false;
 
     kvcache_t kv_no;
-    assert(kvcache_init(&kv_no, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv_no, 1) == 0);
     mlx_array out_no = mlx_array_new();
     assert(fwd_attention(&out_no, x, 0, &w, &cfg_no, &kv_no, (mlx_array){.ctx = NULL}, gpu) == 0);
     kvcache_free(&kv_no);
@@ -1229,7 +1230,7 @@ static void test_combo_gemma3_local_layer_decoder(void) {
 
     /* Prefill: full decoder layer with gemma3-like config */
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_decoder_layer(&out, x, 0, &w, &cfg, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
 
@@ -1240,7 +1241,7 @@ static void test_combo_gemma3_local_layer_decoder(void) {
     mlx_array ln_post = get_w(&w, "layers.0.post_feedforward_layernorm.weight");
 
     kvcache_t kv2;
-    assert(kvcache_init(&kv2, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv2, 1) == 0);
     mlx_array normed1 = mlx_array_new(), attn_out = mlx_array_new();
     mlx_array attn_normed = mlx_array_new(), h = mlx_array_new();
     mlx_array mlp_in = mlx_array_new(), mlp_out = mlx_array_new();
@@ -1265,7 +1266,7 @@ static void test_combo_gemma3_local_layer_decoder(void) {
 
     /* Decode reference via second kvcache */
     kvcache_t kv3;
-    assert(kvcache_init(&kv3, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv3, 1) == 0);
     mlx_array dec_pre_out = mlx_array_new();
     assert(fwd_decoder_layer(&dec_pre_out, x, 0, &w, &cfg, &kv3, (mlx_array){.ctx = NULL}, gpu) == 0);
     mlx_array dec_out = mlx_array_new();
@@ -1385,7 +1386,7 @@ static void test_llama3_freqs_seam(void) {
     assert(built_freqs.ctx != NULL);
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
     mlx_array out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, built_freqs, gpu) == 0);
 
@@ -1405,7 +1406,7 @@ static void test_llama3_freqs_seam(void) {
 
     /* Hard error: llama3 config with NULL-ctx freqs must fail */
     kvcache_t kv2;
-    assert(kvcache_init(&kv2, 1, NKV, HD) == 0);
+    assert(kvcache_init(&kv2, 1) == 0);
     mlx_array out_err = mlx_array_new();
     assert(fwd_attention(&out_err, x, 0, &w, &cfg, &kv2, (mlx_array){.ctx = NULL}, gpu) == -1);
     mlx_array_free(out_err);

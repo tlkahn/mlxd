@@ -331,6 +331,7 @@ static void test_family_defaults(void) {
     assert(cfg.has_v_norm == true);
     assert(cfg.norm_has_offset == false);
     assert(cfg.hidden_act == HIDDEN_ACT_GELU_APPROX);
+    assert(cfg.attn_scale_one == true);
     assert(eos_contains(&cfg, 1));
     assert(eos_contains(&cfg, 106));
     model_config_free(&cfg);
@@ -395,6 +396,7 @@ static void test_family_defaults(void) {
     assert(rc == 0);
     assert(cfg.family == MODEL_QWEN3);
     assert(cfg.has_qk_norm == true);
+    assert(cfg.attn_scale_one == false);
     assert(cfg.weight_prefix != NULL && strcmp(cfg.weight_prefix, "model") == 0);
     model_config_free(&cfg);
 }
@@ -590,6 +592,76 @@ static void test_stage_e_dims(void) {
     assert(cfg.final_logit_softcapping == 30.0f);
     assert(cfg.hidden_size_per_layer_input == 256);
     assert(cfg.attention_k_eq_v == true);
+    model_config_free(&cfg);
+}
+
+/* --- D5 Cycle 2: per-layer geometry helpers ------------------------------ */
+
+static void test_per_layer_geometry(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_gemma4");
+    assert(rc == 0);
+
+    /* gemma4 fixture: head_dim=256, global_head_dim=512,
+       num_kv_heads=8, num_global_kv_heads=4,
+       layers: 0-4 sliding (local), 5,7 global; 8 layers total,
+       num_kv_shared_layers=2 => layers 6,7 are shared */
+
+    /* model_layer_head_dim: global layers get global_head_dim */
+    assert(model_layer_head_dim(&cfg, 0) == 256);  /* local */
+    assert(model_layer_head_dim(&cfg, 5) == 512);  /* global */
+    assert(model_layer_head_dim(&cfg, 7) == 512);  /* global */
+    assert(model_layer_head_dim(&cfg, 4) == 256);  /* local */
+
+    /* model_layer_kv_heads: global layers get num_global_key_value_heads when attention_k_eq_v */
+    assert(model_layer_kv_heads(&cfg, 0) == 8);   /* local */
+    assert(model_layer_kv_heads(&cfg, 5) == 4);   /* global */
+    assert(model_layer_kv_heads(&cfg, 7) == 4);   /* global */
+    assert(model_layer_kv_heads(&cfg, 3) == 8);   /* local */
+
+    /* model_kv_source_layer: non-shared layers return -1 */
+    assert(model_kv_source_layer(&cfg, 0) == -1);
+    assert(model_kv_source_layer(&cfg, 5) == -1);
+
+    /* shared layers (last num_kv_shared_layers=2): layers 6 and 7.
+       layer 6 is local (sliding_attention), source = last non-shared local
+       scanning downward: layers 0..5, last local = 4.
+       layer 7 is global, source = last non-shared global scanning down = 5. */
+    assert(model_kv_source_layer(&cfg, 6) == 4);
+    assert(model_kv_source_layer(&cfg, 7) == 5);
+
+    /* k_eq_v gating: with attention_k_eq_v=true (fixture), global layers
+       return num_global_key_value_heads. When flipped to false, they must
+       fall back to num_key_value_heads (mlx-lm/HF semantics). */
+    assert(cfg.attention_k_eq_v == true);
+    assert(model_layer_kv_heads(&cfg, 5) == 4);  /* global, k_eq_v=true */
+    cfg.attention_k_eq_v = false;
+    assert(model_layer_kv_heads(&cfg, 5) == 8);  /* global, k_eq_v=false => base */
+    assert(model_layer_kv_heads(&cfg, 0) == 8);  /* local unchanged */
+    cfg.attention_k_eq_v = true;
+
+    /* model_layer_kv_shared: shared layers return true */
+    assert(model_layer_kv_shared(&cfg, 0) == false);
+    assert(model_layer_kv_shared(&cfg, 5) == false);
+    assert(model_layer_kv_shared(&cfg, 6) == true);
+    assert(model_layer_kv_shared(&cfg, 7) == true);
+
+    /* Fail-closed: mutate layer_is_global so shared layer 6 (local) has
+       no matching local layer in the non-shared prefix. All prefix layers
+       become global => kv_source_layer for local shared layer 6 returns -1. */
+    for (int i = 0; i < 6; i++) cfg.layer_is_global[i] = true;
+    assert(model_kv_source_layer(&cfg, 6) == -1);
+    /* Restore */
+    for (int i = 0; i < 6; i++) cfg.layer_is_global[i] = (i == 5);
+
+    /* qwen3 (no gemma4 extras): all layers return base dims, no sharing */
+    model_config_free(&cfg);
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_qwen3");
+    assert(rc == 0);
+    assert(model_layer_head_dim(&cfg, 0) == 128);
+    assert(model_layer_kv_heads(&cfg, 0) == 8);
+    assert(model_kv_source_layer(&cfg, 0) == -1);
+    assert(model_kv_source_layer(&cfg, 5) == -1);
     model_config_free(&cfg);
 }
 
@@ -909,6 +981,61 @@ static void test_tiny_gemma3_config(void) {
     model_config_free(&cfg);
 }
 
+static void test_tiny_gemma4_config(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/tiny_gemma4");
+    assert(rc == 0);
+
+    assert(cfg.family == MODEL_GEMMA4);
+    assert(cfg.vocab_size == 256);
+    assert(cfg.hidden_size == 64);
+    assert(cfg.num_hidden_layers == 4);
+    assert(cfg.num_attention_heads == 4);
+    assert(cfg.num_key_value_heads == 2);
+    assert(cfg.head_dim == 16);
+    assert(cfg.intermediate_size == 128);
+
+    assert(cfg.global_head_dim == 32);
+    assert(cfg.num_global_key_value_heads == 1);
+    assert(cfg.num_kv_shared_layers == 2);
+    assert(cfg.attention_k_eq_v == true);
+    assert(cfg.attn_scale_one == true);
+
+    assert(cfg.has_sliding_window == true);
+    assert(cfg.sliding_window == 4);
+    assert(cfg.has_explicit_layer_types == true);
+    assert(cfg.layer_is_global[0] == false);
+    assert(cfg.layer_is_global[1] == true);
+    assert(cfg.layer_is_global[2] == false);
+    assert(cfg.layer_is_global[3] == true);
+
+    assert(cfg.rope_proportional == true);
+    assert(cfg.rope_proportional_factor == 8.0f);
+    assert(cfg.partial_rotary_factor_global == 0.5f);
+    assert(cfg.rope_theta == 1000000.0f);
+    assert(cfg.rope_local_base_freq == 10000.0f);
+
+    assert(cfg.tie_word_embeddings == true);
+    assert(cfg.has_v_norm == true);
+    assert(cfg.has_qk_norm == true);
+    assert(cfg.has_pre_ff_norm == true);
+    assert(cfg.hidden_act == HIDDEN_ACT_GELU_APPROX);
+    assert(cfg.norm_has_offset == false);
+    assert(cfg.scale_embeddings == true);
+
+    /* per-layer geometry */
+    assert(model_layer_head_dim(&cfg, 0) == 16);
+    assert(model_layer_head_dim(&cfg, 1) == 32);
+    assert(model_layer_kv_heads(&cfg, 0) == 2);
+    assert(model_layer_kv_heads(&cfg, 1) == 1);
+    assert(model_kv_source_layer(&cfg, 0) == -1);
+    assert(model_kv_source_layer(&cfg, 1) == -1);
+    assert(model_kv_source_layer(&cfg, 2) == 0);
+    assert(model_kv_source_layer(&cfg, 3) == 1);
+
+    model_config_free(&cfg);
+}
+
 int main(void) {
     test_happy_path();
     test_kv_heads_default();
@@ -929,6 +1056,7 @@ int main(void) {
     test_nested_text_config();
     test_sliding_window_and_layers();
     test_stage_e_dims();
+    test_per_layer_geometry();
     test_lfm2_norm_eps_precedence();
     test_rope_nested_shadows_flat();
     test_layer_predicate_and_gemma4_window();
@@ -941,6 +1069,7 @@ int main(void) {
     test_float_overflow();
     test_bert_explicit_head_dim_ignored();
     test_tiny_gemma3_config();
+    test_tiny_gemma4_config();
 
     printf("test_model_config: all passed\n");
     return 0;

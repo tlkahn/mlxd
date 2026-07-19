@@ -229,6 +229,41 @@ bool model_layer_is_global(const model_config_t *cfg, int layer) {
            (cfg->sliding_window_pattern - 1);
 }
 
+int model_layer_head_dim(const model_config_t *cfg, int layer) {
+    if (!cfg) return 0;
+    if (cfg->global_head_dim > 0 && model_layer_is_global(cfg, layer))
+        return cfg->global_head_dim;
+    return cfg->head_dim;
+}
+
+int model_layer_kv_heads(const model_config_t *cfg, int layer) {
+    if (!cfg) return 0;
+    /* mlx-lm/HF: global KV head count only applies when k_eq_v is active */
+    if (cfg->attention_k_eq_v && cfg->num_global_key_value_heads > 0 &&
+        model_layer_is_global(cfg, layer))
+        return cfg->num_global_key_value_heads;
+    return cfg->num_key_value_heads;
+}
+
+bool model_layer_kv_shared(const model_config_t *cfg, int layer) {
+    if (!cfg || cfg->num_kv_shared_layers <= 0) return false;
+    return layer >= cfg->num_hidden_layers - cfg->num_kv_shared_layers;
+}
+
+int model_kv_source_layer(const model_config_t *cfg, int layer) {
+    if (!cfg) return -1;
+    if (cfg->num_kv_shared_layers <= 0) return -1;
+    int boundary = cfg->num_hidden_layers - cfg->num_kv_shared_layers;
+    if (layer < boundary) return -1;
+
+    bool target_global = model_layer_is_global(cfg, layer);
+    for (int i = boundary - 1; i >= 0; i--) {
+        if (model_layer_is_global(cfg, i) == target_global)
+            return i;
+    }
+    return -1;
+}
+
 static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
                                  bool has_text_config,
                                  bool sliding_window_key_present) {
@@ -283,6 +318,7 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         cfg->has_pre_ff_norm     = true;
         cfg->has_qk_norm         = true;
         cfg->has_v_norm          = true;
+        cfg->attn_scale_one      = true;
         cfg->rope_scaling_factor = 1.0f;
         if (!sliding_window_key_present) {
             cfg->has_sliding_window = true;

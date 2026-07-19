@@ -36,6 +36,8 @@ int fwd_sliding_window_mask(mlx_array *out, int q_len, int kv_len, int window,
 int fwd_sliding_window_decode_mask(mlx_array *out, int kv_len, int window,
                                    mlx_stream s);
 
+int fwd_gelu_approx(mlx_array *out, mlx_array x, mlx_stream s);
+
 int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
                const weights_t *w, const model_config_t *cfg, mlx_stream s);
 
@@ -44,6 +46,11 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       kvcache_t *kv, mlx_array rope_freqs, mlx_stream s);
 
 int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n);
+int fwd_rope_proportional_freqs(const model_config_t *cfg, float *out, int n);
+
+int fwd_rope_apply(mlx_array *res, mlx_array x, int dims,
+                   const model_config_t *cfg, int layer, int offset,
+                   mlx_array rope_freqs, mlx_stream s);
 
 /* Build precomputed freqs array for the model's rope scaling type.
    rc 0 + out->ctx == NULL: family needs no custom freqs.
