@@ -1197,9 +1197,9 @@ static void test_combo_f3_qk_norm_offset(void) {
     weights_free(&w);
 }
 
-/* ---- Combo: gemma3-profile decoder (F1+F3+F5+F6+F7) ---- */
+/* ---- Combo: gemma3-style local-layer decoder (F1+F3+F5+F6-local+F7, qk-norm) ---- */
 
-static void test_combo_gemma3_profile_decoder(void) {
+static void test_combo_gemma3_local_layer_decoder(void) {
     weights_t w;
     weights_begin(&w);
     put_attn_weights(&w);
@@ -1328,8 +1328,8 @@ int main(void) {
     test_combo_f3_qk_norm_offset();
     printf("test_combo_f3_qk_norm_offset passed\n");
 
-    test_combo_gemma3_profile_decoder();
-    printf("test_combo_gemma3_profile_decoder passed\n");
+    test_combo_gemma3_local_layer_decoder();
+    printf("test_combo_gemma3_local_layer_decoder passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;
