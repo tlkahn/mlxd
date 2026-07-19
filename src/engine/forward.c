@@ -1188,6 +1188,31 @@ cleanup:
     return rc;
 }
 
+int fwd_layer_scalar_apply(mlx_array *io, int layer, const weights_t *w,
+                           const model_config_t *cfg, mlx_stream s) {
+    char name[256];
+    weights_tensor_name(name, sizeof(name), cfg, layer, "layer_scalar");
+    mlx_array ls = mlx_array_new();
+    if (weights_get(&ls, w, name) == 0) {
+        mlx_array scaled = mlx_array_new();
+        if (!MLXB_CHECK(mlx_multiply(&scaled, *io, ls, s))) {
+            mlx_array_free(scaled);
+            mlx_array_free(ls);
+            return -1;
+        }
+        mlx_array_free(ls);
+        mlx_array_free(*io);
+        *io = scaled;
+        return 0;
+    }
+    mlx_array_free(ls);
+    if (cfg->family == MODEL_GEMMA4) {
+        log_error("missing %s weight", name);
+        return -1;
+    }
+    return 0;
+}
+
 int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       const weights_t *w, const model_config_t *cfg,
                       kvcache_t *kv, mlx_array rope_freqs,
@@ -1258,24 +1283,8 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
             goto cleanup;
     }
 
-    /* layer_scalar: multiply the layer output when present */
-    {
-        weights_tensor_name(name, sizeof(name), cfg, layer, "layer_scalar");
-        mlx_array ls = mlx_array_new();
-        if (weights_get(&ls, w, name) == 0) {
-            mlx_array scaled = mlx_array_new();
-            if (!MLXB_CHECK(mlx_multiply(&scaled, result, ls, s))) {
-                mlx_array_free(scaled);
-                mlx_array_free(ls);
-                goto cleanup;
-            }
-            mlx_array_free(ls);
-            mlx_array_free(result);
-            result = scaled;
-        } else {
-            mlx_array_free(ls);
-        }
-    }
+    if (fwd_layer_scalar_apply(&result, layer, w, cfg, s) != 0)
+        goto cleanup;
 
     mlx_array_free(*out);
     *out = result;

@@ -51,6 +51,9 @@ int fwd_ple_apply(mlx_array *io_h, int layer, mlx_array ple_inputs,
                   const weights_t *w, const model_config_t *cfg,
                   mlx_stream s);
 
+int fwd_layer_scalar_apply(mlx_array *io, int layer, const weights_t *w,
+                           const model_config_t *cfg, mlx_stream s);
+
 int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       const weights_t *w, const model_config_t *cfg,
                       kvcache_t *kv, mlx_array rope_freqs,
