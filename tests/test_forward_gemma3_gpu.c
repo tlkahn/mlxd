@@ -78,8 +78,7 @@ static void test_gemma3_forward_shape(engine_model_t *em) {
     mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, em->cfg.num_hidden_layers,
-                        em->cfg.num_key_value_heads, em->cfg.head_dim) == 0);
+    assert(kvcache_init(&kv, em->cfg.num_hidden_layers) == 0);
 
     mlx_array logits = mlx_array_new();
     assert(model_forward(em, ids, &kv, true, &logits) == 0);
@@ -104,8 +103,7 @@ static void test_gemma3_incremental_equals_full(engine_model_t *em) {
 
     /* Path A: full context */
     kvcache_t kv_a;
-    assert(kvcache_init(&kv_a, em->cfg.num_hidden_layers,
-                        em->cfg.num_key_value_heads, em->cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_a, em->cfg.num_hidden_layers) == 0);
 
     int shape_all[] = {1, P};
     mlx_array ids_all = mlx_array_new_data(prompt, shape_all, 2, MLX_INT32);
@@ -115,8 +113,7 @@ static void test_gemma3_incremental_equals_full(engine_model_t *em) {
 
     /* Path B: prefill 5, decode 1 */
     kvcache_t kv_b;
-    assert(kvcache_init(&kv_b, em->cfg.num_hidden_layers,
-                        em->cfg.num_key_value_heads, em->cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_b, em->cfg.num_hidden_layers) == 0);
 
     int shape_pre[] = {1, P - 1};
     mlx_array ids_pre = mlx_array_new_data(prompt, shape_pre, 2, MLX_INT32);

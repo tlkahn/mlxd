@@ -312,8 +312,7 @@ static void test_fwd_attention(void) {
     MLXB_CHECK(mlx_astype(&x, x_f32, MLX_BFLOAT16, gpu));
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, cfg_dense.num_hidden_layers,
-                        cfg_dense.num_key_value_heads, cfg_dense.head_dim) == 0);
+    assert(kvcache_init(&kv, cfg_dense.num_hidden_layers) == 0);
 
     mlx_array out = mlx_array_new();
     assert(fwd_attention(&out, x, 0, &w_dense, &cfg_dense, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
@@ -327,8 +326,7 @@ static void test_fwd_attention(void) {
 
     /* Causal probe: perturb position 2 input, output at position 0 unchanged */
     kvcache_t kv2;
-    assert(kvcache_init(&kv2, cfg_dense.num_hidden_layers,
-                        cfg_dense.num_key_value_heads, cfg_dense.head_dim) == 0);
+    assert(kvcache_init(&kv2, cfg_dense.num_hidden_layers) == 0);
     float xdata2[192];
     memcpy(xdata2, xdata, sizeof(xdata));
     for (int d = 0; d < 64; d++) xdata2[128 + d] += 100.0f;
@@ -445,8 +443,7 @@ static void test_decoder_layer(void) {
     MLXB_CHECK(mlx_astype(&x, x_f32, MLX_BFLOAT16, gpu));
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, cfg_dense.num_hidden_layers,
-                        cfg_dense.num_key_value_heads, cfg_dense.head_dim) == 0);
+    assert(kvcache_init(&kv, cfg_dense.num_hidden_layers) == 0);
 
     mlx_array out = mlx_array_new();
     assert(fwd_decoder_layer(&out, x, 0, &w_dense, &cfg_dense, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
@@ -519,8 +516,7 @@ static void test_emodel(void) {
     mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv, em.cfg.num_hidden_layers) == 0);
 
     /* want_logits=true -> logits [1,256] */
     mlx_array logits = mlx_array_new();
@@ -536,8 +532,7 @@ static void test_emodel(void) {
 
     /* want_logits=false -> rc 0, offset advanced */
     kvcache_t kv2;
-    assert(kvcache_init(&kv2, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv2, em.cfg.num_hidden_layers) == 0);
     assert(model_forward(&em, ids, &kv2, false, NULL) == 0);
     assert(kvcache_layer_offset(&kv2, 0) == 5);
 
@@ -563,8 +558,7 @@ static void test_emodel_tied(void) {
     mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv, em.cfg.num_hidden_layers) == 0);
 
     mlx_array logits = mlx_array_new();
     assert(model_forward(&em, ids, &kv, true, &logits) == 0);
@@ -600,8 +594,7 @@ static void test_emodel_tied_quant(void) {
     mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv, em.cfg.num_hidden_layers) == 0);
 
     mlx_array logits = mlx_array_new();
     assert(model_forward(&em, ids, &kv, true, &logits) == 0);
@@ -631,8 +624,7 @@ static void test_incremental_equals_full(void) {
 
     /* Path A: full context, all 4 tokens at once */
     kvcache_t kv_a;
-    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers) == 0);
 
     int shape_all[] = {1, 4};
     mlx_array ids_all = mlx_array_new_data(prompt, shape_all, 2, MLX_INT32);
@@ -642,8 +634,7 @@ static void test_incremental_equals_full(void) {
 
     /* Path B: prefill 3, then decode 1 */
     kvcache_t kv_b;
-    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers) == 0);
 
     int shape_pre[] = {1, 3};
     mlx_array ids_pre = mlx_array_new_data(prompt, shape_pre, 2, MLX_INT32);
@@ -713,8 +704,7 @@ static void test_emodel_quant(void) {
     mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv, em.cfg.num_hidden_layers) == 0);
 
     mlx_array logits = mlx_array_new();
     assert(model_forward(&em, ids, &kv, true, &logits) == 0);
@@ -741,8 +731,7 @@ static void test_incremental_equals_full_quant(void) {
     int32_t prompt[] = {10, 20, 30, 40};
 
     kvcache_t kv_a;
-    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers) == 0);
 
     int shape_all[] = {1, 4};
     mlx_array ids_all = mlx_array_new_data(prompt, shape_all, 2, MLX_INT32);
@@ -751,8 +740,7 @@ static void test_incremental_equals_full_quant(void) {
     assert(MLXB_CHECK(mlx_array_eval(logits_a)));
 
     kvcache_t kv_b;
-    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers) == 0);
 
     int shape_pre[] = {1, 3};
     mlx_array ids_pre = mlx_array_new_data(prompt, shape_pre, 2, MLX_INT32);
@@ -815,8 +803,7 @@ static void test_chunked_prefill_equals_full(void) {
 
     /* Path A: full context, 4 tokens at once */
     kvcache_t kv_a;
-    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_a, em.cfg.num_hidden_layers) == 0);
 
     int shape_all[] = {1, 4};
     mlx_array ids_all = mlx_array_new_data(prompt, shape_all, 2, MLX_INT32);
@@ -826,8 +813,7 @@ static void test_chunked_prefill_equals_full(void) {
 
     /* Path B: chunk 1 = tokens 0-1 (S=2, empty cache), chunk 2 = tokens 2-3 (S=2, offset 2) */
     kvcache_t kv_b;
-    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers,
-                        em.cfg.num_key_value_heads, em.cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_b, em.cfg.num_hidden_layers) == 0);
 
     int shape_c[] = {1, 2};
     mlx_array ids_c1 = mlx_array_new_data(prompt, shape_c, 2, MLX_INT32);

@@ -394,8 +394,7 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         goto out_free;
     }
 
-    if (kvcache_init(&kv, em->cfg.num_hidden_layers,
-                     em->cfg.num_key_value_heads, em->cfg.head_dim) != 0) {
+    if (kvcache_init(&kv, em->cfg.num_hidden_layers) != 0) {
         generate_fail(eng, s, "kvcache init failed", GEN_ERR_INTERNAL);
         goto out_free;
     }

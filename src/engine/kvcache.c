@@ -2,13 +2,11 @@
 
 #include <stdlib.h>
 
-int kvcache_init(kvcache_t *kv, int num_layers, int n_kv_heads, int head_dim) {
-    if (!kv || num_layers <= 0 || n_kv_heads <= 0 || head_dim <= 0) return -1;
+int kvcache_init(kvcache_t *kv, int num_layers) {
+    if (!kv || num_layers <= 0) return -1;
     kv->entries = calloc((size_t)num_layers, sizeof(kv_entry_t));
     if (!kv->entries) return -1;
     kv->num_layers = num_layers;
-    kv->n_kv_heads = n_kv_heads;
-    kv->head_dim = head_dim;
     return 0;
 }
 
@@ -181,7 +179,7 @@ cleanup:
     return -1;
 }
 
-int kvcache_view(const kvcache_t *kv, int layer, int max_kv, bool is_decode,
+int kvcache_view(const kvcache_t *kv, int layer, int max_kv, int q_len,
                  mlx_array *k_view, mlx_array *v_view, mlx_stream s) {
     if (!kv || !kv->entries || layer < 0 || layer >= kv->num_layers)
         return -1;
@@ -195,7 +193,7 @@ int kvcache_view(const kvcache_t *kv, int layer, int max_kv, bool is_decode,
     int D = e->head_dim;
     int off = e->offset;
 
-    int view_start = (max_kv > 0 && is_decode && off > max_kv)
+    int view_start = (max_kv > 0 && q_len == 1 && off > max_kv)
                          ? off - max_kv : 0;
     int str[] = {1, 1, 1, 1};
     int vstart[] = {0, 0, view_start, 0};

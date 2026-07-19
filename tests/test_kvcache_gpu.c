@@ -9,11 +9,9 @@
 
 static void test_init_free(void) {
     kvcache_t kv;
-    int rc = kvcache_init(&kv, 2, 2, 16);
+    int rc = kvcache_init(&kv, 2);
     assert(rc == 0);
     assert(kv.num_layers == 2);
-    assert(kv.n_kv_heads == 2);
-    assert(kv.head_dim == 16);
     for (int layer = 0; layer < 2; layer++) {
         assert(kvcache_layer_offset(&kv, layer) == 0);
         assert(kv.entries[layer].initialized == false);
@@ -33,7 +31,7 @@ static void test_init_free(void) {
 static void test_single_step(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    int rc = kvcache_init(&kv, 2, 2, 16);
+    int rc = kvcache_init(&kv, 2);
     assert(rc == 0);
 
     /* new_k = new_v = ones([1,2,1,16], bf16) */
@@ -121,7 +119,7 @@ static void test_single_step(void) {
 static void test_doubling(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     int expected_cap[] = {1, 2, 4, 4, 8};
     int shape4[] = {1, 2, 1, 16};
@@ -171,7 +169,7 @@ static void test_doubling(void) {
 static void test_bulk(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     /* Bulk update: 3 tokens at once, shape [1,2,3,16] row-major */
     int shape_bulk[] = {1, 2, 3, 16};
@@ -244,7 +242,7 @@ static void test_bulk(void) {
 static void test_bulk_grow(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     /* Seed: single-step write, offset -> 1, capacity -> 1 */
     int shape1[] = {1, 2, 1, 16};
@@ -313,7 +311,7 @@ static void test_bulk_grow(void) {
 static void test_reject_wrong_heads(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     /* Seed a valid entry so offset > 0 */
     float vals[32];
@@ -360,7 +358,7 @@ static void test_reject_wrong_heads(void) {
 static void test_reject_wrong_dim(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     /* Seed valid entry with D=16 */
     float seed[32];
@@ -407,7 +405,7 @@ static void test_reject_wrong_dim(void) {
 static void test_reject_wrong_rank(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     /* Rank 3 instead of 4 */
     float vals[32];
@@ -435,7 +433,7 @@ static void test_reject_wrong_rank(void) {
 static void test_reject_kv_shape_mismatch(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     /* k: [1,2,1,16], v: [1,2,2,16] - seq len mismatch */
     float k_vals[32];
@@ -471,7 +469,7 @@ static void test_reject_kv_shape_mismatch(void) {
 static void test_max_kv_trim(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+    assert(kvcache_init(&kv, 1) == 0);
 
     /* Prefill 3 tokens (rows 1,2,3) with max_kv=2: prefill is never trimmed */
     int shape3[] = {1, 2, 3, 16};
@@ -560,7 +558,7 @@ static void test_max_kv_trim(void) {
 static void test_dual_dims(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 2, 2, 16) == 0);
+    assert(kvcache_init(&kv, 2) == 0);
 
     /* Layer 0: H=2, D=16 (matches advisory) */
     float vals0[32];
@@ -636,7 +634,7 @@ static void test_dual_dims(void) {
 static void test_kvcache_view(void) {
     mlx_stream s = mlxbridge_gpu_stream();
     kvcache_t kv;
-    assert(kvcache_init(&kv, 2, 2, 16) == 0);
+    assert(kvcache_init(&kv, 2) == 0);
 
     /* Prefill 3 tokens on layer 0 */
     int shape3[] = {1, 2, 3, 16};
@@ -658,19 +656,19 @@ static void test_kvcache_view(void) {
     /* kvcache_view on uninitialized layer fails */
     mlx_array vk = mlx_array_new();
     mlx_array vv = mlx_array_new();
-    assert(kvcache_view(&kv, 1, 0, false, &vk, &vv, s) == -1);
+    assert(kvcache_view(&kv, 1, 0, 2, &vk, &vv, s) == -1);
 
     /* kvcache_view on initialized layer 0, no trim (max_kv=0) */
-    assert(kvcache_view(&kv, 0, 0, false, &vk, &vv, s) == 0);
+    assert(kvcache_view(&kv, 0, 0, 2, &vk, &vv, s) == 0);
     assert(MLXB_CHECK(mlx_array_eval(vk)));
     assert(mlx_array_dim(vk, 2) == 3);
     assert(mlx_array_dim(vk, 1) == 2);
     assert(mlx_array_dim(vk, 3) == 16);
 
-    /* kvcache_view with decode trim: max_kv=2, is_decode=true */
+    /* kvcache_view with decode trim: max_kv=2, q_len=1 (decode) */
     mlx_array vk2 = mlx_array_new();
     mlx_array vv2 = mlx_array_new();
-    assert(kvcache_view(&kv, 0, 2, true, &vk2, &vv2, s) == 0);
+    assert(kvcache_view(&kv, 0, 2, 1, &vk2, &vv2, s) == 0);
     assert(MLXB_CHECK(mlx_array_eval(vk2)));
     assert(mlx_array_dim(vk2, 2) == 2);
 
@@ -687,7 +685,7 @@ static void test_kvcache_view(void) {
     /* kvcache_view with no trim needed (offset <= max_kv) */
     mlx_array vk3 = mlx_array_new();
     mlx_array vv3 = mlx_array_new();
-    assert(kvcache_view(&kv, 0, 10, true, &vk3, &vv3, s) == 0);
+    assert(kvcache_view(&kv, 0, 10, 1, &vk3, &vv3, s) == 0);
     assert(MLXB_CHECK(mlx_array_eval(vk3)));
     assert(mlx_array_dim(vk3, 2) == 3);
 

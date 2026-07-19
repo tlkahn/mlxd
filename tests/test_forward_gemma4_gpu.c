@@ -124,8 +124,7 @@ static void test_gemma4_forward_shape(engine_model_t *em) {
     mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
 
     kvcache_t kv;
-    assert(kvcache_init(&kv, em->cfg.num_hidden_layers,
-                        em->cfg.num_key_value_heads, em->cfg.head_dim) == 0);
+    assert(kvcache_init(&kv, em->cfg.num_hidden_layers) == 0);
 
     mlx_array logits = mlx_array_new();
     assert(model_forward(em, ids, &kv, true, &logits) == 0);
@@ -160,8 +159,7 @@ static void test_gemma4_incremental_parity(engine_model_t *em) {
 
     /* Full forward: returns last-token logits [1, 256] */
     kvcache_t kv_full;
-    assert(kvcache_init(&kv_full, em->cfg.num_hidden_layers,
-                        em->cfg.num_key_value_heads, em->cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_full, em->cfg.num_hidden_layers) == 0);
 
     mlx_array logits_full = mlx_array_new();
     assert(model_forward(em, ids_full, &kv_full, true, &logits_full) == 0);
@@ -169,8 +167,7 @@ static void test_gemma4_incremental_parity(engine_model_t *em) {
 
     /* Incremental: prefill 5 + decode 1 */
     kvcache_t kv_inc;
-    assert(kvcache_init(&kv_inc, em->cfg.num_hidden_layers,
-                        em->cfg.num_key_value_heads, em->cfg.head_dim) == 0);
+    assert(kvcache_init(&kv_inc, em->cfg.num_hidden_layers) == 0);
 
     int pfx_shape[] = {1, 5};
     mlx_array ids_pfx = mlx_array_new_data(ids_data, pfx_shape, 2, MLX_INT32);

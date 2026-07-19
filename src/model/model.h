@@ -180,6 +180,9 @@ int model_layer_head_dim(const model_config_t *cfg, int layer);
  * when set, else base num_key_value_heads. */
 int model_layer_kv_heads(const model_config_t *cfg, int layer);
 
+/* True if this layer is in the KV-shared tail (reuses another layer's cache). */
+bool model_layer_kv_shared(const model_config_t *cfg, int layer);
+
 /* Returns the source layer index for KV-shared layers, or -1 if this layer
  * owns its own KV state. Shared layers reuse the cache of an earlier layer
  * of the same kind (global/local), scanning downward from the boundary. */

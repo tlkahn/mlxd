@@ -238,9 +238,16 @@ int model_layer_head_dim(const model_config_t *cfg, int layer) {
 
 int model_layer_kv_heads(const model_config_t *cfg, int layer) {
     if (!cfg) return 0;
-    if (cfg->num_global_key_value_heads > 0 && model_layer_is_global(cfg, layer))
+    /* mlx-lm/HF: global KV head count only applies when k_eq_v is active */
+    if (cfg->attention_k_eq_v && cfg->num_global_key_value_heads > 0 &&
+        model_layer_is_global(cfg, layer))
         return cfg->num_global_key_value_heads;
     return cfg->num_key_value_heads;
+}
+
+bool model_layer_kv_shared(const model_config_t *cfg, int layer) {
+    if (!cfg || cfg->num_kv_shared_layers <= 0) return false;
+    return layer >= cfg->num_hidden_layers - cfg->num_kv_shared_layers;
 }
 
 int model_kv_source_layer(const model_config_t *cfg, int layer) {

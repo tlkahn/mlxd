@@ -630,6 +630,30 @@ static void test_per_layer_geometry(void) {
     assert(model_kv_source_layer(&cfg, 6) == 4);
     assert(model_kv_source_layer(&cfg, 7) == 5);
 
+    /* k_eq_v gating: with attention_k_eq_v=true (fixture), global layers
+       return num_global_key_value_heads. When flipped to false, they must
+       fall back to num_key_value_heads (mlx-lm/HF semantics). */
+    assert(cfg.attention_k_eq_v == true);
+    assert(model_layer_kv_heads(&cfg, 5) == 4);  /* global, k_eq_v=true */
+    cfg.attention_k_eq_v = false;
+    assert(model_layer_kv_heads(&cfg, 5) == 8);  /* global, k_eq_v=false => base */
+    assert(model_layer_kv_heads(&cfg, 0) == 8);  /* local unchanged */
+    cfg.attention_k_eq_v = true;
+
+    /* model_layer_kv_shared: shared layers return true */
+    assert(model_layer_kv_shared(&cfg, 0) == false);
+    assert(model_layer_kv_shared(&cfg, 5) == false);
+    assert(model_layer_kv_shared(&cfg, 6) == true);
+    assert(model_layer_kv_shared(&cfg, 7) == true);
+
+    /* Fail-closed: mutate layer_is_global so shared layer 6 (local) has
+       no matching local layer in the non-shared prefix. All prefix layers
+       become global => kv_source_layer for local shared layer 6 returns -1. */
+    for (int i = 0; i < 6; i++) cfg.layer_is_global[i] = true;
+    assert(model_kv_source_layer(&cfg, 6) == -1);
+    /* Restore */
+    for (int i = 0; i < 6; i++) cfg.layer_is_global[i] = (i == 5);
+
     /* qwen3 (no gemma4 extras): all layers return base dims, no sharing */
     model_config_free(&cfg);
     rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_qwen3");

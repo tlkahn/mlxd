@@ -270,7 +270,13 @@ static const recipe_t LLAMA3 = {
    heads=4, head_dim=16, kv_heads=2,
    global_head_dim=32, num_global_key_value_heads=1,
    num_kv_shared_layers=2 (layers 2,3 shared from 0,1),
-   sliding_window=4, attention_k_eq_v=true */
+   sliding_window=4, attention_k_eq_v=true.
+
+   Deliberate E2B/26B mashup: exercises KV sharing, k_eq_v, dual head dims,
+   proportional rope, and GEGLU in a minimal fixture. Does NOT cover:
+   PLE (final_logit_softcapping), partial_rotary=0.25, factor=1.0 (E2B default),
+   no-k_eq_v paths, or the 26B-specific inverse layout. Those require real-
+   checkpoint parity tests (PR2). */
 
 #define G4_VOCAB   256
 #define G4_HIDDEN  64
@@ -359,8 +365,8 @@ static mlx_map_string_to_array build_gemma4_tensors(mlx_stream s) {
                      "language_model.model.layers.%d.self_attn.k_norm.weight", L);
             insert(m, name, ones_bf16(kn_shape, 1, s));
 
-            /* v_proj: omitted on k_eq_v global layers */
-            if (!(global)) {
+            /* v_proj: omitted when k_eq_v && global (V reuses K) */
+            if (!global) {
                 int v_shape[] = {kv_l * hd_l, G4_HIDDEN};
                 snprintf(name, sizeof(name),
                          "language_model.model.layers.%d.self_attn.v_proj.weight", L);

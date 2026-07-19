@@ -422,9 +422,9 @@ int fwd_rope_freqs_build(mlx_array *out, const model_config_t *cfg) {
     return 0;
 }
 
-static int fwd_rope_apply(mlx_array *res, mlx_array x, int dims,
-                          const model_config_t *cfg, int layer, int offset,
-                          mlx_array rope_freqs, mlx_stream s) {
+int fwd_rope_apply(mlx_array *res, mlx_array x, int dims,
+                   const model_config_t *cfg, int layer, int offset,
+                   mlx_array rope_freqs, mlx_stream s) {
     bool global = model_layer_is_global(cfg, layer);
 
     if (rope_freqs.ctx && (!cfg->rope_proportional || global)) {
@@ -554,6 +554,8 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     int perm[] = {0, 2, 1, 3};
     if (!MLXB_CHECK(mlx_transpose_axes(&q_transposed, q_normed, perm, 4, s))) goto cleanup;
 
+    if (model_layer_kv_shared(cfg, layer) && kv_src < 0) goto cleanup;
+
     if (kv_src >= 0) {
         /* KV-shared layer: skip K/V projection, read from source layer's cache.
            Rope offset for Q = source's offset - S (source ran earlier this forward). */
@@ -566,7 +568,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
         bool src_local = !model_layer_is_global(cfg, kv_src) &&
                          cfg->has_sliding_window && cfg->sliding_window > 0;
         int src_max_kv = src_local ? cfg->sliding_window : 0;
-        if (kvcache_view(kv, kv_src, src_max_kv, S == 1, &kview, &vview, s) != 0)
+        if (kvcache_view(kv, kv_src, src_max_kv, S, &kview, &vview, s) != 0)
             goto cleanup;
     } else {
         /* K/V owning layer */
@@ -647,7 +649,9 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
             goto cleanup;
     }
 
-    /* SDPA mask */
+    /* SDPA mask: local decode window enforcement is the max_kv view trim in
+       kvcache_update/kvcache_view, not a decode mask. If trimming ever goes
+       away, re-wire fwd_sliding_window_decode_mask here. */
     bool local_attn = !global && cfg->has_sliding_window && cfg->sliding_window > 0;
     const char *mask_mode;
     if (local_attn && S > 1) {
@@ -713,6 +717,77 @@ cleanup:
     return rc;
 }
 
+int fwd_gelu_approx(mlx_array *out, mlx_array x, mlx_stream s) {
+    if (!out) return -1;
+
+    mlx_array g3 = mlx_array_new();
+    mlx_array coeff = mlx_array_new();
+    mlx_array g_inner = mlx_array_new();
+    mlx_array scaled = mlx_array_new();
+    mlx_array tanh_val = mlx_array_new();
+    mlx_array one_plus = mlx_array_new();
+    mlx_array half_gate = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    float sqrt_2_over_pi = 0.7978845608f;
+    float coeff_val = 0.044715f;
+    mlx_array sqrt2pi_a = mlx_array_new_float(sqrt_2_over_pi);
+    mlx_array coeff_a = mlx_array_new_float(coeff_val);
+    mlx_array sqrt2pi_bf = mlx_array_new();
+    mlx_array coeff_bf = mlx_array_new();
+    if (!MLXB_CHECK(mlx_astype(&sqrt2pi_bf, sqrt2pi_a, MLX_BFLOAT16, s)) ||
+        !MLXB_CHECK(mlx_astype(&coeff_bf, coeff_a, MLX_BFLOAT16, s)))
+    {
+        mlx_array_free(sqrt2pi_a); mlx_array_free(coeff_a);
+        mlx_array_free(sqrt2pi_bf); mlx_array_free(coeff_bf);
+        goto fail;
+    }
+
+    mlx_array g2 = mlx_array_new();
+    bool ok = MLXB_CHECK(mlx_multiply(&g2, x, x, s)) &&
+              MLXB_CHECK(mlx_multiply(&g3, g2, x, s)) &&
+              MLXB_CHECK(mlx_multiply(&coeff, coeff_bf, g3, s)) &&
+              MLXB_CHECK(mlx_add(&g_inner, x, coeff, s)) &&
+              MLXB_CHECK(mlx_multiply(&scaled, sqrt2pi_bf, g_inner, s)) &&
+              MLXB_CHECK(mlx_tanh(&tanh_val, scaled, s));
+    mlx_array_free(g2);
+    mlx_array_free(sqrt2pi_a); mlx_array_free(coeff_a);
+    mlx_array_free(sqrt2pi_bf); mlx_array_free(coeff_bf);
+    mlx_array_free(g3); mlx_array_free(coeff);
+    mlx_array_free(g_inner); mlx_array_free(scaled);
+    if (!ok) {
+        mlx_array_free(tanh_val); mlx_array_free(one_plus);
+        mlx_array_free(half_gate); mlx_array_free(result);
+        return -1;
+    }
+
+    mlx_array one_f = mlx_array_new_float(1.0f);
+    mlx_array half_f = mlx_array_new_float(0.5f);
+    mlx_array one_b = mlx_array_new();
+    mlx_array half_b = mlx_array_new();
+    ok = MLXB_CHECK(mlx_astype(&one_b, one_f, MLX_BFLOAT16, s)) &&
+         MLXB_CHECK(mlx_astype(&half_b, half_f, MLX_BFLOAT16, s)) &&
+         MLXB_CHECK(mlx_add(&one_plus, one_b, tanh_val, s)) &&
+         MLXB_CHECK(mlx_multiply(&half_gate, half_b, x, s)) &&
+         MLXB_CHECK(mlx_multiply(&result, half_gate, one_plus, s));
+    mlx_array_free(one_f); mlx_array_free(half_f);
+    mlx_array_free(one_b); mlx_array_free(half_b);
+    mlx_array_free(tanh_val); mlx_array_free(one_plus);
+    mlx_array_free(half_gate);
+    if (!ok) { mlx_array_free(result); return -1; }
+
+    mlx_array_free(*out);
+    *out = result;
+    return 0;
+
+fail:
+    mlx_array_free(g3); mlx_array_free(coeff);
+    mlx_array_free(g_inner); mlx_array_free(scaled);
+    mlx_array_free(tanh_val); mlx_array_free(one_plus);
+    mlx_array_free(half_gate); mlx_array_free(result);
+    return -1;
+}
+
 int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
                const weights_t *w, const model_config_t *cfg, mlx_stream s) {
     if (!out || !w || !cfg) return -1;
@@ -741,74 +816,7 @@ int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
     if (fwd_linear(&up, x, &up_tri, cfg, s) != 0) goto cleanup;
 
     if (cfg->hidden_act == HIDDEN_ACT_GELU_APPROX) {
-        /* gelu_tanh(gate) = 0.5 * gate * (1 + tanh(sqrt(2/pi) * (gate + 0.044715 * gate^3))) */
-        mlx_array g3 = mlx_array_new();
-        mlx_array coeff = mlx_array_new();
-        mlx_array g_inner = mlx_array_new();
-        mlx_array scaled = mlx_array_new();
-        mlx_array tanh_val = mlx_array_new();
-        mlx_array one_arr = mlx_array_new();
-        mlx_array one_plus = mlx_array_new();
-        mlx_array half_arr = mlx_array_new();
-        mlx_array half_gate = mlx_array_new();
-
-        float sqrt_2_over_pi = 0.7978845608f;
-        float coeff_val = 0.044715f;
-        mlx_array sqrt2pi_a = mlx_array_new_float(sqrt_2_over_pi);
-        mlx_array coeff_a = mlx_array_new_float(coeff_val);
-        mlx_array sqrt2pi_bf = mlx_array_new();
-        mlx_array coeff_bf = mlx_array_new();
-        if (!MLXB_CHECK(mlx_astype(&sqrt2pi_bf, sqrt2pi_a, MLX_BFLOAT16, s)) ||
-            !MLXB_CHECK(mlx_astype(&coeff_bf, coeff_a, MLX_BFLOAT16, s)))
-        {
-            mlx_array_free(sqrt2pi_a); mlx_array_free(coeff_a);
-            mlx_array_free(sqrt2pi_bf); mlx_array_free(coeff_bf);
-            mlx_array_free(g3); mlx_array_free(coeff); mlx_array_free(g_inner);
-            mlx_array_free(scaled); mlx_array_free(tanh_val);
-            mlx_array_free(one_arr); mlx_array_free(one_plus);
-            mlx_array_free(half_arr); mlx_array_free(half_gate);
-            goto cleanup;
-        }
-        /* gate^3 */
-        mlx_array g2 = mlx_array_new();
-        bool ok = MLXB_CHECK(mlx_multiply(&g2, gate, gate, s)) &&
-                  MLXB_CHECK(mlx_multiply(&g3, g2, gate, s)) &&
-                  /* 0.044715 * gate^3 */
-                  MLXB_CHECK(mlx_multiply(&coeff, coeff_bf, g3, s)) &&
-                  /* gate + 0.044715 * gate^3 */
-                  MLXB_CHECK(mlx_add(&g_inner, gate, coeff, s)) &&
-                  /* sqrt(2/pi) * (...) */
-                  MLXB_CHECK(mlx_multiply(&scaled, sqrt2pi_bf, g_inner, s)) &&
-                  /* tanh(...) */
-                  MLXB_CHECK(mlx_tanh(&tanh_val, scaled, s));
-        mlx_array_free(g2);
-        mlx_array_free(sqrt2pi_a); mlx_array_free(coeff_a);
-        mlx_array_free(sqrt2pi_bf); mlx_array_free(coeff_bf);
-        mlx_array_free(g3); mlx_array_free(coeff);
-        mlx_array_free(g_inner); mlx_array_free(scaled);
-        if (!ok) {
-            mlx_array_free(tanh_val); mlx_array_free(one_arr);
-            mlx_array_free(one_plus); mlx_array_free(half_arr);
-            mlx_array_free(half_gate);
-            goto cleanup;
-        }
-        /* 1 + tanh(...) */
-        mlx_array one_f = mlx_array_new_float(1.0f);
-        mlx_array half_f = mlx_array_new_float(0.5f);
-        mlx_array one_b = mlx_array_new();
-        mlx_array half_b = mlx_array_new();
-        ok = MLXB_CHECK(mlx_astype(&one_b, one_f, MLX_BFLOAT16, s)) &&
-             MLXB_CHECK(mlx_astype(&half_b, half_f, MLX_BFLOAT16, s)) &&
-             MLXB_CHECK(mlx_add(&one_plus, one_b, tanh_val, s)) &&
-             /* 0.5 * gate */
-             MLXB_CHECK(mlx_multiply(&half_gate, half_b, gate, s)) &&
-             /* 0.5 * gate * (1 + tanh(...)) */
-             MLXB_CHECK(mlx_multiply(&silu, half_gate, one_plus, s));
-        mlx_array_free(one_f); mlx_array_free(half_f);
-        mlx_array_free(one_b); mlx_array_free(half_b);
-        mlx_array_free(tanh_val); mlx_array_free(one_plus);
-        mlx_array_free(half_gate);
-        if (!ok) goto cleanup;
+        if (fwd_gelu_approx(&silu, gate, s) != 0) goto cleanup;
     } else {
         /* silu(gate) = gate * sigmoid(gate) */
         if (!MLXB_CHECK(mlx_sigmoid(&gate_sig, gate, s))) goto cleanup;
