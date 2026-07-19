@@ -1295,6 +1295,117 @@ static void test_combo_gemma3_local_layer_decoder(void) {
     weights_free(&w);
 }
 
+/* ---- D1: llama3 custom freqs seam ---- */
+
+static mlx_array manual_attention_freqs(mlx_array x, const weights_t *w,
+                                        float scale, mlx_array freqs,
+                                        int offset) {
+    int B = mlx_array_dim(x, 0);
+    int S = mlx_array_dim(x, 1);
+
+    mlx_array proj[3];
+    const char *names[] = {"layers.0.self_attn.q_proj.weight",
+                           "layers.0.self_attn.k_proj.weight",
+                           "layers.0.self_attn.v_proj.weight"};
+    for (int i = 0; i < 3; i++) {
+        mlx_array wt = mlx_array_new();
+        mlx_array wtt = mlx_array_new();
+        proj[i] = mlx_array_new();
+        assert(weights_get(&wt, w, names[i]) == 0);
+        assert(MLXB_CHECK(mlx_transpose(&wtt, wt, gpu)));
+        assert(MLXB_CHECK(mlx_matmul(&proj[i], x, wtt, gpu)));
+        mlx_array_free(wtt);
+        mlx_array_free(wt);
+    }
+
+    int q_shape[] = {B, S, NH, HD};
+    int kv_shape[] = {B, S, NKV, HD};
+    int perm[] = {0, 2, 1, 3};
+    mlx_array qr = mlx_array_new(), kr = mlx_array_new(), vr = mlx_array_new();
+    mlx_array qt = mlx_array_new(), kt = mlx_array_new(), vt = mlx_array_new();
+    assert(MLXB_CHECK(mlx_reshape(&qr, proj[0], q_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&kr, proj[1], kv_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&vr, proj[2], kv_shape, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&qt, qr, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&kt, kr, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_transpose_axes(&vt, vr, perm, 4, gpu)));
+
+    mlx_array qrope = mlx_array_new(), krope = mlx_array_new();
+    assert(MLXB_CHECK(mlx_fast_rope(&qrope, qt, HD, false,
+        (mlx_optional_float){.has_value = false}, 1.0f, offset, freqs, gpu)));
+    assert(MLXB_CHECK(mlx_fast_rope(&krope, kt, HD, false,
+        (mlx_optional_float){.has_value = false}, 1.0f, offset, freqs, gpu)));
+
+    mlx_array attn = mlx_array_new();
+    assert(MLXB_CHECK(mlx_fast_scaled_dot_product_attention(
+        &attn, qrope, krope, vt, scale, "causal",
+        (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu)));
+
+    mlx_array back = mlx_array_new(), flat = mlx_array_new();
+    int out_shape[] = {B, S, NH * HD};
+    assert(MLXB_CHECK(mlx_transpose_axes(&back, attn, perm, 4, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&flat, back, out_shape, 3, gpu)));
+
+    mlx_array ow = mlx_array_new(), owt = mlx_array_new();
+    mlx_array result = mlx_array_new();
+    assert(weights_get(&ow, w, "layers.0.self_attn.o_proj.weight") == 0);
+    assert(MLXB_CHECK(mlx_transpose(&owt, ow, gpu)));
+    assert(MLXB_CHECK(mlx_matmul(&result, flat, owt, gpu)));
+
+    mlx_array_free(owt); mlx_array_free(ow);
+    mlx_array_free(flat); mlx_array_free(back);
+    mlx_array_free(attn);
+    mlx_array_free(krope); mlx_array_free(qrope);
+    mlx_array_free(vt); mlx_array_free(kt); mlx_array_free(qt);
+    mlx_array_free(vr); mlx_array_free(kr); mlx_array_free(qr);
+    for (int i = 0; i < 3; i++) mlx_array_free(proj[i]);
+    return result;
+}
+
+static void test_llama3_freqs_seam(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+
+    mlx_array x = det_input(3, 700);
+    float scale = 1.0f / sqrtf((float)HD);
+
+    model_config_t cfg = base_cfg();
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_theta = 500000.0f;
+    cfg.rope_scaling_factor = 8.0f;
+    cfg.rope_low_freq_factor = 1.0f;
+    cfg.rope_high_freq_factor = 4.0f;
+    cfg.rope_original_max_position_embeddings = 8192;
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    mlx_array out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+
+    int n = HD / 2;
+    float freq_buf[4];
+    assert(fwd_rope_llama3_freqs(&cfg, freq_buf, n) == 0);
+    int shape[] = {n};
+    mlx_array freqs = mlx_array_new_data(freq_buf, shape, 1, MLX_FLOAT32);
+
+    mlx_array ref = manual_attention_freqs(x, &w, scale, freqs, 0);
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    mlx_array ref_scalar = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f,
+                                            0, "causal",
+                                            (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref_scalar) > 1e-3f);
+
+    mlx_array_free(ref_scalar);
+    mlx_array_free(ref);
+    mlx_array_free(freqs);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+    mlx_array_free(x);
+    weights_free(&w);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -1330,6 +1441,9 @@ int main(void) {
 
     test_combo_gemma3_local_layer_decoder();
     printf("test_combo_gemma3_local_layer_decoder passed\n");
+
+    test_llama3_freqs_seam();
+    printf("test_llama3_freqs_seam passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;

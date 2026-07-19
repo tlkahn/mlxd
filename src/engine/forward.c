@@ -350,10 +350,18 @@ int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n) {
 }
 
 /* Custom rope frequency seam: when a family supplies a freqs array the rope
-   call switches to base has_value=false, scale 1.0. No family uses it yet. */
+   call switches to base has_value=false, scale 1.0. */
 static mlx_array fwd_rope_freqs(const model_config_t *cfg, int layer) {
-    (void)cfg;
     (void)layer;
+    if (cfg->rope_scaling_type &&
+        strcmp(cfg->rope_scaling_type, "llama3") == 0) {
+        int n = cfg->head_dim / 2;
+        float buf[256];
+        if (n > 256 || fwd_rope_llama3_freqs(cfg, buf, n) != 0)
+            return (mlx_array){.ctx = NULL};
+        int shape[] = {n};
+        return mlx_array_new_data(buf, shape, 1, MLX_FLOAT32);
+    }
     return (mlx_array){.ctx = NULL};
 }
 
