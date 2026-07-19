@@ -501,7 +501,9 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     if (kvcache_update(kv, layer, k_roped, v_transposed, max_kv, &kview, &vview, s) != 0)
         goto cleanup;
 
-    /* SDPA */
+    /* SDPA: local decode relies on the max_kv view trim in kvcache_update to
+       enforce the window; fwd_sliding_window_decode_mask is kept for designs
+       that stop trimming. */
     const char *mask_mode;
     if (local && S > 1) {
         int kv_len = mlx_array_dim(kview, 2);
@@ -509,14 +511,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
             goto cleanup;
         mask_mode = "array";
     } else if (local) {
-        int kv_len = mlx_array_dim(kview, 2);
-        if (kv_len > cfg->sliding_window) {
-            if (fwd_sliding_window_decode_mask(&sdpa_mask, kv_len, cfg->sliding_window, s) != 0)
-                goto cleanup;
-            mask_mode = "array";
-        } else {
-            mask_mode = "";
-        }
+        mask_mode = "";
     } else {
         mask_mode = S > 1 ? "causal" : "";
     }
