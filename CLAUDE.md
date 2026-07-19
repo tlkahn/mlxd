@@ -62,6 +62,10 @@ Dependency direction: arrows point upward. `core` and `mlxbridge` are leaves. `e
 
 - **`mlx_fast_rope` freqs convention**: the `freqs` array parameter expects `base^(2i/d)` (the period denominators, increasing values) - NOT `1/base^(2i/d)` (the angular frequencies). When implementing custom RoPE scheduling (llama3, proportional, yarn, etc.), compute `freq = pow(base, 2*i/d)`, apply scheduling adjustments, and pass the result directly. Cross-validate new RoPE variants against mlx-lm's corresponding Python class output, and always test end-to-end with a real checkpoint (`mlxd run`) since unit tests with synthetic weights can be self-consistently wrong.
 
+## Parity pitfalls
+
+- **Instruct raw completion loops vs oracle early-stop**: chat-tuned checkpoints (e.g. gemma4-it) often collapse under raw completion (no chat template) into short token cycles (`HelloHello...`, ` France is France is...`). That is expected without the template, not a forward-path bug. mlx-serve's serving-side `isDegenerateTailLoop` (period <= 8, 16 reps) stops early and reports `finish_reason=stop`; mlxd has no such guard, so temp-0 raw parity at `max_tokens=50` produces length-only mismatches on byte-identical prefixes. Prefer chat-mode parity for instruct models (`MLXD_PARITY_MODE=chat`: `/v1/chat/completions` vs `mlxd run --no-think`). Before blaming the forward path, confirm chat-templated output and logits parity against mlx-lm. Also check that `read_chat_template` actually loaded a template (`chat_template.jinja` fallback) - a missing template silently forces raw-like behavior.
+
 ## Key conventions
 
 - C11 (`-std=c11 -Wall -Wextra -Wpedantic`).
