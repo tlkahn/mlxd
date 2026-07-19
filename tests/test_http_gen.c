@@ -528,6 +528,59 @@ static void test_chat_prompt_extra_json(void) {
     tokenizer_free(tok);
 }
 
+static void test_extra_json_malformed_rejected(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    int32_t *ids = NULL;
+    const char *err = NULL;
+
+    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL,
+                                  "{bad", &ids, &err);
+    assert(n == -1);
+    assert(err != NULL);
+    assert(strcmp(err, "invalid extra_json") == 0);
+    assert(ids == NULL);
+
+    tokenizer_free(tok);
+}
+
+static void test_extra_json_non_object_rejected(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    int32_t *ids = NULL;
+    const char *err = NULL;
+
+    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL,
+                                  "[1]", &ids, &err);
+    assert(n == -1);
+    assert(err != NULL);
+    assert(strcmp(err, "invalid extra_json") == 0);
+    assert(ids == NULL);
+
+    tokenizer_free(tok);
+}
+
+static void test_extra_json_empty_string_ok(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *msgs = "[{\"role\":\"user\",\"content\":\"hello world\"}]";
+    int32_t *ids = NULL;
+    const char *err = NULL;
+
+    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, msgs, NULL,
+                                  "", &ids, &err);
+    assert(n > 0);
+    assert(err == NULL);
+
+    free(ids);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_chat_prompt_matches_direct();
     test_completion_prompt();
@@ -555,6 +608,9 @@ int main(void) {
     test_chat_response_no_logprobs_null();
     test_sse_error_format();
     test_chat_prompt_extra_json();
+    test_extra_json_malformed_rejected();
+    test_extra_json_non_object_rejected();
+    test_extra_json_empty_string_ok();
     printf("test_http_gen: all passed\n");
     return 0;
 }

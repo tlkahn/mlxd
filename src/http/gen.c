@@ -20,15 +20,19 @@ static char *serialize_mut_root(yyjson_mut_doc *mdoc, yyjson_mut_val *root) {
 
 /* Merge caller extra_json with bos_token/eos_token from the tokenizer.
    Caller keys win on conflict so enable_thinking etc. stay authoritative.
-   Returns a heap string (possibly empty object "{}"); caller frees. NULL on OOM. */
-static char *merge_chat_extra_json(const tokenizer_t *tok,
-                                   const char *extra_json) {
+   Returns 0 on success with *out set to a heap string (possibly "{}");
+   returns -1 on OOM; returns -2 when extra_json is non-empty but invalid
+   (malformed JSON or non-object root). Caller frees *out on success. */
+static int merge_chat_extra_json(const tokenizer_t *tok,
+                                 const char *extra_json,
+                                 char **out) {
+    *out = NULL;
     yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
-    if (!mdoc) return NULL;
+    if (!mdoc) return -1;
     yyjson_mut_val *obj = yyjson_mut_obj(mdoc);
     if (!obj) {
         yyjson_mut_doc_free(mdoc);
-        return NULL;
+        return -1;
     }
     yyjson_mut_doc_set_root(mdoc, obj);
 
@@ -47,35 +51,45 @@ static char *merge_chat_extra_json(const tokenizer_t *tok,
     /* Overlay caller extras (enable_thinking, etc.). */
     if (extra_json && extra_json[0]) {
         yyjson_doc *edoc = yyjson_read(extra_json, strlen(extra_json), 0);
-        if (edoc) {
-            yyjson_val *eroot = yyjson_doc_get_root(edoc);
-            if (yyjson_is_obj(eroot)) {
-                yyjson_val *key, *val;
-                yyjson_obj_iter iter = yyjson_obj_iter_with(eroot);
-                while ((key = yyjson_obj_iter_next(&iter))) {
-                    val = yyjson_obj_iter_get_val(key);
-                    const char *k = yyjson_get_str(key);
-                    yyjson_mut_val *mv = yyjson_val_mut_copy(mdoc, val);
-                    yyjson_mut_val *mk = k ? yyjson_mut_strcpy(mdoc, k) : NULL;
-                    if (mk && mv)
-                        yyjson_mut_obj_put(obj, mk, mv);
-                }
-            }
-            yyjson_doc_free(edoc);
+        if (!edoc) {
+            yyjson_mut_doc_free(mdoc);
+            return -2;
         }
+        yyjson_val *eroot = yyjson_doc_get_root(edoc);
+        if (!yyjson_is_obj(eroot)) {
+            yyjson_doc_free(edoc);
+            yyjson_mut_doc_free(mdoc);
+            return -2;
+        }
+        yyjson_val *key, *val;
+        yyjson_obj_iter iter = yyjson_obj_iter_with(eroot);
+        while ((key = yyjson_obj_iter_next(&iter))) {
+            val = yyjson_obj_iter_get_val(key);
+            const char *k = yyjson_get_str(key);
+            yyjson_mut_val *mv = yyjson_val_mut_copy(mdoc, val);
+            yyjson_mut_val *mk = k ? yyjson_mut_strcpy(mdoc, k) : NULL;
+            if (mk && mv)
+                yyjson_mut_obj_put(obj, mk, mv);
+        }
+        yyjson_doc_free(edoc);
     }
 
-    char *out = yyjson_mut_write(mdoc, 0, NULL);
+    *out = yyjson_mut_write(mdoc, 0, NULL);
     yyjson_mut_doc_free(mdoc);
-    return out;
+    return *out ? 0 : -1;
 }
 
 int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
                           const char *messages_json, const char *tools_json,
                           const char *extra_json,
                           int32_t **out_ids, const char **err) {
-    char *merged = merge_chat_extra_json(tok, extra_json);
-    if (!merged) {
+    char *merged = NULL;
+    int mrc = merge_chat_extra_json(tok, extra_json, &merged);
+    if (mrc == -2) {
+        *err = "invalid extra_json";
+        return -1;
+    }
+    if (mrc != 0 || !merged) {
         *err = "out of memory";
         return -1;
     }
