@@ -669,6 +669,81 @@ static void test_f6_per_layer_rope(void) {
     weights_free(&w);
 }
 
+/* ---- F7a: sliding-window mask helpers ---- */
+
+/* Pull mask values as f32; returns malloc'd buffer of mlx_array_size floats. */
+static float *mask_values(mlx_array m, size_t *n) {
+    mlx_array f = mlx_array_new();
+    assert(MLXB_CHECK(mlx_astype(&f, m, MLX_FLOAT32, gpu)));
+    assert(MLXB_CHECK(mlx_array_eval(f)));
+    *n = mlx_array_size(f);
+    float *buf = malloc(*n * sizeof(float));
+    assert(buf);
+    memcpy(buf, mlx_array_data_float32(f), *n * sizeof(float));
+    mlx_array_free(f);
+    return buf;
+}
+
+static void test_f7a_sliding_window_masks(void) {
+    /* prefill: q_len=3, kv_len=5, window=2
+       abs row of query i is kv_len - q_len + i; allowed cols are
+       (abs_row - window, abs_row], i.e. the last `window` positions. */
+    mlx_array m = mlx_array_new();
+    assert(fwd_sliding_window_mask(&m, 3, 5, 2, gpu) == 0);
+    assert(mlx_array_ndim(m) == 4);
+    assert(mlx_array_dim(m, 0) == 1 && mlx_array_dim(m, 1) == 1);
+    assert(mlx_array_dim(m, 2) == 3 && mlx_array_dim(m, 3) == 5);
+    assert(mlx_array_dtype(m) == MLX_BFLOAT16);
+
+    size_t n = 0;
+    float *v = mask_values(m, &n);
+    assert(n == 15);
+    const int allowed[3][5] = {
+        {0, 1, 1, 0, 0}, /* abs row 2: cols 1,2 */
+        {0, 0, 1, 1, 0}, /* abs row 3: cols 2,3 */
+        {0, 0, 0, 1, 1}, /* abs row 4: cols 3,4 */
+    };
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 5; j++) {
+            float val = v[i * 5 + j];
+            if (allowed[i][j])
+                assert(val == 0.0f);
+            else
+                assert(isinf(val) && val < 0.0f);
+        }
+    }
+    free(v);
+    mlx_array_free(m);
+
+    /* decode: kv_len=5, window=2 -> cols before kv_len-window masked */
+    m = mlx_array_new();
+    assert(fwd_sliding_window_decode_mask(&m, 5, 2, gpu) == 0);
+    assert(mlx_array_ndim(m) == 4);
+    assert(mlx_array_dim(m, 0) == 1 && mlx_array_dim(m, 1) == 1);
+    assert(mlx_array_dim(m, 2) == 1 && mlx_array_dim(m, 3) == 5);
+    assert(mlx_array_dtype(m) == MLX_BFLOAT16);
+
+    v = mask_values(m, &n);
+    assert(n == 5);
+    for (int j = 0; j < 5; j++) {
+        if (j < 3)
+            assert(isinf(v[j]) && v[j] < 0.0f);
+        else
+            assert(v[j] == 0.0f);
+    }
+    free(v);
+    mlx_array_free(m);
+
+    /* decode within window: no position masked */
+    m = mlx_array_new();
+    assert(fwd_sliding_window_decode_mask(&m, 2, 4, gpu) == 0);
+    v = mask_values(m, &n);
+    assert(n == 2);
+    for (int j = 0; j < 2; j++) assert(v[j] == 0.0f);
+    free(v);
+    mlx_array_free(m);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -689,6 +764,9 @@ int main(void) {
 
     test_f6_per_layer_rope();
     printf("test_f6_per_layer_rope passed\n");
+
+    test_f7a_sliding_window_masks();
+    printf("test_f7a_sliding_window_masks passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;

@@ -215,6 +215,108 @@ cleanup:
     return rc;
 }
 
+/* Cast an f32 0/-inf mask to bf16 and reshape to [1,1,rows,cols]. */
+static int mask_finalize(mlx_array *out, mlx_array vals, int rows, int cols,
+                         mlx_stream s) {
+    int rc = -1;
+    mlx_array bf16 = mlx_array_new();
+    mlx_array result = mlx_array_new();
+    int shape[] = {1, 1, rows, cols};
+    if (!MLXB_CHECK(mlx_astype(&bf16, vals, MLX_BFLOAT16, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_reshape(&result, bf16, shape, 4, s))) goto cleanup;
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(bf16);
+    return rc;
+}
+
+int fwd_sliding_window_mask(mlx_array *out, int q_len, int kv_len, int window,
+                            mlx_stream s) {
+    if (!out || q_len <= 0 || kv_len <= 0 || window <= 0) return -1;
+    int rc = -1;
+    mlx_array rows = mlx_array_new();
+    mlx_array cols = mlx_array_new();
+    mlx_array rows2 = mlx_array_new();
+    mlx_array cols2 = mlx_array_new();
+    mlx_array diff = mlx_array_new();
+    mlx_array causal = mlx_array_new();
+    mlx_array within = mlx_array_new();
+    mlx_array allowed = mlx_array_new();
+    mlx_array vals = mlx_array_new();
+    mlx_array zero_i = mlx_array_new_int(0);
+    mlx_array win_i = mlx_array_new_int(window);
+    mlx_array zero_f = mlx_array_new_float(0.0f);
+    mlx_array neginf_f = mlx_array_new_float(-INFINITY);
+    int rshape[] = {q_len, 1};
+    int cshape[] = {1, kv_len};
+
+    /* absolute position of query row i is kv_len - q_len + i */
+    if (!MLXB_CHECK(mlx_arange(&rows, (double)(kv_len - q_len), (double)kv_len,
+                               1.0, MLX_INT32, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_arange(&cols, 0.0, (double)kv_len, 1.0, MLX_INT32, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_reshape(&rows2, rows, rshape, 2, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_reshape(&cols2, cols, cshape, 2, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_subtract(&diff, rows2, cols2, s))) goto cleanup;
+    /* allowed iff 0 <= row - col < window */
+    if (!MLXB_CHECK(mlx_greater_equal(&causal, diff, zero_i, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_less(&within, diff, win_i, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_logical_and(&allowed, causal, within, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_where(&vals, allowed, zero_f, neginf_f, s)))
+        goto cleanup;
+    rc = mask_finalize(out, vals, q_len, kv_len, s);
+
+cleanup:
+    mlx_array_free(neginf_f);
+    mlx_array_free(zero_f);
+    mlx_array_free(win_i);
+    mlx_array_free(zero_i);
+    mlx_array_free(vals);
+    mlx_array_free(allowed);
+    mlx_array_free(within);
+    mlx_array_free(causal);
+    mlx_array_free(diff);
+    mlx_array_free(cols2);
+    mlx_array_free(rows2);
+    mlx_array_free(cols);
+    mlx_array_free(rows);
+    return rc;
+}
+
+int fwd_sliding_window_decode_mask(mlx_array *out, int kv_len, int window,
+                                   mlx_stream s) {
+    if (!out || kv_len <= 0 || window <= 0) return -1;
+    int rc = -1;
+    mlx_array cols = mlx_array_new();
+    mlx_array allowed = mlx_array_new();
+    mlx_array vals = mlx_array_new();
+    mlx_array cutoff_i = mlx_array_new_int(kv_len - window);
+    mlx_array zero_f = mlx_array_new_float(0.0f);
+    mlx_array neginf_f = mlx_array_new_float(-INFINITY);
+
+    if (!MLXB_CHECK(mlx_arange(&cols, 0.0, (double)kv_len, 1.0, MLX_INT32, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_greater_equal(&allowed, cols, cutoff_i, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_where(&vals, allowed, zero_f, neginf_f, s)))
+        goto cleanup;
+    rc = mask_finalize(out, vals, 1, kv_len, s);
+
+cleanup:
+    mlx_array_free(neginf_f);
+    mlx_array_free(zero_f);
+    mlx_array_free(cutoff_i);
+    mlx_array_free(vals);
+    mlx_array_free(allowed);
+    mlx_array_free(cols);
+    return rc;
+}
+
 /* Custom rope frequency seam: when a family supplies a freqs array the rope
    call switches to base has_value=false, scale 1.0. No family uses it yet. */
 static mlx_array fwd_rope_freqs(const model_config_t *cfg, int layer) {
