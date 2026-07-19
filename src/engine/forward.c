@@ -502,8 +502,10 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
         goto cleanup;
 
     /* SDPA: local decode relies on the max_kv view trim in kvcache_update to
-       enforce the window; fwd_sliding_window_decode_mask is kept for designs
-       that stop trimming. */
+       enforce the window; nothing re-selects a mask if that trim goes away.
+       If a later design stops trimming (e.g. max_kv = 0 for local layers),
+       re-wire fwd_sliding_window_decode_mask here or SWA silently becomes
+       full attention on decode. */
     const char *mask_mode;
     if (local && S > 1) {
         int kv_len = mlx_array_dim(kview, 2);
