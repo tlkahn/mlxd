@@ -744,6 +744,78 @@ static void test_f7a_sliding_window_masks(void) {
     mlx_array_free(m);
 }
 
+/* ---- F7c: sliding-window attention wiring ---- */
+
+static void test_f7c_sliding_window_attention(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+
+    mlx_array x = det_input(4, 700);
+    float scale = 1.0f / sqrtf((float)HD);
+
+    model_config_t cfg = base_cfg();
+    cfg.has_sliding_window = true;
+    cfg.sliding_window = 2;
+    cfg.sliding_window_pattern = 6;
+    cfg.rope_local_base_freq = cfg.rope_theta;
+    assert(!model_layer_is_global(&cfg, 0));
+
+    /* Prefill S=4 with local sliding window: must match manual with sw mask */
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    mlx_array out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+
+    mlx_array sw_mask = mlx_array_new();
+    assert(fwd_sliding_window_mask(&sw_mask, 4, 4, 2, gpu) == 0);
+    mlx_array ref = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f, 0,
+                                     "array", sw_mask);
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    mlx_array ref_causal = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f,
+                                            0, "causal",
+                                            (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref_causal) > 1e-2f);
+    mlx_array_free(ref_causal);
+    mlx_array_free(ref);
+    mlx_array_free(sw_mask);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+
+    /* Decode 1 token after prefill: kv view trimmed to window */
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    mlx_array_free(out);
+
+    mlx_array x1 = det_input(1, 701);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x1, 0, &w, &cfg, &kv, gpu) == 0);
+    assert(mlx_array_dim(out, 1) == 1);
+    mlx_array_free(out);
+    mlx_array_free(x1);
+    kvcache_free(&kv);
+
+    /* Global layer via explicit layer_types: plain causal, pre-F7 behavior */
+    cfg.has_explicit_layer_types = true;
+    cfg.layer_is_global[0] = true;
+    assert(model_layer_is_global(&cfg, 0));
+
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    ref = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f, 0, "causal",
+                           (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref) < 2e-3f);
+    mlx_array_free(ref);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+
+    mlx_array_free(x);
+    weights_free(&w);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -767,6 +839,9 @@ int main(void) {
 
     test_f7a_sliding_window_masks();
     printf("test_f7a_sliding_window_masks passed\n");
+
+    test_f7c_sliding_window_attention();
+    printf("test_f7c_sliding_window_attention passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;

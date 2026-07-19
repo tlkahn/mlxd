@@ -407,6 +407,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     mlx_array k_roped = mlx_array_new();
     mlx_array kview = mlx_array_new();
     mlx_array vview = mlx_array_new();
+    mlx_array sdpa_mask = mlx_array_new();
     mlx_array attn_out = mlx_array_new();
     mlx_array attn_back = mlx_array_new();
     mlx_array attn_reshaped = mlx_array_new();
@@ -491,14 +492,34 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
         goto cleanup;
 
     /* KV cache update */
-    if (kvcache_update(kv, layer, k_roped, v_transposed, 0, &kview, &vview, s) != 0)
+    bool local = !model_layer_is_global(cfg, layer) &&
+                 cfg->has_sliding_window && cfg->sliding_window > 0;
+    int max_kv = local ? cfg->sliding_window : 0;
+    if (kvcache_update(kv, layer, k_roped, v_transposed, max_kv, &kview, &vview, s) != 0)
         goto cleanup;
 
     /* SDPA */
-    const char *mask_mode = S > 1 ? "causal" : "";
+    const char *mask_mode;
+    if (local && S > 1) {
+        int kv_len = mlx_array_dim(kview, 2);
+        if (fwd_sliding_window_mask(&sdpa_mask, S, kv_len, cfg->sliding_window, s) != 0)
+            goto cleanup;
+        mask_mode = "array";
+    } else if (local) {
+        int kv_len = mlx_array_dim(kview, 2);
+        if (kv_len > cfg->sliding_window) {
+            if (fwd_sliding_window_decode_mask(&sdpa_mask, kv_len, cfg->sliding_window, s) != 0)
+                goto cleanup;
+            mask_mode = "array";
+        } else {
+            mask_mode = "";
+        }
+    } else {
+        mask_mode = S > 1 ? "causal" : "";
+    }
     if (!MLXB_CHECK(mlx_fast_scaled_dot_product_attention(
             &attn_out, q_roped, kview, vview, attn_scale, mask_mode,
-            (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, s)))
+            sdpa_mask, (mlx_array){.ctx = NULL}, s)))
         goto cleanup;
 
     /* Transpose back and reshape */
@@ -528,6 +549,7 @@ cleanup:
     mlx_array_free(attn_reshaped);
     mlx_array_free(attn_back);
     mlx_array_free(attn_out);
+    mlx_array_free(sdpa_mask);
     mlx_array_free(vview);
     mlx_array_free(kview);
     mlx_array_free(k_roped);
