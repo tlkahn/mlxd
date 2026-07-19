@@ -76,6 +76,16 @@ run_one() {
         return 0
     fi
 
+    # gemma4-it: use chat-template parity. Raw completion on this instruct
+    # checkpoint collapses into short token loops; mlx-serve's degenerate-loop
+    # detector then stops early and creates length-only mismatches against
+    # mlxd (no such guard). Chat mode is the real serving path and terminates
+    # cleanly. Caller can still override via MLXD_PARITY_MODE.
+    if [ "$_fam" = "gemma4" ] && [ -z "${MLXD_PARITY_MODE:-}" ]; then
+        MLXD_PARITY_MODE=chat
+        export MLXD_PARITY_MODE
+    fi
+
     "$SCRIPT_DIR/parity_temp0.sh" "$_dir" "$_prompt"
 }
 
