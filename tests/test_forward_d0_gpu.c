@@ -977,6 +977,48 @@ static void test_f7c_sliding_window_attention(void) {
     mlx_array_free(out);
     kvcache_free(&kv);
 
+    /* Local base != rope_theta jointly with SWA: rope_theta deliberately
+       bogus to prove the local sliding-window path reads rope_local_base_freq;
+       prefill and decode both checked against oracles at the local base */
+    cfg = base_cfg();
+    cfg.has_sliding_window = true;
+    cfg.sliding_window = 2;
+    cfg.sliding_window_pattern = 6;
+    cfg.rope_theta = 999999.0f;
+    cfg.rope_local_base_freq = 5000.0f;
+    assert(!model_layer_is_global(&cfg, 0));
+
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+
+    sw_mask = mlx_array_new();
+    assert(fwd_sliding_window_mask(&sw_mask, 4, 4, 2, gpu) == 0);
+    ref = manual_attention(x, &w, scale, 5000.0f, 1.0f, 0, "array", sw_mask);
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    /* sanity: differs from the same sw mask at the bogus global base */
+    mlx_array ref_bogus = manual_attention(x, &w, scale, 999999.0f, 1.0f, 0,
+                                           "array", sw_mask);
+    assert(max_abs_diff(out, ref_bogus) > 1e-3f);
+    mlx_array_free(ref_bogus);
+    mlx_array_free(ref);
+    mlx_array_free(sw_mask);
+    mlx_array_free(out);
+
+    /* decode at the local base: kv view trimmed to window=2 */
+    mlx_array x2 = det_input(1, 702);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x2, 0, &w, &cfg, &kv, gpu) == 0);
+    assert(mlx_array_dim(out, 1) == 1);
+    mlx_array dec_ref2 = manual_decode_ref(x, x2, &w, scale, 5000.0f, 1.0f, 2);
+    assert(max_abs_diff(out, dec_ref2) < 2e-3f);
+    assert(kvcache_layer_offset(&kv, 0) == 5);
+    mlx_array_free(dec_ref2);
+    mlx_array_free(out);
+    mlx_array_free(x2);
+    kvcache_free(&kv);
+
     mlx_array_free(x);
     weights_free(&w);
 }
