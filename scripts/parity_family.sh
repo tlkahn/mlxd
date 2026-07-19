@@ -30,6 +30,19 @@ family_id() {
     esac
 }
 
+# Per-family env override: MLXD_PARITY_CKPT_<FAMILY>
+family_override() {
+    case "$1" in
+        qwen3)   printf '%s' "${MLXD_PARITY_CKPT_QWEN3:-}" ;;
+        gemma3)  printf '%s' "${MLXD_PARITY_CKPT_GEMMA3:-}" ;;
+        qwen2)   printf '%s' "${MLXD_PARITY_CKPT_QWEN2:-}" ;;
+        llama)   printf '%s' "${MLXD_PARITY_CKPT_LLAMA:-}" ;;
+        mistral) printf '%s' "${MLXD_PARITY_CKPT_MISTRAL:-}" ;;
+        lfm2)    printf '%s' "${MLXD_PARITY_CKPT_LFM2:-}" ;;
+        *)       return 1 ;;
+    esac
+}
+
 ALL_FAMILIES="qwen3 gemma3 qwen2 llama mistral lfm2"
 
 [ $# -lt 1 ] && usage
@@ -42,19 +55,13 @@ run_one() {
     _prompt="$2"
 
     _id=$(family_id "$_fam") || { usage; }
-
-    if [ -z "$_id" ]; then
-        printf 'skipped: no canonical checkpoint id for %s\n' "$_fam"
-        return 0
-    fi
-
-    # Per-family env override: MLXD_PARITY_CKPT_<FAMILY_UPPER>
-    _fam_upper=$(printf '%s' "$_fam" | tr '[:lower:]' '[:upper:]')
-    _override_var="MLXD_PARITY_CKPT_${_fam_upper}"
-    eval "_override=\${${_override_var}:-}"
+    _override=$(family_override "$_fam") || { usage; }
 
     if [ -n "$_override" ]; then
         _dir="$_override"
+    elif [ -z "$_id" ]; then
+        printf 'skipped: no canonical checkpoint id for %s\n' "$_fam"
+        return 0
     elif [ -n "${MLXD_PARITY_CKPT_ROOT:-}" ]; then
         _dir="${MLXD_PARITY_CKPT_ROOT}/${_id}"
     else

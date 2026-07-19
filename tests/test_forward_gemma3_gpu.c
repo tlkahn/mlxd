@@ -34,7 +34,8 @@ static int is_finite_f32(mlx_array a, mlx_stream s) {
     return 1;
 }
 
-/* Load engine_model_t bypassing the support gate (gemma3 not yet whitelisted) */
+/* Load engine_model_t bypassing the support gate (gemma3 not yet whitelisted).
+   TODO: replace with engine_model_load once gemma3 is in engine_model_check_supported (D1). */
 static int load_gemma3(engine_model_t *em, const char *path) {
     memset(em, 0, sizeof(*em));
     if (model_config_load(&em->cfg, path) != 0) return -1;
@@ -84,6 +85,8 @@ static void test_gemma3_forward_shape(engine_model_t *em) {
     assert(mlx_array_dim(logits, 0) == 1);
     assert(mlx_array_dim(logits, 1) == 256);
     assert(is_finite_f32(logits, gpu));
+    assert(kvcache_layer_offset(&kv, 0) == 6);
+    assert(kvcache_layer_offset(&kv, 1) == 6);
 
     mlx_array_free(logits);
     kvcache_free(&kv);
@@ -115,12 +118,16 @@ static void test_gemma3_incremental_equals_full(engine_model_t *em) {
     int shape_pre[] = {1, P - 1};
     mlx_array ids_pre = mlx_array_new_data(prompt, shape_pre, 2, MLX_INT32);
     assert(model_forward(em, ids_pre, &kv_b, false, NULL) == 0);
+    assert(kvcache_layer_offset(&kv_b, 0) == 5);
+    assert(kvcache_layer_offset(&kv_b, 1) == 5);
 
     int shape_dec[] = {1, 1};
     mlx_array ids_dec = mlx_array_new_data(&prompt[P - 1], shape_dec, 2, MLX_INT32);
     mlx_array logits_b = mlx_array_new();
     assert(model_forward(em, ids_dec, &kv_b, true, &logits_b) == 0);
     assert(MLXB_CHECK(mlx_array_eval(logits_b)));
+    assert(kvcache_layer_offset(&kv_b, 0) == 6);
+    assert(kvcache_layer_offset(&kv_b, 1) == 6);
 
     /* Compare: argmax match + max-abs-diff < 5e-2 */
     mlx_array la_f32 = mlx_array_new();

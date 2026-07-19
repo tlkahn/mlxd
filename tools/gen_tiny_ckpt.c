@@ -209,6 +209,7 @@ static const recipe_t GEMMA3 = {
     .has_lm_head = false, .tie_word_embeddings = true,
     .top = GEMMA3_TOP, .n_top = 2,
     .layer = GEMMA3_LAYER, .n_layer = 13,
+    /* quantized (sharded/tied-quant) gemma3 deferred to D1 gate; dense fixture is already tied */
     .emit_dense = true, .emit_sharded = false, .emit_tied = false,
     .fixture_base = "tiny_gemma3",
 };
@@ -359,7 +360,7 @@ static void quantize_and_replace(mlx_map_string_to_array m,
 }
 
 /* Suffixes that get quantized in sharded/tied variants */
-static const char *matmul_suffixes[] = {
+static const char *const matmul_suffixes[] = {
     "self_attn.q_proj.weight",
     "self_attn.k_proj.weight",
     "self_attn.v_proj.weight",
@@ -393,7 +394,7 @@ static void save_sharded(const recipe_t *r, const char *dir,
     quantize_and_replace(m, "model.embed_tokens.weight",
                          r->group_size, r->quant_bits, s);
     for (int L = 0; L < r->layers; L++) {
-        for (const char **sp = matmul_suffixes; *sp; sp++) {
+        for (const char *const *sp = matmul_suffixes; *sp; sp++) {
             char name[256];
             snprintf(name, sizeof(name), "model.layers.%d.%s", L, *sp);
             quantize_and_replace(m, name, r->group_size, r->quant_bits, s);
@@ -501,7 +502,7 @@ static void save_tied(const recipe_t *r, const char *dir,
     quantize_and_replace(m, "model.embed_tokens.weight",
                          r->group_size, r->quant_bits, s);
     for (int L = 0; L < r->layers; L++) {
-        for (const char **sp = matmul_suffixes; *sp; sp++) {
+        for (const char *const *sp = matmul_suffixes; *sp; sp++) {
             char name[256];
             snprintf(name, sizeof(name), "model.layers.%d.%s", L, *sp);
             quantize_and_replace(m, name, r->group_size, r->quant_bits, s);

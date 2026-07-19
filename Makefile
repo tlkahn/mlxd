@@ -161,9 +161,10 @@ test-parity-skip:
 	@out=$$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_QWEN3 sh scripts/parity_family.sh qwen3 2>&1) && \
 		printf '%s\n' "$$out" | grep -q 'skipped' || \
 		{ printf "  %-40sFAIL (wrapper-skip)\n" "parity-family-skip"; exit 1; }
+	@printf "  %-40sOK\n" "parity-family-skip"
 	@sh scripts/parity_family.sh bogus >/dev/null 2>&1 && \
 		{ printf "  %-40sFAIL (wrapper-unknown should fail)\n" "parity-family-unknown"; exit 1; } || true
-	@printf "  %-40sOK\n" "parity-family-skip"
+	@printf "  %-40sOK\n" "parity-family-unknown"
 
 test-parity-script:
 	@sh tests/test_parity_script.sh

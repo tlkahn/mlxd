@@ -581,6 +581,32 @@ else
 fi
 rm -rf "$WOVER_DIR"
 
+# --- wrapper: override wins over TBD id (gemma3 has no canonical id) ---
+
+WOVTBD_DIR=$(mktemp -d)
+mkdir -p "$WOVTBD_DIR/custom"
+mkdir -p "$WOVTBD_DIR/scripts"
+cp "$WRAPPER" "$WOVTBD_DIR/scripts/parity_family.sh"
+cat > "$WOVTBD_DIR/scripts/parity_temp0.sh" <<'STUBEOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/../delegate_args.txt"
+exit 0
+STUBEOF
+chmod +x "$WOVTBD_DIR/scripts/parity_temp0.sh"
+
+MLXD_PARITY_CKPT_GEMMA3="$WOVTBD_DIR/custom" sh "$WOVTBD_DIR/scripts/parity_family.sh" gemma3 "test" >/dev/null 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$WOVTBD_DIR/delegate_args.txt" ]; then
+    arg1=$(sed -n '1p' "$WOVTBD_DIR/delegate_args.txt")
+    if [ "$arg1" = "$WOVTBD_DIR/custom" ]; then
+        pass "wrapper-override-tbd-family"
+    else
+        fail "wrapper-override-tbd-family" "wrong dir: $arg1"
+    fi
+else
+    fail "wrapper-override-tbd-family" "delegate not called (rc=$rc)"
+fi
+rm -rf "$WOVTBD_DIR"
+
 # --- wrapper: run-all with nothing set -> skip all, exit 0 ---
 
 out=$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_QWEN3 -u MLXD_PARITY_CKPT_GEMMA3 -u MLXD_PARITY_CKPT_QWEN2 -u MLXD_PARITY_CKPT_LLAMA -u MLXD_PARITY_CKPT_MISTRAL -u MLXD_PARITY_CKPT_LFM2 sh "$WRAPPER" all 2>&1) && rc=0 || rc=$?
