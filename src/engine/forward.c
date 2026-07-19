@@ -342,9 +342,12 @@ static int fwd_rope_apply(mlx_array *res, mlx_array x, int dims,
     float base = cfg->rope_theta;
     float scale = 1.0f;
     if (global) {
-        if (cfg->rope_scaling_type &&
-            strcmp(cfg->rope_scaling_type, "linear") == 0 &&
-            cfg->rope_scaling_factor > 0.0f)
+        /* Apply 1/factor for simple (NULL or "linear") scaling types.
+           llama3-style uses the freqs seam path above; proportional goes
+           through fwd_rope_freqs. */
+        bool simple = !cfg->rope_scaling_type ||
+                      strcmp(cfg->rope_scaling_type, "linear") == 0;
+        if (simple && cfg->rope_scaling_factor > 0.0f)
             scale = 1.0f / cfg->rope_scaling_factor;
     } else if (cfg->rope_local_base_freq > 0.0f) {
         base = cfg->rope_local_base_freq;

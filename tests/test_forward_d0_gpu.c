@@ -665,6 +665,31 @@ static void test_f6_per_layer_rope(void) {
     mlx_array_free(ref);
     mlx_array_free(out);
     kvcache_free(&kv);
+
+    /* (c) global layer with NULL rope_scaling_type but factor 8.0 (gemma3 default):
+       oracle applies 1/factor unconditionally for simple scaling */
+    cfg = base_cfg();
+    cfg.rope_scaling_type = NULL;
+    cfg.rope_scaling_factor = 8.0f;
+    assert(model_layer_is_global(&cfg, 0));
+
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    ref = manual_attention(x, &w, scale, cfg.rope_theta, 0.125f, 0, "causal",
+                           (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    /* sanity: differs from unscaled (rope_scale=1.0) */
+    mlx_array ref_unscaled = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f,
+                                              0, "causal",
+                                              (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref_unscaled) > 1e-3f);
+    mlx_array_free(ref_unscaled);
+
+    mlx_array_free(ref);
+    mlx_array_free(out);
+    kvcache_free(&kv);
     mlx_array_free(x);
     weights_free(&w);
 }
