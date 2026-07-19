@@ -153,6 +153,10 @@ static void test_llama_plain_passes(void) {
 static void test_llama_rope_llama3_passes(void) {
     model_config_t cfg = make_llama_supported();
     cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 8.0f;
+    cfg.rope_original_max_position_embeddings = 8192;
+    cfg.rope_low_freq_factor = 1.0f;
+    cfg.rope_high_freq_factor = 4.0f;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
 }
@@ -225,6 +229,67 @@ static void test_llama_reject_partial_rotary(void) {
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
     assert(strcmp(err, "partial rotary embedding not supported") == 0);
+}
+
+/* --- llama3 rope parameter validation ----------------------------------- */
+
+static void test_llama_reject_llama3_factor_zero(void) {
+    model_config_t cfg = make_llama_supported();
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 0.0f;
+    cfg.rope_original_max_position_embeddings = 8192;
+    cfg.rope_low_freq_factor = 1.0f;
+    cfg.rope_high_freq_factor = 4.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "rope_scaling_factor") != NULL);
+}
+
+static void test_llama_reject_llama3_original_max_zero(void) {
+    model_config_t cfg = make_llama_supported();
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 8.0f;
+    cfg.rope_original_max_position_embeddings = 0;
+    cfg.rope_low_freq_factor = 1.0f;
+    cfg.rope_high_freq_factor = 4.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "original_max_position") != NULL);
+}
+
+static void test_llama_reject_llama3_low_freq_zero(void) {
+    model_config_t cfg = make_llama_supported();
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 8.0f;
+    cfg.rope_original_max_position_embeddings = 8192;
+    cfg.rope_low_freq_factor = 0.0f;
+    cfg.rope_high_freq_factor = 4.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "low_freq_factor") != NULL);
+}
+
+static void test_llama_reject_llama3_high_leq_low(void) {
+    model_config_t cfg = make_llama_supported();
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 8.0f;
+    cfg.rope_original_max_position_embeddings = 8192;
+    cfg.rope_low_freq_factor = 4.0f;
+    cfg.rope_high_freq_factor = 4.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "high_freq_factor") != NULL);
+}
+
+static void test_llama_llama3_valid_still_passes(void) {
+    model_config_t cfg = make_llama_supported();
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 8.0f;
+    cfg.rope_original_max_position_embeddings = 8192;
+    cfg.rope_low_freq_factor = 1.0f;
+    cfg.rope_high_freq_factor = 4.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
 }
 
 int main(void) {
@@ -302,6 +367,21 @@ int main(void) {
 
     test_llama_reject_partial_rotary();
     printf("  test_llama_reject_partial_rotary: passed\n");
+
+    test_llama_reject_llama3_factor_zero();
+    printf("  test_llama_reject_llama3_factor_zero: passed\n");
+
+    test_llama_reject_llama3_original_max_zero();
+    printf("  test_llama_reject_llama3_original_max_zero: passed\n");
+
+    test_llama_reject_llama3_low_freq_zero();
+    printf("  test_llama_reject_llama3_low_freq_zero: passed\n");
+
+    test_llama_reject_llama3_high_leq_low();
+    printf("  test_llama_reject_llama3_high_leq_low: passed\n");
+
+    test_llama_llama3_valid_still_passes();
+    printf("  test_llama_llama3_valid_still_passes: passed\n");
 
     printf("test_emodel_gate: all passed\n");
     return 0;

@@ -238,34 +238,34 @@ static int emit_expected(weight_expected_t *out, int capacity, int *pos,
     return 0;
 }
 
-static const char *const qwen3_layer_matmuls[] = {
+static const char *const dense_std_layer_matmuls[] = {
     "self_attn.q_proj", "self_attn.k_proj",
     "self_attn.v_proj", "self_attn.o_proj",
     "mlp.gate_proj",    "mlp.up_proj",
     "mlp.down_proj",    NULL,
 };
 
-static const char *const qwen3_layer_norms[] = {
+static const char *const dense_std_layer_norms[] = {
     "input_layernorm", "post_attention_layernorm", NULL,
 };
 
-static const char *const qwen3_layer_qk_norms[] = {
+static const char *const dense_std_layer_qk_norms[] = {
     "self_attn.q_norm", "self_attn.k_norm", NULL,
 };
 
 static const weights_family_desc_t family_descs[] = {
     {
         .family         = MODEL_QWEN3,
-        .layer_matmuls  = qwen3_layer_matmuls,
-        .layer_norms    = qwen3_layer_norms,
-        .layer_qk_norms = qwen3_layer_qk_norms,
+        .layer_matmuls  = dense_std_layer_matmuls,
+        .layer_norms    = dense_std_layer_norms,
+        .layer_qk_norms = dense_std_layer_qk_norms,
         .layer_biases   = NULL,
         .extra_tensors  = NULL,
     },
     {
         .family         = MODEL_LLAMA,
-        .layer_matmuls  = qwen3_layer_matmuls,
-        .layer_norms    = qwen3_layer_norms,
+        .layer_matmuls  = dense_std_layer_matmuls,
+        .layer_norms    = dense_std_layer_norms,
         .layer_qk_norms = NULL,
         .layer_biases   = NULL,
         .extra_tensors  = NULL,

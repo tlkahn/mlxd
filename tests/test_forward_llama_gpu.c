@@ -46,12 +46,17 @@ static void test_llama3_config_flags(engine_model_t *em) {
     assert(em->cfg.has_qk_norm == false);
     assert(em->cfg.attention_bias == false);
     assert(em->cfg.hidden_act == HIDDEN_ACT_SILU);
+    assert(em->rope_freqs.ctx != NULL);
 }
 
 static void test_llama3_tied_config_flags(engine_model_t *em) {
     assert(em->cfg.family == MODEL_LLAMA);
     assert(em->cfg.tie_word_embeddings == true);
     assert(em->cfg.quant_bits == 4);
+    assert(em->cfg.rope_scaling_type != NULL);
+    assert(strcmp(em->cfg.rope_scaling_type, "llama3") == 0);
+    assert(em->cfg.has_qk_norm == false);
+    assert(em->rope_freqs.ctx != NULL);
 }
 
 /* ---- weight mapping ---- */
@@ -173,6 +178,75 @@ static void test_llama3_incremental_equals_full(engine_model_t *em) {
     kvcache_free(&kv_a);
 }
 
+/* ---- freqs builder ---- */
+
+static void test_freqs_build_plain_cfg(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_LLAMA;
+    cfg.head_dim = 128;
+    cfg.hidden_act = HIDDEN_ACT_SILU;
+    cfg.partial_rotary_factor = 1.0f;
+    cfg.rope_theta = 10000.0f;
+
+    mlx_array out = mlx_array_new();
+    assert(fwd_rope_freqs_build(&out, &cfg) == 0);
+    assert(out.ctx == NULL);
+    mlx_array_free(out);
+}
+
+static void test_freqs_build_llama3(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_LLAMA;
+    cfg.head_dim = 128;
+    cfg.hidden_act = HIDDEN_ACT_SILU;
+    cfg.partial_rotary_factor = 1.0f;
+    cfg.rope_theta = 500000.0f;
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 8.0f;
+    cfg.rope_low_freq_factor = 1.0f;
+    cfg.rope_high_freq_factor = 4.0f;
+    cfg.rope_original_max_position_embeddings = 8192;
+
+    mlx_array out = mlx_array_new();
+    assert(fwd_rope_freqs_build(&out, &cfg) == 0);
+    assert(out.ctx != NULL);
+    assert(mlx_array_ndim(out) == 1);
+    assert(mlx_array_dim(out, 0) == 64);
+    assert(mlx_array_dtype(out) == MLX_FLOAT32);
+
+    assert(MLXB_CHECK(mlx_array_eval(out)));
+    const float *d = mlx_array_data_float32(out);
+    assert(d != NULL);
+
+    float ref[64];
+    assert(fwd_rope_llama3_freqs(&cfg, ref, 64) == 0);
+    for (int i = 0; i < 64; i++) {
+        float diff = fabsf(d[i] - ref[i]);
+        float rel = diff / (fabsf(ref[i]) + 1e-30f);
+        assert(rel < 1e-5f);
+    }
+
+    mlx_array_free(out);
+}
+
+static void test_freqs_build_degenerate(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_LLAMA;
+    cfg.head_dim = 128;
+    cfg.hidden_act = HIDDEN_ACT_SILU;
+    cfg.partial_rotary_factor = 1.0f;
+    cfg.rope_scaling_type = "llama3";
+    cfg.rope_scaling_factor = 0.0f;
+    cfg.rope_original_max_position_embeddings = 0;
+
+    mlx_array out = mlx_array_new();
+    assert(fwd_rope_freqs_build(&out, &cfg) == -1);
+    mlx_array_free(out);
+}
+
 /* ---- main ---- */
 
 static void run_suite(const char *label, const char *path,
@@ -202,6 +276,15 @@ static void run_suite(const char *label, const char *path,
 
 int main(void) {
     gpu = mlxbridge_gpu_stream();
+
+    test_freqs_build_plain_cfg();
+    printf("  test_freqs_build_plain_cfg: passed\n");
+
+    test_freqs_build_llama3();
+    printf("  test_freqs_build_llama3: passed\n");
+
+    test_freqs_build_degenerate();
+    printf("  test_freqs_build_degenerate: passed\n");
 
     char dense_path[512], tied_path[512];
     snprintf(dense_path, sizeof(dense_path), "%s/tiny_llama3", FIXTURES);

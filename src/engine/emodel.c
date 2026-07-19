@@ -5,9 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-int engine_model_check_supported(const model_config_t *cfg,
-                                 char *err, size_t errlen) {
-    if (!cfg) return -1;
 
 #define REJECT(cond, msg) do { \
     if (cond) { \
@@ -16,58 +13,60 @@ int engine_model_check_supported(const model_config_t *cfg,
     } \
 } while (0)
 
+static int reject_dense_common(const model_config_t *cfg,
+                                char *err, size_t errlen) {
+    REJECT(cfg->attention_bias,
+           "attention_bias not supported");
+    REJECT(cfg->has_sliding_window,
+           "sliding window attention not supported");
+    REJECT(cfg->num_experts > 0,
+           "MoE models not supported");
+    REJECT(cfg->has_hybrid_layers,
+           "hybrid layer architectures not supported");
+    REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
+           "only SiLU activation supported");
+    REJECT(cfg->norm_has_offset,
+           "norm_has_offset not supported");
+    REJECT(cfg->scale_embeddings,
+           "scale_embeddings not supported");
+    REJECT(cfg->has_pre_ff_norm,
+           "pre-feedforward norm not supported");
+    REJECT(cfg->partial_rotary_factor != 1.0f,
+           "partial rotary embedding not supported");
+    REJECT(cfg->attn_output_gate,
+           "attention output gate not supported");
+    return 0;
+}
+
+int engine_model_check_supported(const model_config_t *cfg,
+                                 char *err, size_t errlen) {
+    if (!cfg) return -1;
+
     switch (cfg->family) {
     case MODEL_QWEN3:
-        REJECT(cfg->attention_bias,
-               "attention_bias not supported");
-        REJECT(cfg->has_sliding_window,
-               "sliding window attention not supported");
-        REJECT(cfg->num_experts > 0,
-               "MoE models not supported");
-        REJECT(cfg->has_hybrid_layers,
-               "hybrid layer architectures not supported");
-        REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
-               "only SiLU activation supported");
-        REJECT(cfg->norm_has_offset,
-               "norm_has_offset not supported");
-        REJECT(cfg->scale_embeddings,
-               "scale_embeddings not supported");
-        REJECT(cfg->has_pre_ff_norm,
-               "pre-feedforward norm not supported");
+        if (reject_dense_common(cfg, err, errlen) != 0) return -1;
         REJECT(cfg->rope_scaling_type != NULL,
                "RoPE scaling not supported");
-        REJECT(cfg->partial_rotary_factor != 1.0f,
-               "partial rotary embedding not supported");
-        REJECT(cfg->attn_output_gate,
-               "attention output gate not supported");
         return 0;
 
     case MODEL_LLAMA:
-        REJECT(cfg->attention_bias,
-               "attention_bias not supported");
-        REJECT(cfg->has_sliding_window,
-               "sliding window attention not supported");
-        REJECT(cfg->num_experts > 0,
-               "MoE models not supported");
-        REJECT(cfg->has_hybrid_layers,
-               "hybrid layer architectures not supported");
-        REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
-               "only SiLU activation supported");
-        REJECT(cfg->norm_has_offset,
-               "norm_has_offset not supported");
-        REJECT(cfg->scale_embeddings,
-               "scale_embeddings not supported");
-        REJECT(cfg->has_pre_ff_norm,
-               "pre-feedforward norm not supported");
+        if (reject_dense_common(cfg, err, errlen) != 0) return -1;
         REJECT(cfg->rope_scaling_type != NULL &&
                strcmp(cfg->rope_scaling_type, "linear") != 0 &&
                strcmp(cfg->rope_scaling_type, "llama3") != 0 &&
                strcmp(cfg->rope_scaling_type, "default") != 0,
                "unsupported RoPE scaling type");
-        REJECT(cfg->partial_rotary_factor != 1.0f,
-               "partial rotary embedding not supported");
-        REJECT(cfg->attn_output_gate,
-               "attention output gate not supported");
+        if (cfg->rope_scaling_type &&
+            strcmp(cfg->rope_scaling_type, "llama3") == 0) {
+            REJECT(cfg->rope_scaling_factor <= 0.0f,
+                   "llama3 rope_scaling_factor must be > 0");
+            REJECT(cfg->rope_original_max_position_embeddings <= 0,
+                   "llama3 rope_original_max_position_embeddings must be > 0");
+            REJECT(cfg->rope_low_freq_factor <= 0.0f,
+                   "llama3 rope_low_freq_factor must be > 0");
+            REJECT(cfg->rope_high_freq_factor <= cfg->rope_low_freq_factor,
+                   "llama3 rope_high_freq_factor must be > rope_low_freq_factor");
+        }
         REJECT(cfg->has_qk_norm,
                "qk_norm not supported for llama");
         return 0;
@@ -76,12 +75,12 @@ int engine_model_check_supported(const model_config_t *cfg,
         REJECT(true,
                "unsupported model family (only qwen3/llama dense supported)");
     }
-
-#undef REJECT
 }
 
+#undef REJECT
+
 /* test_forward_gemma3_gpu.c:load_gemma3 mirrors this path minus the support
-   gate; keep in sync until gemma3 is whitelisted (D1). */
+   gate; keep in sync until gemma3 is whitelisted. */
 int engine_model_load(engine_model_t *em, const char *model_dir,
                       char *err, size_t errlen) {
     if (!em || !model_dir) return -1;
@@ -105,12 +104,23 @@ int engine_model_load(engine_model_t *em, const char *model_dir,
         return -1;
     }
 
+    em->rope_freqs = (mlx_array){.ctx = NULL};
+    if (fwd_rope_freqs_build(&em->rope_freqs, &em->cfg) != 0) {
+        if (err && errlen > 0)
+            snprintf(err, errlen, "failed to build rope freqs");
+        weights_free(&em->w);
+        model_config_free(&em->cfg);
+        memset(em, 0, sizeof(*em));
+        return -1;
+    }
+
     em->stream = mlxbridge_gpu_stream();
     return 0;
 }
 
 void engine_model_free(engine_model_t *em) {
     if (!em) return;
+    if (em->rope_freqs.ctx) mlx_array_free(em->rope_freqs);
     weights_free(&em->w);
     model_config_free(&em->cfg);
     memset(em, 0, sizeof(*em));
@@ -135,7 +145,7 @@ int model_forward(engine_model_t *em, mlx_array ids, kvcache_t *kv,
 
     /* Decoder layers */
     for (int L = 0; L < cfg->num_hidden_layers; L++) {
-        if (fwd_decoder_layer(&layer_out, h, L, w, cfg, kv, s) != 0)
+        if (fwd_decoder_layer(&layer_out, h, L, w, cfg, kv, em->rope_freqs, s) != 0)
             goto cleanup;
         mlx_array_free(h);
         h = layer_out;

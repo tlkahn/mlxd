@@ -8,7 +8,7 @@
 
 /* --- 2a: arg validation -------------------------------------------------- */
 
-static void test_arg_validation(void) {
+static model_config_t make_valid_llama3_cfg(void) {
     model_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.head_dim = 128;
@@ -18,7 +18,11 @@ static void test_arg_validation(void) {
     cfg.rope_low_freq_factor = 1.0f;
     cfg.rope_high_freq_factor = 4.0f;
     cfg.rope_original_max_position_embeddings = 8192;
+    return cfg;
+}
 
+static void test_arg_validation(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
     float out[64];
 
     assert(fwd_rope_llama3_freqs(NULL, out, 64) == -1);
@@ -32,6 +36,67 @@ static void test_arg_validation(void) {
     model_config_t cfg3 = cfg;
     cfg3.rope_scaling_type = NULL;
     assert(fwd_rope_llama3_freqs(&cfg3, out, 64) == -1);
+}
+
+/* --- 2a2: degenerate parameter validation -------------------------------- */
+
+static void test_reject_factor_zero(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.rope_scaling_factor = 0.0f;
+    float out[64];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 64) == -1);
+}
+
+static void test_reject_factor_negative(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.rope_scaling_factor = -1.0f;
+    float out[64];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 64) == -1);
+}
+
+static void test_reject_original_max_zero(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.rope_original_max_position_embeddings = 0;
+    float out[64];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 64) == -1);
+}
+
+static void test_reject_low_freq_factor_zero(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.rope_low_freq_factor = 0.0f;
+    float out[64];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 64) == -1);
+}
+
+static void test_reject_low_freq_factor_negative(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.rope_low_freq_factor = -1.0f;
+    float out[64];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 64) == -1);
+}
+
+static void test_reject_high_leq_low(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.rope_high_freq_factor = cfg.rope_low_freq_factor;
+    float out[64];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 64) == -1);
+
+    cfg.rope_high_freq_factor = cfg.rope_low_freq_factor - 0.1f;
+    assert(fwd_rope_llama3_freqs(&cfg, out, 64) == -1);
+}
+
+static void test_reject_odd_head_dim(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.head_dim = 127;
+    float out[63];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 63) == -1);
+}
+
+static void test_reject_head_dim_lt_2(void) {
+    model_config_t cfg = make_valid_llama3_cfg();
+    cfg.head_dim = 1;
+    float out[1];
+    assert(fwd_rope_llama3_freqs(&cfg, out, 0) == -1);
 }
 
 /* --- 2b: high-frequency band passthrough --------------------------------- */
@@ -156,6 +221,30 @@ static void test_golden_vector(void) {
 int main(void) {
     test_arg_validation();
     printf("  test_arg_validation: passed\n");
+
+    test_reject_factor_zero();
+    printf("  test_reject_factor_zero: passed\n");
+
+    test_reject_factor_negative();
+    printf("  test_reject_factor_negative: passed\n");
+
+    test_reject_original_max_zero();
+    printf("  test_reject_original_max_zero: passed\n");
+
+    test_reject_low_freq_factor_zero();
+    printf("  test_reject_low_freq_factor_zero: passed\n");
+
+    test_reject_low_freq_factor_negative();
+    printf("  test_reject_low_freq_factor_negative: passed\n");
+
+    test_reject_high_leq_low();
+    printf("  test_reject_high_leq_low: passed\n");
+
+    test_reject_odd_head_dim();
+    printf("  test_reject_odd_head_dim: passed\n");
+
+    test_reject_head_dim_lt_2();
+    printf("  test_reject_head_dim_lt_2: passed\n");
 
     test_high_freq_passthrough();
     printf("  test_high_freq_passthrough: passed\n");

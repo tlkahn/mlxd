@@ -316,7 +316,7 @@ static void test_fwd_attention(void) {
                         cfg_dense.num_key_value_heads, cfg_dense.head_dim) == 0);
 
     mlx_array out = mlx_array_new();
-    assert(fwd_attention(&out, x, 0, &w_dense, &cfg_dense, &kv, gpu) == 0);
+    assert(fwd_attention(&out, x, 0, &w_dense, &cfg_dense, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(out)));
     assert(mlx_array_ndim(out) == 3);
     assert(mlx_array_dim(out, 0) == 1);
@@ -337,7 +337,7 @@ static void test_fwd_attention(void) {
     MLXB_CHECK(mlx_astype(&x2, x2_f32, MLX_BFLOAT16, gpu));
 
     mlx_array out2 = mlx_array_new();
-    assert(fwd_attention(&out2, x2, 0, &w_dense, &cfg_dense, &kv2, gpu) == 0);
+    assert(fwd_attention(&out2, x2, 0, &w_dense, &cfg_dense, &kv2, (mlx_array){.ctx = NULL}, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(out2)));
 
     mlx_array out_f32 = mlx_array_new();
@@ -449,7 +449,7 @@ static void test_decoder_layer(void) {
                         cfg_dense.num_key_value_heads, cfg_dense.head_dim) == 0);
 
     mlx_array out = mlx_array_new();
-    assert(fwd_decoder_layer(&out, x, 0, &w_dense, &cfg_dense, &kv, gpu) == 0);
+    assert(fwd_decoder_layer(&out, x, 0, &w_dense, &cfg_dense, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(out)));
     assert(mlx_array_ndim(out) == 3);
     assert(mlx_array_dim(out, 0) == 1);
