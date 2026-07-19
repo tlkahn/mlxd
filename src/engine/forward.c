@@ -334,15 +334,15 @@ int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n) {
     double high_wl = old_ctx / high_freq_factor;
 
     for (int i = 0; i < n; i++) {
-        double freq = 1.0 / pow(base, 2.0 * i / (double)head_dim);
-        double wavelen = 2.0 * M_PI / freq;
+        double freq = pow(base, 2.0 * i / (double)head_dim);
+        double wavelen = 2.0 * M_PI * freq;
 
         if (wavelen > low_wl) {
-            freq = freq / factor;
+            freq = freq * factor;
         } else if (wavelen > high_wl) {
             double smooth = (old_ctx / wavelen - low_freq_factor) /
                             (high_freq_factor - low_freq_factor);
-            freq = freq * ((1.0 - smooth) / factor + smooth);
+            freq = freq / ((1.0 - smooth) / factor + smooth);
         }
         out[i] = (float)freq;
     }
