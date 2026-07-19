@@ -109,11 +109,11 @@ test-gpu: $(TEST_GPU_BINS) fixtures-tiny-ckpt
 
 # --- Fixture generators -------------------------------------------------------
 
-tools/gen_tiny_qwen3_ckpt: tools/gen_tiny_qwen3_ckpt.c vendor/yyjson/yyjson.o
+tools/gen_tiny_ckpt: tools/gen_tiny_ckpt.c vendor/yyjson/yyjson.o
 	$(CC) $(ALL_CFLAGS) -DMLXD_FIXTURES_DIR=\"$(CURDIR)/tests/fixtures\" -o $@ $< vendor/yyjson/yyjson.o $(ALL_LDFLAGS)
 
-fixtures-tiny-ckpt: tools/gen_tiny_qwen3_ckpt
-	./tools/gen_tiny_qwen3_ckpt
+fixtures-tiny-ckpt: tools/gen_tiny_ckpt
+	./tools/gen_tiny_ckpt
 
 # Regenerate src/model/tok_unicode_tables.{h,c} from Python's bundled UCD.
 # Both files are checked in; normal builds never run this.
@@ -121,7 +121,7 @@ unicode-tables:
 	python3 tools/gen_unicode_tables.py
 
 clean:
-	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d tools/gen_tiny_qwen3_ckpt
+	rm -f mlxd $(ALL_OBJS) $(DEPS) $(TEST_BINS) $(TEST_GPU_BINS) tests/test_*.d tools/gen_tiny_ckpt
 	find src vendor -name '*.tsan.o' -delete
 	rm -rf build/tsan
 
@@ -158,6 +158,14 @@ test-parity-skip:
 	printf '%s\n' "$$out" | grep -q 'skipped: checkpoint dir' || \
 	{ printf "  %-40sFAIL (ckpt-missing skip)\n" "parity-skip"; exit 1; }
 	@printf "  %-40sOK\n" "parity-skip"
+	@out=$$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_QWEN3 sh scripts/parity_family.sh qwen3 2>&1) && \
+		printf '%s\n' "$$out" | grep -q 'skipped' || \
+		{ printf "  %-40sFAIL (wrapper-skip)\n" "parity-family-skip"; exit 1; }
+	@printf "  %-40sOK\n" "parity-family-skip"
+	@rc=0; sh scripts/parity_family.sh bogus >/dev/null 2>&1 || rc=$$?; \
+		[ "$$rc" -eq 2 ] || \
+		{ printf "  %-40sFAIL (expected exit 2, got %d)\n" "parity-family-unknown" "$$rc"; exit 1; }
+	@printf "  %-40sOK\n" "parity-family-unknown"
 
 test-parity-script:
 	@sh tests/test_parity_script.sh

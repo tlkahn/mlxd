@@ -50,6 +50,8 @@ int engine_model_check_supported(const model_config_t *cfg,
 #undef REJECT
 }
 
+/* test_forward_gemma3_gpu.c:load_gemma3 mirrors this path minus the support
+   gate; keep in sync until gemma3 is whitelisted (D1). */
 int engine_model_load(engine_model_t *em, const char *model_dir,
                       char *err, size_t errlen) {
     if (!em || !model_dir) return -1;
