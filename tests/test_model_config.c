@@ -1038,6 +1038,26 @@ static void test_tiny_gemma4_config(void) {
     model_config_free(&cfg);
 }
 
+static void test_gemma4_family_defaults(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg,
+                               MLXD_FIXTURES_DIR "/model_config_gemma4_minimal");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_GEMMA4);
+    assert(cfg.final_logit_softcapping == 30.0f);
+    assert(cfg.hidden_size_per_layer_input == 256);
+    assert(cfg.use_double_wide_mlp == true);
+    model_config_free(&cfg);
+
+    /* Non-gemma4: defaults stay at 0 */
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_LLAMA);
+    assert(cfg.final_logit_softcapping == 0.0f);
+    assert(cfg.hidden_size_per_layer_input == 0);
+    model_config_free(&cfg);
+}
+
 int main(void) {
     test_happy_path();
     test_kv_heads_default();
@@ -1072,6 +1092,7 @@ int main(void) {
     test_bert_explicit_head_dim_ignored();
     test_tiny_gemma3_config();
     test_tiny_gemma4_config();
+    test_gemma4_family_defaults();
 
     printf("test_model_config: all passed\n");
     return 0;
