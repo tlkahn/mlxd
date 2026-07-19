@@ -741,12 +741,11 @@ static void test_f6_per_layer_rope(void) {
     mlx_array x = det_input(3, 600);
     float scale = 1.0f / sqrtf((float)HD);
 
-    /* (a) local layer uses rope_local_base_freq: layer 0 local under
-       pattern 6; rope_theta deliberately bogus to prove it is unused */
+    /* (a) local layer uses rope_local_base_freq: layer 0 local via explicit
+       layer types; rope_theta deliberately bogus to prove it is unused */
     model_config_t cfg = base_cfg();
-    cfg.has_sliding_window = true;
-    cfg.sliding_window = 1024; /* wider than the sequence: mask is a no-op */
-    cfg.sliding_window_pattern = 6;
+    cfg.has_explicit_layer_types = true;
+    cfg.layer_is_global[0] = false;
     cfg.rope_theta = 999999.0f;
     cfg.rope_local_base_freq = 5000.0f;
     assert(!model_layer_is_global(&cfg, 0));
