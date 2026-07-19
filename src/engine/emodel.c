@@ -42,9 +42,39 @@ int engine_model_check_supported(const model_config_t *cfg,
                "attention output gate not supported");
         return 0;
 
+    case MODEL_LLAMA:
+        REJECT(cfg->attention_bias,
+               "attention_bias not supported");
+        REJECT(cfg->has_sliding_window,
+               "sliding window attention not supported");
+        REJECT(cfg->num_experts > 0,
+               "MoE models not supported");
+        REJECT(cfg->has_hybrid_layers,
+               "hybrid layer architectures not supported");
+        REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
+               "only SiLU activation supported");
+        REJECT(cfg->norm_has_offset,
+               "norm_has_offset not supported");
+        REJECT(cfg->scale_embeddings,
+               "scale_embeddings not supported");
+        REJECT(cfg->has_pre_ff_norm,
+               "pre-feedforward norm not supported");
+        REJECT(cfg->rope_scaling_type != NULL &&
+               strcmp(cfg->rope_scaling_type, "linear") != 0 &&
+               strcmp(cfg->rope_scaling_type, "llama3") != 0 &&
+               strcmp(cfg->rope_scaling_type, "default") != 0,
+               "unsupported RoPE scaling type");
+        REJECT(cfg->partial_rotary_factor != 1.0f,
+               "partial rotary embedding not supported");
+        REJECT(cfg->attn_output_gate,
+               "attention output gate not supported");
+        REJECT(cfg->has_qk_norm,
+               "qk_norm not supported for llama");
+        return 0;
+
     default:
         REJECT(true,
-               "unsupported model family (only qwen3-dense supported)");
+               "unsupported model family (only qwen3/llama dense supported)");
     }
 
 #undef REJECT
