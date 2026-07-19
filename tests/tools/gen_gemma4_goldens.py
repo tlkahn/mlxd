@@ -107,6 +107,23 @@ def gen_proportional_rope():
         print()
 
 
+def gen_softcap():
+    """Golden for fwd_softcap: bf16 input spanning +-60, cap=30."""
+    print("/* --- Softcap golden (tanh(x/cap)*cap) --- */")
+    x_np = np.linspace(-60.0, 60.0, 16, dtype=np.float32)
+    x_bf16 = mx.array(x_np).astype(mx.bfloat16)
+    cap = mx.array(30.0).astype(mx.bfloat16)
+    out = mx.tanh(x_bf16 / cap) * cap
+    out_f32 = np.array(out.astype(mx.float32))
+    in_f32 = np.array(x_bf16.astype(mx.float32))
+
+    print(f"#define SOFTCAP_GOLDEN_N 16")
+    print(fmt_c_array("softcap_input", in_f32))
+    print(fmt_c_array("softcap_expected", out_f32))
+    print()
+
+
 if __name__ == "__main__":
     gen_gelu_approx()
     gen_proportional_rope()
+    gen_softcap()

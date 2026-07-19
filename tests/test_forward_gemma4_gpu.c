@@ -3,7 +3,6 @@
 #include "engine/kvcache.h"
 #include "mlxbridge/mlxbridge.h"
 #include "model/model.h"
-#include "model/weights.h"
 
 #include <assert.h>
 #include <math.h>
@@ -73,32 +72,6 @@ static int argmax_f32(mlx_array a, mlx_stream s) {
     return best;
 }
 
-/* Load engine_model_t bypassing the support gate (gemma4 not yet whitelisted in PR1).
-   TODO: replace with engine_model_load once gemma4 is in engine_model_check_supported (PR2). */
-static int load_gemma4(engine_model_t *em, const char *path) {
-    memset(em, 0, sizeof(*em));
-    if (model_config_load(&em->cfg, path) != 0) return -1;
-
-    char err[256] = {0};
-    if (weights_load(&em->w, path, &em->cfg, err, sizeof(err)) != 0) {
-        fprintf(stderr, "weights_load: %s\n", err);
-        model_config_free(&em->cfg);
-        memset(em, 0, sizeof(*em));
-        return -1;
-    }
-
-    em->rope_freqs = (mlx_array){.ctx = NULL};
-    if (fwd_rope_freqs_build(&em->rope_freqs, &em->cfg) != 0) {
-        fprintf(stderr, "fwd_rope_freqs_build failed\n");
-        weights_free(&em->w);
-        model_config_free(&em->cfg);
-        memset(em, 0, sizeof(*em));
-        return -1;
-    }
-
-    em->stream = mlxbridge_gpu_stream();
-    return 0;
-}
 
 /* ---- config flags ---- */
 
@@ -114,6 +87,8 @@ static void test_gemma4_config_flags(engine_model_t *em) {
     assert(em->cfg.num_kv_shared_layers == 2);
     assert(em->cfg.global_head_dim == 32);
     assert(em->cfg.num_global_key_value_heads == 1);
+    assert(em->cfg.final_logit_softcapping == 30.0f);
+    assert(em->cfg.hidden_size_per_layer_input == 8);
 }
 
 /* ---- forward shape: logits [1, vocab=256], all finite ---- */
@@ -134,6 +109,20 @@ static void test_gemma4_forward_shape(engine_model_t *em) {
     assert(mlx_array_dim(logits, 0) == 1);
     assert(mlx_array_dim(logits, 1) == 256);
     assert(is_finite_f32(logits, gpu));
+
+    /* Softcap: all logits must satisfy |logit| <= cap */
+    if (em->cfg.final_logit_softcapping > 0) {
+        float cap = em->cfg.final_logit_softcapping;
+        mlx_array lf = mlx_array_new();
+        MLXB_CHECK(mlx_astype(&lf, logits, MLX_FLOAT32, gpu));
+        MLXB_CHECK(mlx_array_eval(lf));
+        size_t n = mlx_array_size(lf);
+        const float *ld = mlx_array_data_float32(lf);
+        for (size_t i = 0; i < n; i++) {
+            assert(fabsf(ld[i]) <= cap + 0.1f);
+        }
+        mlx_array_free(lf);
+    }
 
     /* KV sharing: only non-shared layers (0,1) should have advanced offset */
     assert(kvcache_layer_offset(&kv, 0) == 5);
@@ -209,11 +198,8 @@ static void test_gemma4_unresolved_kv_source(engine_model_t *em) {
     em->cfg.num_kv_shared_layers = 3;
     assert(model_kv_source_layer(&em->cfg, 1) == -1);
 
-    /* Build input [1,1,D] */
-    int D = em->cfg.hidden_size_per_layer_input > 0
-                ? em->cfg.hidden_size_per_layer_input
-                : em->cfg.hidden_size;
-    int shape[] = {1, 1, D};
+    /* Build input [1,1,hidden_size] */
+    int shape[] = {1, 1, em->cfg.hidden_size};
     mlx_array x = mlx_array_new();
     MLXB_CHECK(mlx_zeros(&x, shape, 3, MLX_BFLOAT16, gpu));
 
@@ -235,9 +221,10 @@ int main(void) {
     gpu = mlxbridge_gpu_stream();
 
     engine_model_t em;
-    int rc = load_gemma4(&em, FIXTURES "/tiny_gemma4");
+    char err[256] = {0};
+    int rc = engine_model_load(&em, FIXTURES "/tiny_gemma4", err, sizeof(err));
     if (rc != 0) {
-        fprintf(stderr, "SKIP: failed to load tiny_gemma4 fixture\n");
+        fprintf(stderr, "SKIP: failed to load tiny_gemma4 fixture: %s\n", err);
         return 1;
     }
 

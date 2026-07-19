@@ -36,7 +36,7 @@ static char *path_join(const char *dir, const char *name) {
 /* Absent = def; wrong type / n < 1 / overflow = -1. */
 static int get_dim_int(yyjson_val *obj, const char *key, int *out, int def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }
@@ -49,10 +49,10 @@ static int get_dim_int(yyjson_val *obj, const char *key, int *out, int def) {
     return 0;
 }
 
-/* Absent = def; wrong type / n < 0 / overflow = -1. 0 is legal. */
+/* Absent or null = def; wrong type / n < 0 / overflow = -1. 0 is legal. */
 static int get_int_nonneg(yyjson_val *obj, const char *key, int *out, int def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }
@@ -69,7 +69,7 @@ static int get_int_nonneg(yyjson_val *obj, const char *key, int *out, int def) {
    Rejects values that overflow float (|v| > FLT_MAX -> Inf on cast). */
 static int get_f32(yyjson_val *obj, const char *key, float *out, float def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }
@@ -85,7 +85,7 @@ static int get_f32(yyjson_val *obj, const char *key, float *out, float def) {
 /* Absent = def; wrong type = -1. */
 static int get_bool(yyjson_val *obj, const char *key, bool *out, bool def) {
     yyjson_val *v = yyjson_obj_get(obj, key);
-    if (!v) {
+    if (!v || yyjson_is_null(v)) {
         *out = def;
         return 0;
     }

@@ -137,6 +137,21 @@ static const float rope_e2b_expected[] = {
     -1.44531250e+00f
 };
 
+/* --- Softcap golden (tanh(x/cap)*cap) --- */
+#define SOFTCAP_GOLDEN_N 16
+static const float softcap_input[] = {
+    -6.00000000e+01f, -5.20000000e+01f, -4.40000000e+01f, -3.60000000e+01f, -2.80000000e+01f,
+    -2.00000000e+01f, -1.20000000e+01f, -4.00000000e+00f, 4.00000000e+00f, 1.20000000e+01f,
+    2.00000000e+01f, 2.80000000e+01f, 3.60000000e+01f, 4.40000000e+01f, 5.20000000e+01f,
+    6.00000000e+01f
+};
+static const float softcap_expected[] = {
+    -2.90000000e+01f, -2.82500000e+01f, -2.70000000e+01f, -2.51250000e+01f, -2.18750000e+01f,
+    -1.75000000e+01f, -1.14375000e+01f, -3.98437500e+00f, 3.98437500e+00f, 1.14375000e+01f,
+    1.75000000e+01f, 2.18750000e+01f, 2.51250000e+01f, 2.70000000e+01f, 2.82500000e+01f,
+    2.90000000e+01f
+};
+
 /* ---- GELU approx test ---- */
 
 static void test_gelu_approx_golden(void) {
@@ -240,6 +255,35 @@ static void test_rope_case(const float *freqs_data, int n_freqs,
     mlx_array_free(x);
 }
 
+static void test_softcap_golden(void) {
+    int shape[] = {1, SOFTCAP_GOLDEN_N};
+    mlx_array x = mlx_array_new_data(softcap_input, shape, 2, MLX_FLOAT32);
+    mlx_array xbf = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&xbf, x, MLX_BFLOAT16, gpu));
+
+    mlx_array out = mlx_array_new();
+    assert(fwd_softcap(&out, xbf, 30.0f, gpu) == 0);
+
+    mlx_array outf = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&outf, out, MLX_FLOAT32, gpu));
+    assert(MLXB_CHECK(mlx_array_eval(outf)));
+
+    const float *d = mlx_array_data_float32(outf);
+    for (int i = 0; i < SOFTCAP_GOLDEN_N; i++) {
+        float diff = fabsf(d[i] - softcap_expected[i]);
+        if (diff > 5e-2f) {
+            fprintf(stderr, "softcap[%d]: got %f, expected %f (diff %f)\n",
+                    i, (double)d[i], (double)softcap_expected[i], (double)diff);
+        }
+        assert(diff <= 5e-2f);
+    }
+
+    mlx_array_free(outf);
+    mlx_array_free(out);
+    mlx_array_free(xbf);
+    mlx_array_free(x);
+}
+
 static void test_rope_proportional_fixture(void) {
     test_rope_case(rope_fixture_freqs, ROPE_FIXTURE_NFREQS,
                    rope_fixture_input, rope_fixture_expected,
@@ -261,6 +305,9 @@ int main(void) {
 
     test_gelu_approx_golden();
     printf("  test_gelu_approx_golden: passed\n");
+
+    test_softcap_golden();
+    printf("  test_softcap_golden: passed\n");
 
     test_rope_proportional_fixture();
     printf("  test_rope_proportional_fixture: passed\n");

@@ -446,7 +446,7 @@ static void test_decoder_layer(void) {
     assert(kvcache_init(&kv, cfg_dense.num_hidden_layers) == 0);
 
     mlx_array out = mlx_array_new();
-    assert(fwd_decoder_layer(&out, x, 0, &w_dense, &cfg_dense, &kv, (mlx_array){.ctx = NULL}, gpu) == 0);
+    assert(fwd_decoder_layer(&out, x, 0, &w_dense, &cfg_dense, &kv, (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(out)));
     assert(mlx_array_ndim(out) == 3);
     assert(mlx_array_dim(out, 0) == 1);

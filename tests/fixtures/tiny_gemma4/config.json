@@ -15,6 +15,8 @@
     "num_global_key_value_heads": 1,
     "num_kv_shared_layers": 2,
     "attention_k_eq_v": true,
+    "final_logit_softcapping": 30.0,
+    "hidden_size_per_layer_input": 8,
     "layer_types": [
         "sliding_attention",
         "full_attention",

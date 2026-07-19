@@ -353,9 +353,132 @@ int weights_expected_names_from_desc(const weights_family_desc_t *desc,
     return pos;
 }
 
+/* gemma4 expected names: custom emitter because per-layer tensor presence
+   depends on KV sharing and k_eq_v status, and PLE adds extra tensors. */
+static int weights_expected_names_gemma4(const model_config_t *cfg,
+                                         weight_expected_t *out, int capacity) {
+    int pos = 0;
+    char buf[256];
+
+    /* Global: embed_tokens */
+    if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "embed_tokens") == 0)
+        if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_EMBED) != 0)
+            return -1;
+
+    for (int layer = 0; layer < cfg->num_hidden_layers; layer++) {
+        bool shared = model_layer_kv_shared(cfg, layer);
+        bool global = model_layer_is_global(cfg, layer);
+
+        /* Q projection always present */
+        if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "self_attn.q_proj") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                return -1;
+
+        /* K projection: non-shared only */
+        if (!shared) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "self_attn.k_proj") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                    return -1;
+        }
+
+        /* V projection: non-shared AND NOT (k_eq_v && global) */
+        if (!shared && !(cfg->attention_k_eq_v && global)) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "self_attn.v_proj") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                    return -1;
+        }
+
+        /* O projection always present */
+        if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "self_attn.o_proj") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                return -1;
+
+        /* MLP always present */
+        static const char *const mlp_projs[] = {
+            "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", NULL
+        };
+        for (const char *const *p = mlp_projs; *p; p++) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, *p) == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                    return -1;
+        }
+
+        /* Norms: input_layernorm, post_attention_layernorm always present */
+        if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "input_layernorm") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                return -1;
+        if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "post_attention_layernorm") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                return -1;
+
+        /* pre/post feedforward norms (has_pre_ff_norm) */
+        if (cfg->has_pre_ff_norm) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "pre_feedforward_layernorm") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                    return -1;
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "post_feedforward_layernorm") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                    return -1;
+        }
+
+        /* Q norm always present */
+        if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "self_attn.q_norm") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                return -1;
+
+        /* K norm: non-shared only */
+        if (!shared) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "self_attn.k_norm") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                    return -1;
+        }
+
+        /* PLE per-layer: always present when hidden_size_per_layer_input > 0 */
+        if (cfg->hidden_size_per_layer_input > 0) {
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "per_layer_input_gate") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                    return -1;
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "per_layer_projection") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                    return -1;
+            if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "post_per_layer_input_norm") == 0)
+                if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                    return -1;
+        }
+    }
+
+    /* Global norm */
+    if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "norm") == 0)
+        if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+            return -1;
+
+    /* lm_head when not tied */
+    if (!cfg->tie_word_embeddings)
+        if (emit_expected(out, capacity, &pos, "lm_head", WEIGHT_KIND_MATMUL) != 0)
+            return -1;
+
+    /* PLE globals */
+    if (cfg->hidden_size_per_layer_input > 0) {
+        if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "embed_tokens_per_layer") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_EMBED) != 0)
+                return -1;
+        if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "per_layer_model_projection") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_MATMUL) != 0)
+                return -1;
+        if (weights_tensor_name(buf, sizeof(buf), cfg, -1, "per_layer_projection_norm") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
+                return -1;
+    }
+
+    return pos;
+}
+
 int weights_expected_names(const model_config_t *cfg,
                            weight_expected_t *out, int capacity) {
     if (!cfg) return -1;
+
+    if (cfg->family == MODEL_GEMMA4)
+        return weights_expected_names_gemma4(cfg, out, capacity);
 
     const weights_family_desc_t *desc = family_desc(cfg->family);
     if (!desc) return 0;

@@ -25,7 +25,7 @@ family_id() {
         qwen2)   echo "" ;;
         llama)   echo "mlx-community/TinyLlama-1.1B-Chat-v1.0-4bit" ;;
         mistral) echo "" ;;
-        gemma4)  echo "" ;;
+        gemma4)  echo "mlx-community/gemma-4-e4b-it-4bit" ;;
         qwen3_5) echo "" ;;
         *)       return 1 ;;
     esac
