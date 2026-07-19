@@ -262,6 +262,14 @@ static const weights_family_desc_t family_descs[] = {
         .layer_biases   = NULL,
         .extra_tensors  = NULL,
     },
+    {
+        .family         = MODEL_LLAMA,
+        .layer_matmuls  = qwen3_layer_matmuls,
+        .layer_norms    = qwen3_layer_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = NULL,
+        .extra_tensors  = NULL,
+    },
 };
 
 static const weights_family_desc_t *family_desc(model_family_t fam) {
