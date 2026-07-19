@@ -48,6 +48,12 @@ typedef struct {
     bool has_lm_head;
     bool tie_word_embeddings;
 
+    const char *rope_scaling_type;
+    double rope_scaling_factor;
+    double rope_low_freq_factor;
+    double rope_high_freq_factor;
+    int rope_original_max_position_embeddings;
+
     const tensor_spec_t *top;   int n_top;
     const tensor_spec_t *layer; int n_layer;
 
@@ -181,6 +187,26 @@ static const tensor_spec_t GEMMA3_LAYER[] = {
     {"post_feedforward_layernorm.weight",  T_ONES},
 };
 
+/* --- Tensor tables: llama3 ----------------------------------------------- */
+
+static const tensor_spec_t LLAMA3_TOP[] = {
+    {"embed_tokens.weight", T_RAND},
+    {"norm.weight",         T_ONES},
+    {"lm_head.weight",      T_RAND},
+};
+
+static const tensor_spec_t LLAMA3_LAYER[] = {
+    {"self_attn.q_proj.weight",            T_RAND},
+    {"self_attn.k_proj.weight",            T_RAND},
+    {"self_attn.v_proj.weight",            T_RAND},
+    {"self_attn.o_proj.weight",            T_RAND},
+    {"mlp.gate_proj.weight",               T_RAND},
+    {"mlp.up_proj.weight",                 T_RAND},
+    {"mlp.down_proj.weight",               T_RAND},
+    {"input_layernorm.weight",             T_ONES},
+    {"post_attention_layernorm.weight",    T_ONES},
+};
+
 /* --- Recipes ------------------------------------------------------------- */
 
 static const recipe_t QWEN3 = {
@@ -216,8 +242,29 @@ static const recipe_t GEMMA3 = {
     .fixture_base = "tiny_gemma3",
 };
 
-static const recipe_t *RECIPES[] = { &QWEN3, &GEMMA3 };
-static const int N_RECIPES = 2;
+static const recipe_t LLAMA3 = {
+    .model_type = "llama",
+    .vocab = 256, .hidden = 64, .heads = 4, .kv_heads = 2,
+    .head_dim = 16, .inter = 128, .layers = 2,
+    .group_size = 32, .quant_bits = 4,
+    .max_position_embeddings = 512,
+    .rms_norm_eps = 1e-6, .rope_theta = 500000.0,
+    .sliding_window = 0, .sliding_window_pattern = 0,
+    .query_pre_attn_scalar = 0, .rope_local_base_freq = 0,
+    .has_lm_head = true, .tie_word_embeddings = false,
+    .rope_scaling_type = "llama3",
+    .rope_scaling_factor = 8.0,
+    .rope_low_freq_factor = 1.0,
+    .rope_high_freq_factor = 4.0,
+    .rope_original_max_position_embeddings = 8192,
+    .top = LLAMA3_TOP, .n_top = LEN(LLAMA3_TOP),
+    .layer = LLAMA3_LAYER, .n_layer = LEN(LLAMA3_LAYER),
+    .emit_dense = true, .emit_sharded = false, .emit_tied = true,
+    .fixture_base = "tiny_llama3",
+};
+
+static const recipe_t *RECIPES[] = { &QWEN3, &GEMMA3, &LLAMA3 };
+static const int N_RECIPES = 3;
 
 /* --- Build tensors (table-driven) ---------------------------------------- */
 
@@ -295,6 +342,19 @@ static void write_config_json(const recipe_t *r, const char *dir,
     if (r->rope_local_base_freq > 0)
         yyjson_mut_obj_add_real(doc, root, "rope_local_base_freq",
                                 r->rope_local_base_freq);
+
+    if (r->rope_scaling_type) {
+        yyjson_mut_val *rs = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, rs, "rope_type", r->rope_scaling_type);
+        yyjson_mut_obj_add_real(doc, rs, "factor", r->rope_scaling_factor);
+        yyjson_mut_obj_add_real(doc, rs, "low_freq_factor",
+                                r->rope_low_freq_factor);
+        yyjson_mut_obj_add_real(doc, rs, "high_freq_factor",
+                                r->rope_high_freq_factor);
+        yyjson_mut_obj_add_int(doc, rs, "original_max_position_embeddings",
+                               r->rope_original_max_position_embeddings);
+        yyjson_mut_obj_add_val(doc, root, "rope_scaling", rs);
+    }
 
     if (quantized) {
         yyjson_mut_val *qcfg = yyjson_mut_obj(doc);
