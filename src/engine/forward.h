@@ -24,7 +24,7 @@ int fwd_rmsnorm(mlx_array *out, mlx_array x, mlx_array weight, float eps,
 
 int fwd_attention(mlx_array *out, mlx_array x, int layer,
                   const weights_t *w, const model_config_t *cfg,
-                  kvcache_t *kv, mlx_stream s);
+                  kvcache_t *kv, mlx_array rope_freqs, mlx_stream s);
 
 /* Sliding-window additive masks (bf16, 0 / -inf) for SDPA mask mode "array".
    Prefill mask is [1,1,q_len,kv_len]: causal + window over absolute
@@ -41,6 +41,14 @@ int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
 
 int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       const weights_t *w, const model_config_t *cfg,
-                      kvcache_t *kv, mlx_stream s);
+                      kvcache_t *kv, mlx_array rope_freqs, mlx_stream s);
+
+int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n);
+
+/* Build precomputed freqs array for the model's rope scaling type.
+   rc 0 + out->ctx == NULL: family needs no custom freqs.
+   rc 0 + live array: [head_dim/2] f32.
+   rc -1: validation or alloc failure. */
+int fwd_rope_freqs_build(mlx_array *out, const model_config_t *cfg);
 
 #endif /* MLXD_ENGINE_FORWARD_H */

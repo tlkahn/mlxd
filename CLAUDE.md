@@ -58,6 +58,10 @@ Dependency direction: arrows point upward. `core` and `mlxbridge` are leaves. `e
 5. Post stop command, join engine thread, cleanup
 6. Second SIGINT exits 130
 
+## mlx-c API pitfalls
+
+- **`mlx_fast_rope` freqs convention**: the `freqs` array parameter expects `base^(2i/d)` (the period denominators, increasing values) - NOT `1/base^(2i/d)` (the angular frequencies). When implementing custom RoPE scheduling (llama3, proportional, yarn, etc.), compute `freq = pow(base, 2*i/d)`, apply scheduling adjustments, and pass the result directly. Cross-validate new RoPE variants against mlx-lm's corresponding Python class output, and always test end-to-end with a real checkpoint (`mlxd run`) since unit tests with synthetic weights can be self-consistently wrong.
+
 ## Key conventions
 
 - C11 (`-std=c11 -Wall -Wextra -Wpedantic`).

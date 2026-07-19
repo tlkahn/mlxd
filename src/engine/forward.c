@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 int fwd_linear(mlx_array *out, mlx_array x, const weight_triplet_t *tri,
@@ -317,34 +318,83 @@ cleanup:
     return rc;
 }
 
-/* Custom rope frequency seam: when a family supplies a freqs array the rope
-   call switches to base has_value=false, scale 1.0. No family uses it yet. */
-static mlx_array fwd_rope_freqs(const model_config_t *cfg, int layer) {
-    (void)cfg;
-    (void)layer;
-    return (mlx_array){.ctx = NULL};
+int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n) {
+    if (!cfg || !out) return -1;
+    if (!cfg->rope_scaling_type || strcmp(cfg->rope_scaling_type, "llama3") != 0)
+        return -1;
+    if (cfg->head_dim < 2 || cfg->head_dim % 2 != 0) return -1;
+    if (n != cfg->head_dim / 2) return -1;
+    if (cfg->rope_scaling_factor <= 0.0f) return -1;
+    if (cfg->rope_original_max_position_embeddings <= 0) return -1;
+    if (cfg->rope_low_freq_factor <= 0.0f) return -1;
+    if (cfg->rope_high_freq_factor <= cfg->rope_low_freq_factor) return -1;
+
+    double base = (double)cfg->rope_theta;
+    double factor = (double)cfg->rope_scaling_factor;
+    double low_freq_factor = (double)cfg->rope_low_freq_factor;
+    double high_freq_factor = (double)cfg->rope_high_freq_factor;
+    double old_ctx = (double)cfg->rope_original_max_position_embeddings;
+    int head_dim = cfg->head_dim;
+
+    double low_wl = old_ctx / low_freq_factor;
+    double high_wl = old_ctx / high_freq_factor;
+
+    for (int i = 0; i < n; i++) {
+        double freq = pow(base, 2.0 * i / (double)head_dim);
+        double wavelen = 2.0 * M_PI * freq;
+
+        if (wavelen > low_wl) {
+            freq = freq * factor;
+        } else if (wavelen > high_wl) {
+            double smooth = (old_ctx / wavelen - low_freq_factor) /
+                            (high_freq_factor - low_freq_factor);
+            freq = freq / ((1.0 - smooth) / factor + smooth);
+        }
+        out[i] = (float)freq;
+    }
+    return 0;
 }
 
-/* Per-layer rope: global layers use rope_theta (scaled by a linear factor
-   when set); local layers use rope_local_base_freq at scale 1.0. */
+int fwd_rope_freqs_build(mlx_array *out, const model_config_t *cfg) {
+    if (!out || !cfg) return -1;
+    if (!cfg->rope_scaling_type ||
+        strcmp(cfg->rope_scaling_type, "llama3") != 0) {
+        *out = (mlx_array){.ctx = NULL};
+        return 0;
+    }
+    int n = cfg->head_dim / 2;
+    float *buf = malloc((size_t)n * sizeof(float));
+    if (!buf) return -1;
+    if (fwd_rope_llama3_freqs(cfg, buf, n) != 0) {
+        free(buf);
+        return -1;
+    }
+    int shape[] = {n};
+    mlx_array arr = mlx_array_new_data(buf, shape, 1, MLX_FLOAT32);
+    free(buf);
+    if (!arr.ctx) return -1;
+    if (out->ctx) mlx_array_free(*out);
+    *out = arr;
+    return 0;
+}
+
 static int fwd_rope_apply(mlx_array *res, mlx_array x, int dims,
                           const model_config_t *cfg, int layer, int offset,
-                          mlx_stream s) {
-    mlx_array freqs = fwd_rope_freqs(cfg, layer);
-    if (freqs.ctx) {
-        int ok = MLXB_CHECK(mlx_fast_rope(res, x, dims, false,
-            (mlx_optional_float){.has_value = false}, 1.0f, offset, freqs, s));
-        mlx_array_free(freqs);
-        return ok ? 0 : -1;
+                          mlx_array rope_freqs, mlx_stream s) {
+    if (rope_freqs.ctx) {
+        return MLXB_CHECK(mlx_fast_rope(res, x, dims, false,
+            (mlx_optional_float){.has_value = false}, 1.0f, offset,
+            rope_freqs, s)) ? 0 : -1;
     }
+
+    if (cfg->rope_scaling_type &&
+        strcmp(cfg->rope_scaling_type, "llama3") == 0)
+        return -1;
 
     bool global = model_layer_is_global(cfg, layer);
     float base = cfg->rope_theta;
     float scale = 1.0f;
     if (global) {
-        /* Apply 1/factor for simple (NULL or "linear") scaling types.
-           llama3-style uses the freqs seam path above; proportional goes
-           through fwd_rope_freqs. */
         bool simple = !cfg->rope_scaling_type ||
                       strcmp(cfg->rope_scaling_type, "linear") == 0;
         if (simple && cfg->rope_scaling_factor > 0.0f)
@@ -381,7 +431,7 @@ cleanup:
 
 int fwd_attention(mlx_array *out, mlx_array x, int layer,
                   const weights_t *w, const model_config_t *cfg,
-                  kvcache_t *kv, mlx_stream s) {
+                  kvcache_t *kv, mlx_array rope_freqs, mlx_stream s) {
     if (!out || !w || !cfg || !kv) return -1;
     int rc = -1;
     char name[256];
@@ -489,9 +539,9 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     /* RoPE - offset read BEFORE kvcache_update */
     int offset = kvcache_layer_offset(kv, layer);
     assert(offset >= 0);
-    if (fwd_rope_apply(&q_roped, q_transposed, hd, cfg, layer, offset, s) != 0)
+    if (fwd_rope_apply(&q_roped, q_transposed, hd, cfg, layer, offset, rope_freqs, s) != 0)
         goto cleanup;
-    if (fwd_rope_apply(&k_roped, k_transposed, hd, cfg, layer, offset, s) != 0)
+    if (fwd_rope_apply(&k_roped, k_transposed, hd, cfg, layer, offset, rope_freqs, s) != 0)
         goto cleanup;
 
     /* KV cache update */
@@ -628,7 +678,7 @@ cleanup:
 
 int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       const weights_t *w, const model_config_t *cfg,
-                      kvcache_t *kv, mlx_stream s) {
+                      kvcache_t *kv, mlx_array rope_freqs, mlx_stream s) {
     if (!out || !w || !cfg || !kv) return -1;
     int rc = -1;
     char name[256], wname[270];
@@ -655,7 +705,7 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
     if (fwd_rmsnorm(&normed1, x, ln1_w, eps, offs, s) != 0) goto cleanup;
 
     /* attention */
-    if (fwd_attention(&attn_out, normed1, layer, w, cfg, kv, s) != 0) goto cleanup;
+    if (fwd_attention(&attn_out, normed1, layer, w, cfg, kv, rope_freqs, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "post_attention_layernorm");
     snprintf(wname, sizeof(wname), "%s.weight", name);

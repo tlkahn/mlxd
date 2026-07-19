@@ -12,6 +12,7 @@ typedef struct engine_model {
     model_config_t cfg;
     weights_t w;
     mlx_stream stream;
+    mlx_array rope_freqs;
     bool stub; /* true when loaded via MLXD_STUB_MODEL_PATH; no GPU state */
 } engine_model_t;
 

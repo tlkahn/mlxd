@@ -183,6 +183,7 @@ static void test_rope_scaling(void) {
     model_config_t cfg;
     int rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_llama3");
     assert(rc == 0);
+    assert(cfg.rope_theta == 500000.0f);
     assert(cfg.rope_scaling_type != NULL);
     assert(strcmp(cfg.rope_scaling_type, "llama3") == 0);
     assert(cfg.rope_scaling_factor == 8.0f);

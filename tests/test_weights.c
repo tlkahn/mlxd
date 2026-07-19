@@ -417,13 +417,53 @@ static void test_expected_names_no_qk_norm(void) {
     }
 }
 
-static void test_expected_names_non_qwen3(void) {
+static void test_expected_names_llama(void) {
     model_config_t cfg = {0};
     cfg.family = MODEL_LLAMA;
     cfg.weight_prefix = "model";
     cfg.num_hidden_layers = 2;
+    cfg.has_qk_norm = false;
+    cfg.attention_bias = false;
+    cfg.tie_word_embeddings = false;
 
-    assert(weights_expected_names(&cfg, NULL, 0) == 0);
+    /* 1 embed + 2*(7 matmuls + 2 norms) + final norm + lm_head = 21 */
+    int count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 21);
+
+    weight_expected_t names[21];
+    int rc = weights_expected_names(&cfg, names, 21);
+    assert(rc == 21);
+
+    bool found_q0 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "model.layers.0.self_attn.q_proj") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_MATMUL);
+            found_q0 = true;
+        }
+        assert(strstr(names[i].name, "q_norm") == NULL);
+        assert(strstr(names[i].name, "k_norm") == NULL);
+    }
+    assert(found_q0);
+
+    bool found_lmhead = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "lm_head") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_MATMUL);
+            found_lmhead = true;
+        }
+    }
+    assert(found_lmhead);
+
+    /* tied: 20 (no lm_head) */
+    cfg.tie_word_embeddings = true;
+    count = weights_expected_names(&cfg, NULL, 0);
+    assert(count == 20);
+
+    weight_expected_t tied_names[20];
+    rc = weights_expected_names(&cfg, tied_names, 20);
+    assert(rc == 20);
+    for (int i = 0; i < rc; i++)
+        assert(strcmp(tied_names[i].name, "lm_head") != 0);
 }
 
 /* ---- Cycle D0-1: pin exact emission order ---- */
@@ -471,7 +511,7 @@ static void test_expected_names_other_families_zero(void) {
     static const model_family_t others[] = {
         MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3, MODEL_GEMMA4,
         MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
-        MODEL_LLAMA, MODEL_MISTRAL, MODEL_LFM2,
+        MODEL_MISTRAL, MODEL_LFM2,
         MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
     };
 
@@ -678,8 +718,8 @@ int main(void) {
     test_expected_names_no_qk_norm();
     printf("  test_expected_names_no_qk_norm: passed\n");
 
-    test_expected_names_non_qwen3();
-    printf("  test_expected_names_non_qwen3: passed\n");
+    test_expected_names_llama();
+    printf("  test_expected_names_llama: passed\n");
 
     test_expected_names_qwen3_exact_order();
     printf("  test_expected_names_qwen3_exact_order: passed\n");
