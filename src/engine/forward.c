@@ -143,6 +143,24 @@ int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
         }
     }
 
+    /* gemma-style embed scaling: bf16-rounded sqrt(hidden_size), bf16 x bf16 */
+    if (cfg->scale_embeddings) {
+        mlx_array scale_f32 = mlx_array_new_float(sqrtf((float)cfg->hidden_size));
+        mlx_array scale = mlx_array_new();
+        mlx_array scaled = mlx_array_new();
+        bool ok = MLXB_CHECK(mlx_astype(&scale, scale_f32, MLX_BFLOAT16, s)) &&
+                  MLXB_CHECK(mlx_multiply(&scaled, result, scale, s));
+        mlx_array_free(scale);
+        mlx_array_free(scale_f32);
+        if (!ok) {
+            mlx_array_free(scaled);
+            weights_triplet_free(&tri);
+            goto cleanup;
+        }
+        mlx_array_free(result);
+        result = scaled;
+    }
+
     weights_triplet_free(&tri);
     mlx_array_free(*out);
     *out = result;

@@ -362,6 +362,133 @@ static void test_f3_rmsnorm_offset(void) {
     mlx_array_free(x);
 }
 
+/* ---- F4: embed scaling by bf16-rounded sqrt(hidden_size) ---- */
+
+/* bf16-rounded sqrt(hidden_size) scalar, matching the reference semantics:
+   f32 sqrt then astype bf16. */
+static mlx_array embed_scale_bf16(void) {
+    mlx_array f = mlx_array_new_float(sqrtf((float)HID));
+    mlx_array b = mlx_array_new();
+    assert(MLXB_CHECK(mlx_astype(&b, f, MLX_BFLOAT16, gpu)));
+    mlx_array_free(f);
+    return b;
+}
+
+static void test_f4_embed_scaling(void) {
+    enum { VOCAB = 16 };
+    int32_t ids_data[] = {0, 5, 11};
+    int ids_shape[] = {1, 3};
+    mlx_array ids = mlx_array_new_data(ids_data, ids_shape, 2, MLX_INT32);
+
+    /* --- dense --- */
+    weights_t w;
+    weights_begin(&w);
+    int es[] = {VOCAB, HID};
+    put_tensor(&w, "embed_tokens.weight", det_bf16(es, 2, 400));
+
+    model_config_t cfg = base_cfg();
+
+    /* flag off: unchanged plain gather */
+    mlx_array out_plain = mlx_array_new();
+    assert(fwd_embed(&out_plain, ids, &w, &cfg, gpu) == 0);
+
+    mlx_array embed_w = mlx_array_new();
+    mlx_array flat = mlx_array_new();
+    mlx_array taken = mlx_array_new();
+    mlx_array ref_plain = mlx_array_new();
+    int flat_shape[] = {3};
+    int out_shape[] = {1, 3, HID};
+    assert(weights_get(&embed_w, &w, "embed_tokens.weight") == 0);
+    assert(MLXB_CHECK(mlx_reshape(&flat, ids, flat_shape, 1, gpu)));
+    assert(MLXB_CHECK(mlx_take_axis(&taken, embed_w, flat, 0, gpu)));
+    assert(MLXB_CHECK(mlx_reshape(&ref_plain, taken, out_shape, 3, gpu)));
+    assert(max_abs_diff(out_plain, ref_plain) < 1e-6f);
+
+    /* flag on: multiplied by bf16-rounded sqrt(hidden_size) */
+    cfg.scale_embeddings = true;
+    mlx_array out_scaled = mlx_array_new();
+    assert(fwd_embed(&out_scaled, ids, &w, &cfg, gpu) == 0);
+
+    mlx_array scale = embed_scale_bf16();
+    mlx_array ref_scaled = mlx_array_new();
+    assert(MLXB_CHECK(mlx_multiply(&ref_scaled, ref_plain, scale, gpu)));
+    assert(max_abs_diff(out_scaled, ref_scaled) < 1e-3f);
+    assert(max_abs_diff(out_scaled, ref_plain) > 1e-2f);
+
+    mlx_array_free(ref_scaled);
+    mlx_array_free(out_scaled);
+    mlx_array_free(ref_plain);
+    mlx_array_free(taken);
+    mlx_array_free(flat);
+    mlx_array_free(embed_w);
+    mlx_array_free(out_plain);
+    weights_free(&w);
+
+    /* --- quantized --- */
+    weights_t wq;
+    weights_begin(&wq);
+    model_config_t qcfg = base_cfg();
+    qcfg.quant_bits = 4;
+    qcfg.quant_group_size = 32;
+    qcfg.scale_embeddings = true;
+
+    mlx_array ew = det_bf16(es, 2, 401);
+    mlx_vector_array quant = mlx_vector_array_new();
+    assert(MLXB_CHECK(mlx_quantize(&quant, ew,
+        (mlx_optional_int){.value = qcfg.quant_group_size, .has_value = true},
+        (mlx_optional_int){.value = qcfg.quant_bits, .has_value = true},
+        "affine", (mlx_array){.ctx = NULL}, gpu)));
+    mlx_array qw = mlx_array_new(), qs = mlx_array_new(), qb = mlx_array_new();
+    assert(MLXB_CHECK(mlx_vector_array_get(&qw, quant, 0)));
+    assert(MLXB_CHECK(mlx_vector_array_get(&qs, quant, 1)));
+    assert(MLXB_CHECK(mlx_vector_array_get(&qb, quant, 2)));
+    put_tensor(&wq, "embed_tokens.weight", qw);
+    put_tensor(&wq, "embed_tokens.scales", qs);
+    put_tensor(&wq, "embed_tokens.biases", qb);
+    mlx_vector_array_free(quant);
+    mlx_array_free(ew);
+
+    mlx_array out_q = mlx_array_new();
+    assert(fwd_embed(&out_q, ids, &wq, &qcfg, gpu) == 0);
+
+    /* reference: dequantized gather, then the same bf16 scalar multiply */
+    weight_triplet_t tri;
+    assert(weights_get_triplet(&tri, &wq, "embed_tokens") == 0);
+    assert(tri.quantized);
+    mlx_array dqw = mlx_array_new(), dqs = mlx_array_new(),
+              dqb = mlx_array_new(), dq = mlx_array_new();
+    mlx_array flatq = mlx_array_new();
+    assert(MLXB_CHECK(mlx_reshape(&flatq, ids, flat_shape, 1, gpu)));
+    assert(MLXB_CHECK(mlx_take_axis(&dqw, tri.weight, flatq, 0, gpu)));
+    assert(MLXB_CHECK(mlx_take_axis(&dqs, tri.scales, flatq, 0, gpu)));
+    assert(MLXB_CHECK(mlx_take_axis(&dqb, tri.biases, flatq, 0, gpu)));
+    assert(MLXB_CHECK(mlx_dequantize(&dq, dqw, dqs, dqb,
+        (mlx_optional_int){.value = qcfg.quant_group_size, .has_value = true},
+        (mlx_optional_int){.value = qcfg.quant_bits, .has_value = true},
+        "affine", (mlx_array){.ctx = NULL},
+        (mlx_optional_dtype){.has_value = false}, gpu)));
+    mlx_array dq_shaped = mlx_array_new(), dq_bf16 = mlx_array_new();
+    mlx_array ref_q = mlx_array_new();
+    assert(MLXB_CHECK(mlx_reshape(&dq_shaped, dq, out_shape, 3, gpu)));
+    assert(MLXB_CHECK(mlx_astype(&dq_bf16, dq_shaped, MLX_BFLOAT16, gpu)));
+    assert(MLXB_CHECK(mlx_multiply(&ref_q, dq_bf16, scale, gpu)));
+    assert(max_abs_diff(out_q, ref_q) < 1e-3f);
+
+    mlx_array_free(ref_q);
+    mlx_array_free(dq_bf16);
+    mlx_array_free(dq_shaped);
+    mlx_array_free(dq);
+    mlx_array_free(dqb);
+    mlx_array_free(dqs);
+    mlx_array_free(dqw);
+    mlx_array_free(flatq);
+    weights_triplet_free(&tri);
+    mlx_array_free(out_q);
+    mlx_array_free(scale);
+    weights_free(&wq);
+    mlx_array_free(ids);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
@@ -373,6 +500,9 @@ int main(void) {
 
     test_f3_rmsnorm_offset();
     printf("test_f3_rmsnorm_offset passed\n");
+
+    test_f4_embed_scaling();
+    printf("test_f4_embed_scaling passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;
