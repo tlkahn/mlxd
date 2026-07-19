@@ -175,6 +175,27 @@ int fwd_rmsnorm(mlx_array *out, mlx_array x, mlx_array weight, float eps,
     return 0;
 }
 
+/* Add {base}.bias to *io in place (broadcast over [B,S,D]). */
+static int add_proj_bias(mlx_array *io, const weights_t *w, const char *base,
+                         mlx_stream s) {
+    char bname[270];
+    snprintf(bname, sizeof(bname), "%s.bias", base);
+    int rc = -1;
+    mlx_array bias = mlx_array_new();
+    mlx_array sum = mlx_array_new();
+    if (weights_get(&bias, w, bname) != 0) goto cleanup;
+    if (!MLXB_CHECK(mlx_add(&sum, *io, bias, s))) goto cleanup;
+    mlx_array_free(*io);
+    *io = sum;
+    sum = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(sum);
+    mlx_array_free(bias);
+    return rc;
+}
+
 int fwd_attention(mlx_array *out, mlx_array x, int layer,
                   const weights_t *w, const model_config_t *cfg,
                   kvcache_t *kv, mlx_stream s) {
@@ -221,14 +242,17 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.q_proj");
     if (weights_get_triplet(&q_tri, w, name) != 0) goto cleanup;
     if (fwd_linear(&q, x, &q_tri, cfg, s) != 0) goto cleanup;
+    if (cfg->attention_bias && add_proj_bias(&q, w, name, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.k_proj");
     if (weights_get_triplet(&k_tri, w, name) != 0) goto cleanup;
     if (fwd_linear(&k, x, &k_tri, cfg, s) != 0) goto cleanup;
+    if (cfg->attention_bias && add_proj_bias(&k, w, name, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.v_proj");
     if (weights_get_triplet(&v_tri, w, name) != 0) goto cleanup;
     if (fwd_linear(&v, x, &v_tri, cfg, s) != 0) goto cleanup;
+    if (cfg->attention_bias && add_proj_bias(&v, w, name, s) != 0) goto cleanup;
 
     /* Reshape to [B,S,H,D] */
     int B = mlx_array_dim(x, 0);

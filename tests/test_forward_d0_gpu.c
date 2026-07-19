@@ -113,11 +113,12 @@ static float max_abs_diff(mlx_array a, mlx_array b) {
 }
 
 /* Dense-only manual reference for one attention layer (layer 0), no qk-norm.
- * scale/base/rope_scale are explicit; mask_mode + optional mask array too. */
-static mlx_array manual_attention(mlx_array x, const weights_t *w,
-                                  float scale, float base, float rope_scale,
-                                  int offset, const char *mask_mode,
-                                  mlx_array mask_arr) {
+ * scale/base/rope_scale are explicit; mask_mode + optional mask array too.
+ * with_bias adds layers.0.self_attn.{q,k,v}_proj.bias after each projection. */
+static mlx_array manual_attention_ex(mlx_array x, const weights_t *w,
+                                     float scale, float base, float rope_scale,
+                                     int offset, const char *mask_mode,
+                                     mlx_array mask_arr, bool with_bias) {
     int B = mlx_array_dim(x, 0);
     int S = mlx_array_dim(x, 1);
 
@@ -125,6 +126,9 @@ static mlx_array manual_attention(mlx_array x, const weights_t *w,
     const char *names[] = {"layers.0.self_attn.q_proj.weight",
                            "layers.0.self_attn.k_proj.weight",
                            "layers.0.self_attn.v_proj.weight"};
+    const char *bias_names[] = {"layers.0.self_attn.q_proj.bias",
+                                "layers.0.self_attn.k_proj.bias",
+                                "layers.0.self_attn.v_proj.bias"};
     for (int i = 0; i < 3; i++) {
         mlx_array wt = mlx_array_new();
         mlx_array wtt = mlx_array_new();
@@ -132,6 +136,15 @@ static mlx_array manual_attention(mlx_array x, const weights_t *w,
         assert(weights_get(&wt, w, names[i]) == 0);
         assert(MLXB_CHECK(mlx_transpose(&wtt, wt, gpu)));
         assert(MLXB_CHECK(mlx_matmul(&proj[i], x, wtt, gpu)));
+        if (with_bias) {
+            mlx_array b = mlx_array_new();
+            mlx_array biased = mlx_array_new();
+            assert(weights_get(&b, w, bias_names[i]) == 0);
+            assert(MLXB_CHECK(mlx_add(&biased, proj[i], b, gpu)));
+            mlx_array_free(proj[i]);
+            proj[i] = biased;
+            mlx_array_free(b);
+        }
         mlx_array_free(wtt);
         mlx_array_free(wt);
     }
@@ -189,6 +202,14 @@ static mlx_array manual_attention(mlx_array x, const weights_t *w,
     return result;
 }
 
+static mlx_array manual_attention(mlx_array x, const weights_t *w,
+                                  float scale, float base, float rope_scale,
+                                  int offset, const char *mask_mode,
+                                  mlx_array mask_arr) {
+    return manual_attention_ex(x, w, scale, base, rope_scale, offset,
+                               mask_mode, mask_arr, false);
+}
+
 /* ---- F1: attention scale from config ---- */
 
 static void test_f1_attn_scale_from_config(void) {
@@ -244,11 +265,68 @@ static void test_f1_attn_scale_from_config(void) {
     weights_free(&w);
 }
 
+/* ---- F2: q/k/v projection bias ---- */
+
+static void test_f2_qkv_bias(void) {
+    weights_t w;
+    weights_begin(&w);
+    put_attn_weights(&w);
+    int qb[] = {NH * HD};
+    int kb[] = {NKV * HD};
+    put_tensor(&w, "layers.0.self_attn.q_proj.bias", det_bf16(qb, 1, 5));
+    put_tensor(&w, "layers.0.self_attn.k_proj.bias", det_bf16(kb, 1, 6));
+    put_tensor(&w, "layers.0.self_attn.v_proj.bias", det_bf16(kb, 1, 7));
+
+    mlx_array x = det_input(3, 200);
+    float scale = 1.0f / sqrtf((float)HD);
+
+    /* attention_bias on: output must follow the bias path */
+    model_config_t cfg = base_cfg();
+    cfg.attention_bias = true;
+
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    mlx_array out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    mlx_array ref = manual_attention_ex(x, &w, scale, cfg.rope_theta, 1.0f, 0,
+                                        "causal", (mlx_array){.ctx = NULL},
+                                        true);
+    assert(max_abs_diff(out, ref) < 2e-3f);
+
+    /* sanity: bias path differs from the no-bias reference */
+    mlx_array ref_nobias = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f,
+                                            0, "causal",
+                                            (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref_nobias) > 1e-2f);
+    mlx_array_free(ref_nobias);
+    mlx_array_free(ref);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+
+    /* flag off: bias tensors present in the map are ignored */
+    cfg.attention_bias = false;
+    assert(kvcache_init(&kv, 1, NKV, HD) == 0);
+    out = mlx_array_new();
+    assert(fwd_attention(&out, x, 0, &w, &cfg, &kv, gpu) == 0);
+    ref = manual_attention(x, &w, scale, cfg.rope_theta, 1.0f, 0, "causal",
+                           (mlx_array){.ctx = NULL});
+    assert(max_abs_diff(out, ref) < 2e-3f);
+    mlx_array_free(ref);
+    mlx_array_free(out);
+    kvcache_free(&kv);
+
+    mlx_array_free(x);
+    weights_free(&w);
+}
+
 int main(void) {
     gpu = mlxbridge_gpu_stream();
 
     test_f1_attn_scale_from_config();
     printf("test_f1_attn_scale_from_config passed\n");
+
+    test_f2_qkv_bias();
+    printf("test_f2_qkv_bias passed\n");
 
     printf("All forward D0 GPU tests passed\n");
     return 0;
