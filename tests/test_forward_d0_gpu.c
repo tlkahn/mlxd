@@ -899,6 +899,9 @@ static void test_f7a_sliding_window_masks(void) {
     for (int j = 0; j < 2; j++) assert(v[j] == 0.0f);
     free(v);
     mlx_array_free(m);
+
+    /* q_len > kv_len is invalid: reject */
+    assert(fwd_sliding_window_mask(&m, 5, 3, 2, gpu) == -1);
 }
 
 /* ---- F7c: sliding-window attention wiring ---- */

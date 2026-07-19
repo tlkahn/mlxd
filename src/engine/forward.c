@@ -237,7 +237,7 @@ cleanup:
 
 int fwd_sliding_window_mask(mlx_array *out, int q_len, int kv_len, int window,
                             mlx_stream s) {
-    if (!out || q_len <= 0 || kv_len <= 0 || window <= 0) return -1;
+    if (!out || q_len <= 0 || kv_len <= 0 || window <= 0 || q_len > kv_len) return -1;
     int rc = -1;
     mlx_array rows = mlx_array_new();
     mlx_array cols = mlx_array_new();
