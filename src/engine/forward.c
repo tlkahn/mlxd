@@ -1036,7 +1036,7 @@ int fwd_ple_inputs(mlx_array *out, mlx_array ids, mlx_array h,
             goto cleanup;
     }
 
-    /* RMS norm with per_layer_projection_norm on ple_reshaped */
+    /* RMS norm with per_layer_projection_norm on h_reshaped (the projection) */
     {
         char norm_name[256];
         weights_tensor_name(norm_name, sizeof(norm_name), cfg, -1,
