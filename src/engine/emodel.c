@@ -74,6 +74,10 @@ int engine_model_check_supported(const model_config_t *cfg,
     case MODEL_GEMMA4:
         REJECT(cfg->num_experts > 0,
                "MoE models not supported");
+        REJECT(cfg->use_double_wide_mlp,
+               "use_double_wide_mlp not supported (E2B-class unverified)");
+        REJECT(cfg->hidden_act != HIDDEN_ACT_GELU_APPROX,
+               "gemma4 requires gelu_pytorch_tanh activation");
         REJECT(cfg->num_kv_shared_layers >= cfg->num_hidden_layers,
                "num_kv_shared_layers must be < num_hidden_layers");
         REJECT(cfg->rope_proportional &&

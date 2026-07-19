@@ -592,6 +592,7 @@ static void test_stage_e_dims(void) {
     assert(cfg.final_logit_softcapping == 30.0f);
     assert(cfg.hidden_size_per_layer_input == 256);
     assert(cfg.attention_k_eq_v == true);
+    assert(cfg.use_double_wide_mlp == true);
     model_config_free(&cfg);
 }
 
@@ -999,6 +1000,7 @@ static void test_tiny_gemma4_config(void) {
     assert(cfg.num_global_key_value_heads == 1);
     assert(cfg.num_kv_shared_layers == 2);
     assert(cfg.attention_k_eq_v == true);
+    assert(cfg.use_double_wide_mlp == false);
     assert(cfg.attn_scale_one == true);
 
     assert(cfg.has_sliding_window == true);

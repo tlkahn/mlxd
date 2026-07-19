@@ -313,6 +313,8 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
     case MODEL_GEMMA4:
         cfg->weight_prefix       = "language_model.model";
         cfg->hidden_act          = HIDDEN_ACT_GELU_APPROX;
+        if (yyjson_obj_get(cfg_obj, "use_double_wide_mlp") == NULL)
+            cfg->use_double_wide_mlp = true;
         cfg->norm_has_offset     = false;
         cfg->scale_embeddings    = true;
         cfg->has_pre_ff_norm     = true;
@@ -882,6 +884,8 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
         get_int_nonneg(cfg_obj, "num_kv_shared_layers",
                        &cfg->num_kv_shared_layers, 0) ||
         get_bool(cfg_obj, "attention_k_eq_v", &cfg->attention_k_eq_v, false) ||
+        get_bool(cfg_obj, "use_double_wide_mlp", &cfg->use_double_wide_mlp,
+                 cfg->use_double_wide_mlp) ||
         get_f32(cfg_obj, "final_logit_softcapping",
                 &cfg->final_logit_softcapping, 0.0f) ||
         get_int_nonneg(cfg_obj, "hidden_size_per_layer_input",

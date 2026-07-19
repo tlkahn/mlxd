@@ -456,6 +456,7 @@ static void write_gemma4_config(const char *dir) {
     yyjson_mut_obj_add_int(doc, root, "num_global_key_value_heads", G4_GKV);
     yyjson_mut_obj_add_int(doc, root, "num_kv_shared_layers", G4_NUM_KV_SHARED);
     yyjson_mut_obj_add_bool(doc, root, "attention_k_eq_v", true);
+    yyjson_mut_obj_add_bool(doc, root, "use_double_wide_mlp", false);
     yyjson_mut_obj_add_real(doc, root, "final_logit_softcapping", 30.0);
     yyjson_mut_obj_add_int(doc, root, "hidden_size_per_layer_input", 8);
 

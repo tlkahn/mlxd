@@ -238,6 +238,7 @@ static model_config_t make_gemma4_supported(void) {
     memset(&cfg, 0, sizeof(cfg));
     cfg.family = MODEL_GEMMA4;
     cfg.hidden_act = HIDDEN_ACT_GELU_APPROX;
+    cfg.use_double_wide_mlp = false;
     cfg.norm_has_offset = false;
     cfg.scale_embeddings = true;
     cfg.has_pre_ff_norm = true;
@@ -435,6 +436,26 @@ int main(void) {
 
     test_gemma4_reject_unresolved_kv_source();
     printf("  test_gemma4_reject_unresolved_kv_source: passed\n");
+
+    /* use_double_wide_mlp rejection */
+    {
+        model_config_t cfg = make_gemma4_supported();
+        cfg.use_double_wide_mlp = true;
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strstr(err, "use_double_wide_mlp") != NULL);
+    }
+    printf("  test_gemma4_reject_use_double_wide_mlp: passed\n");
+
+    /* hidden_act rejection */
+    {
+        model_config_t cfg = make_gemma4_supported();
+        cfg.hidden_act = HIDDEN_ACT_SILU;
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strstr(err, "gelu_pytorch_tanh") != NULL);
+    }
+    printf("  test_gemma4_reject_hidden_act_silu: passed\n");
 
     test_llama_plain_passes();
     printf("  test_llama_plain_passes: passed\n");
