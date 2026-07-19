@@ -526,11 +526,11 @@ static void test_expected_names_gemma4(void) {
     cfg.layer_is_global[3] = true;
 
     int count = weights_expected_names(&cfg, NULL, 0);
-    assert(count == 62);
+    assert(count == 66);
 
-    weight_expected_t names[62];
-    int rc = weights_expected_names(&cfg, names, 62);
-    assert(rc == 62);
+    weight_expected_t names[66];
+    int rc = weights_expected_names(&cfg, names, 66);
+    assert(rc == 66);
 
     /* Spot checks */
     assert(strcmp(names[0].name, "language_model.model.embed_tokens") == 0);
@@ -599,6 +599,28 @@ static void test_expected_names_gemma4(void) {
             found_ple_gate2 = true;
     }
     assert(found_ple_gate0 && found_ple_gate2);
+
+    /* layer_scalar: bare weight per layer */
+    int bare_count = 0;
+    for (int i = 0; i < rc; i++) {
+        if (names[i].kind == WEIGHT_KIND_BARE) {
+            assert(strstr(names[i].name, "layer_scalar") != NULL);
+            bare_count++;
+        }
+    }
+    assert(bare_count == 4);
+    bool found_ls0 = false, found_ls3 = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "language_model.model.layers.0.layer_scalar") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_BARE);
+            found_ls0 = true;
+        }
+        if (strcmp(names[i].name, "language_model.model.layers.3.layer_scalar") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_BARE);
+            found_ls3 = true;
+        }
+    }
+    assert(found_ls0 && found_ls3);
 
     /* Capacity too small -> error */
     weight_expected_t small[2];

@@ -418,6 +418,17 @@ static mlx_map_string_to_array build_gemma4_tensors(mlx_stream s) {
         snprintf(name, sizeof(name),
                  "language_model.model.layers.%d.post_per_layer_input_norm.weight", L);
         insert(m, name, ones_bf16(ple_lnorm_shape, 1, s));
+
+        /* layer_scalar: bare scalar, 0.2*(L+1) */
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.%d.layer_scalar", L);
+        {
+            mlx_array f32 = mlx_array_new_float(0.2f * (L + 1));
+            mlx_array bf = mlx_array_new();
+            CHECK(mlx_astype(&bf, f32, MLX_BFLOAT16, s));
+            mlx_array_free(f32);
+            insert(m, name, bf);
+        }
     }
 
     mlx_array_free(key);

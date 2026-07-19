@@ -445,6 +445,11 @@ static int weights_expected_names_gemma4(const model_config_t *cfg,
                 if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_NORM) != 0)
                     return -1;
         }
+
+        /* layer_scalar: bare scalar weight (no .weight suffix) */
+        if (weights_tensor_name(buf, sizeof(buf), cfg, layer, "layer_scalar") == 0)
+            if (emit_expected(out, capacity, &pos, buf, WEIGHT_KIND_BARE) != 0)
+                return -1;
     }
 
     /* Global norm */
@@ -627,7 +632,8 @@ int weights_validate_expected(mlx_map_string_to_array merged,
                               const weight_expected_t *expected, int n,
                               char *err, size_t errlen) {
     for (int i = 0; i < n; i++) {
-        if (expected[i].kind == WEIGHT_KIND_BIAS) {
+        if (expected[i].kind == WEIGHT_KIND_BIAS ||
+            expected[i].kind == WEIGHT_KIND_BARE) {
             if (!map_has_key(merged, expected[i].name)) {
                 if (err && errlen > 0)
                     snprintf(err, errlen,
@@ -640,7 +646,9 @@ int weights_validate_expected(mlx_map_string_to_array merged,
                 !dtype_is_floating(bdt)) {
                 if (err && errlen > 0)
                     snprintf(err, errlen,
-                             "bias tensor \"%s\" has non-float dtype %d",
+                             "%s tensor \"%s\" has non-float dtype %d",
+                             expected[i].kind == WEIGHT_KIND_BIAS
+                                 ? "bias" : "bare",
                              expected[i].name, bdt);
                 return -1;
             }
