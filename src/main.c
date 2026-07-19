@@ -105,6 +105,9 @@ static char *slurp_file(const char *path, size_t *out_len) {
     return buf;
 }
 
+/* Load chat template: tokenizer_config.json "chat_template" string first,
+   then chat_template.jinja, then chat_template.json (a JSON string). Gemma4
+   and some other HF hubs ship only the .jinja file. */
 static char *read_chat_template(const char *model_dir) {
     size_t pathlen = strlen(model_dir) + sizeof("/tokenizer_config.json");
     char *path = malloc(pathlen);
@@ -114,19 +117,52 @@ static char *read_chat_template(const char *model_dir) {
     size_t len = 0;
     char *buf = slurp_file(path, &len);
     free(path);
-    if (!buf) return NULL;
+    if (buf) {
+        yyjson_doc *doc = yyjson_read(buf, len, 0);
+        free(buf);
+        if (doc) {
+            char *result = NULL;
+            yyjson_val *root = yyjson_doc_get_root(doc);
+            if (yyjson_is_obj(root)) {
+                yyjson_val *tmpl = yyjson_obj_get(root, "chat_template");
+                if (yyjson_is_str(tmpl))
+                    result = strdup(yyjson_get_str(tmpl));
+            }
+            yyjson_doc_free(doc);
+            if (result) return result;
+        }
+    }
 
+    /* Fallback: chat_template.jinja (raw Jinja source) */
+    pathlen = strlen(model_dir) + sizeof("/chat_template.jinja");
+    path = malloc(pathlen);
+    if (!path) return NULL;
+    snprintf(path, pathlen, "%s/chat_template.jinja", model_dir);
+    buf = slurp_file(path, &len);
+    free(path);
+    if (buf) {
+        /* slurp_file does not NUL-terminate; add terminator for C strings. */
+        char *result = realloc(buf, len + 1);
+        if (!result) { free(buf); return NULL; }
+        result[len] = '\0';
+        return result;
+    }
+
+    /* Fallback: chat_template.json containing a JSON string */
+    pathlen = strlen(model_dir) + sizeof("/chat_template.json");
+    path = malloc(pathlen);
+    if (!path) return NULL;
+    snprintf(path, pathlen, "%s/chat_template.json", model_dir);
+    buf = slurp_file(path, &len);
+    free(path);
+    if (!buf) return NULL;
     yyjson_doc *doc = yyjson_read(buf, len, 0);
     free(buf);
     if (!doc) return NULL;
-
     char *result = NULL;
     yyjson_val *root = yyjson_doc_get_root(doc);
-    if (yyjson_is_obj(root)) {
-        yyjson_val *tmpl = yyjson_obj_get(root, "chat_template");
-        if (yyjson_is_str(tmpl))
-            result = strdup(yyjson_get_str(tmpl));
-    }
+    if (yyjson_is_str(root))
+        result = strdup(yyjson_get_str(root));
     yyjson_doc_free(doc);
     return result;
 }

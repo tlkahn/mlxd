@@ -18,20 +18,79 @@ static char *serialize_mut_root(yyjson_mut_doc *mdoc, yyjson_mut_val *root) {
     return json;
 }
 
+/* Merge caller extra_json with bos_token/eos_token from the tokenizer.
+   Caller keys win on conflict so enable_thinking etc. stay authoritative.
+   Returns a heap string (possibly empty object "{}"); caller frees. NULL on OOM. */
+static char *merge_chat_extra_json(const tokenizer_t *tok,
+                                   const char *extra_json) {
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    if (!mdoc) return NULL;
+    yyjson_mut_val *obj = yyjson_mut_obj(mdoc);
+    if (!obj) {
+        yyjson_mut_doc_free(mdoc);
+        return NULL;
+    }
+    yyjson_mut_doc_set_root(mdoc, obj);
+
+    /* Seed with tokenizer specials when available. */
+    int32_t bos = tokenizer_bos_id(tok);
+    int32_t eos = tokenizer_eos_id(tok);
+    if (bos >= 0) {
+        const char *s = tokenizer_decode_token(tok, bos);
+        if (s) yyjson_mut_obj_add_strcpy(mdoc, obj, "bos_token", s);
+    }
+    if (eos >= 0) {
+        const char *s = tokenizer_decode_token(tok, eos);
+        if (s) yyjson_mut_obj_add_strcpy(mdoc, obj, "eos_token", s);
+    }
+
+    /* Overlay caller extras (enable_thinking, etc.). */
+    if (extra_json && extra_json[0]) {
+        yyjson_doc *edoc = yyjson_read(extra_json, strlen(extra_json), 0);
+        if (edoc) {
+            yyjson_val *eroot = yyjson_doc_get_root(edoc);
+            if (yyjson_is_obj(eroot)) {
+                yyjson_val *key, *val;
+                yyjson_obj_iter iter = yyjson_obj_iter_with(eroot);
+                while ((key = yyjson_obj_iter_next(&iter))) {
+                    val = yyjson_obj_iter_get_val(key);
+                    const char *k = yyjson_get_str(key);
+                    yyjson_mut_val *mv = yyjson_val_mut_copy(mdoc, val);
+                    yyjson_mut_val *mk = k ? yyjson_mut_strcpy(mdoc, k) : NULL;
+                    if (mk && mv)
+                        yyjson_mut_obj_put(obj, mk, mv);
+                }
+            }
+            yyjson_doc_free(edoc);
+        }
+    }
+
+    char *out = yyjson_mut_write(mdoc, 0, NULL);
+    yyjson_mut_doc_free(mdoc);
+    return out;
+}
+
 int gen_build_chat_prompt(const tokenizer_t *tok, const char *chat_template,
                           const char *messages_json, const char *tools_json,
                           const char *extra_json,
                           int32_t **out_ids, const char **err) {
+    char *merged = merge_chat_extra_json(tok, extra_json);
+    if (!merged) {
+        *err = "out of memory";
+        return -1;
+    }
+
     chat_render_params_t p = {
         .tmpl = chat_template,
         .messages_json = messages_json,
         .tools_json = tools_json,
-        .extra_json = extra_json,
+        .extra_json = merged,
         .add_generation_prompt = true,
     };
     *out_ids = NULL;
     chat_diagnostics_t diag = {0};
     char *rendered = chat_render(&p, &diag);
+    free(merged);
     if (!rendered) {
         *err = "template render failed";
         chat_diagnostics_free(&diag);
