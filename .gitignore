@@ -5,7 +5,7 @@ mlxd
 tests/test_*
 !tests/test_*.c
 !tests/test_*.sh
-tools/gen_tiny_qwen3_ckpt
+tools/gen_tiny_ckpt
 .DS_Store
 .clangd
 compile_commands.json

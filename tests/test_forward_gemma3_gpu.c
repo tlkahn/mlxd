@@ -65,6 +65,9 @@ static void test_gemma3_config_flags(engine_model_t *em) {
     assert(em->cfg.sliding_window_pattern == 2);
     assert(em->cfg.query_pre_attn_scalar == 64);
     assert(em->cfg.rope_local_base_freq == 10000.0f);
+    assert(em->cfg.rope_scaling_factor == 8.0f);
+    assert(em->cfg.hidden_act == HIDDEN_ACT_GELU_APPROX);
+    assert(em->cfg.attention_bias == false);
 }
 
 /* ---- forward shape test ---- */

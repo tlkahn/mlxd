@@ -134,6 +134,8 @@ static void append_newline(const char *path) {
     if (f) { fputc('\n', f); fclose(f); }
 }
 
+#define LEN(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
 /* --- Tensor tables: qwen3 ------------------------------------------------ */
 
 static const tensor_spec_t QWEN3_TOP[] = {
@@ -191,8 +193,8 @@ static const recipe_t QWEN3 = {
     .sliding_window = 0, .sliding_window_pattern = 0,
     .query_pre_attn_scalar = 0, .rope_local_base_freq = 0,
     .has_lm_head = true, .tie_word_embeddings = false,
-    .top = QWEN3_TOP, .n_top = 3,
-    .layer = QWEN3_LAYER, .n_layer = 11,
+    .top = QWEN3_TOP, .n_top = LEN(QWEN3_TOP),
+    .layer = QWEN3_LAYER, .n_layer = LEN(QWEN3_LAYER),
     .emit_dense = true, .emit_sharded = true, .emit_tied = true,
     .fixture_base = "tiny_qwen3",
 };
@@ -207,8 +209,8 @@ static const recipe_t GEMMA3 = {
     .sliding_window = 4, .sliding_window_pattern = 2,
     .query_pre_attn_scalar = 64, .rope_local_base_freq = 10000.0,
     .has_lm_head = false, .tie_word_embeddings = true,
-    .top = GEMMA3_TOP, .n_top = 2,
-    .layer = GEMMA3_LAYER, .n_layer = 13,
+    .top = GEMMA3_TOP, .n_top = LEN(GEMMA3_TOP),
+    .layer = GEMMA3_LAYER, .n_layer = LEN(GEMMA3_LAYER),
     /* quantized (sharded/tied-quant) gemma3 deferred to D1 gate; dense fixture is already tied */
     .emit_dense = true, .emit_sharded = false, .emit_tied = false,
     .fixture_base = "tiny_gemma3",

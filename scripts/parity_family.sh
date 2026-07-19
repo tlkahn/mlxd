@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 usage() {
     printf 'usage: parity_family.sh <family>|all [prompt]\n' >&2
-    printf 'families: qwen3 gemma3 qwen2 llama mistral lfm2\n' >&2
+    printf 'families: qwen3 gemma3 qwen2 llama mistral gemma4 qwen3_5\n' >&2
     exit 2
 }
 
@@ -25,7 +25,8 @@ family_id() {
         qwen2)   echo "" ;;
         llama)   echo "" ;;
         mistral) echo "" ;;
-        lfm2)    echo "" ;;
+        gemma4)  echo "" ;;
+        qwen3_5) echo "" ;;
         *)       return 1 ;;
     esac
 }
@@ -38,12 +39,13 @@ family_override() {
         qwen2)   printf '%s' "${MLXD_PARITY_CKPT_QWEN2:-}" ;;
         llama)   printf '%s' "${MLXD_PARITY_CKPT_LLAMA:-}" ;;
         mistral) printf '%s' "${MLXD_PARITY_CKPT_MISTRAL:-}" ;;
-        lfm2)    printf '%s' "${MLXD_PARITY_CKPT_LFM2:-}" ;;
+        gemma4)  printf '%s' "${MLXD_PARITY_CKPT_GEMMA4:-}" ;;
+        qwen3_5) printf '%s' "${MLXD_PARITY_CKPT_QWEN3_5:-}" ;;
         *)       return 1 ;;
     esac
 }
 
-ALL_FAMILIES="qwen3 gemma3 qwen2 llama mistral lfm2"
+ALL_FAMILIES="qwen3 llama mistral qwen2 gemma3 gemma4 qwen3_5"
 
 [ $# -lt 1 ] && usage
 

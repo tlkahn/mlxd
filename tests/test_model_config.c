@@ -901,6 +901,10 @@ static void test_tiny_gemma3_config(void) {
     assert(cfg.has_qk_norm == true);
     assert(cfg.tie_word_embeddings == true);
 
+    assert(cfg.rope_scaling_factor == 8.0f);
+    assert(cfg.hidden_act == HIDDEN_ACT_GELU_APPROX);
+    assert(cfg.attention_bias == false);
+
     model_config_free(&cfg);
 }
 

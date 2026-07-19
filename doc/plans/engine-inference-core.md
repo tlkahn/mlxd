@@ -293,7 +293,7 @@ tests/
 scripts/
   parity_temp0.sh            # first-50-token match vs mlx-serve (B4+)
 tools/
-  gen_tiny_qwen3_ckpt.*      # tiny random-weight fixture generator (A3)
+  gen_tiny_ckpt.*             # tiny random-weight fixture generator (A3, family-parameterized)
 ```
 
 Exact file splits are flexible; the Stage F CLAUDE.md update records the final layout.

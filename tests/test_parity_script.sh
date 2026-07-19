@@ -609,11 +609,81 @@ rm -rf "$WOVTBD_DIR"
 
 # --- wrapper: run-all with nothing set -> skip all, exit 0 ---
 
-out=$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_QWEN3 -u MLXD_PARITY_CKPT_GEMMA3 -u MLXD_PARITY_CKPT_QWEN2 -u MLXD_PARITY_CKPT_LLAMA -u MLXD_PARITY_CKPT_MISTRAL -u MLXD_PARITY_CKPT_LFM2 sh "$WRAPPER" all 2>&1) && rc=0 || rc=$?
+out=$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_QWEN3 -u MLXD_PARITY_CKPT_GEMMA3 -u MLXD_PARITY_CKPT_QWEN2 -u MLXD_PARITY_CKPT_LLAMA -u MLXD_PARITY_CKPT_MISTRAL -u MLXD_PARITY_CKPT_GEMMA4 -u MLXD_PARITY_CKPT_QWEN3_5 sh "$WRAPPER" all 2>&1) && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped'; then
     pass "wrapper-run-all"
 else
     fail "wrapper-run-all" "expected exit 0 + skipped lines (rc=$rc)"
+fi
+
+# --- wrapper: lfm2 is now unknown -> exit 2 ---
+
+out=$(sh "$WRAPPER" lfm2 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 2 ] && printf '%s\n' "$out" | grep -qi 'usage'; then
+    pass "wrapper-unknown-family-lfm2"
+else
+    fail "wrapper-unknown-family-lfm2" "expected exit 2 + usage (rc=$rc)"
+fi
+
+# --- wrapper: skip on TBD id (gemma4) ---
+
+out=$(MLXD_PARITY_CKPT_ROOT=/tmp sh "$WRAPPER" gemma4 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped.*no canonical checkpoint id'; then
+    pass "wrapper-skip-tbd-gemma4"
+else
+    fail "wrapper-skip-tbd-gemma4" "expected exit 0 + skipped:no canonical (rc=$rc)"
+fi
+
+# --- wrapper: per-family override beats MLXD_PARITY_CKPT_ROOT (N3) ---
+
+WBOTH_DIR=$(mktemp -d)
+mkdir -p "$WBOTH_DIR/override"
+mkdir -p "$WBOTH_DIR/root/mlx-community/Qwen3-0.6B-4bit"
+mkdir -p "$WBOTH_DIR/scripts"
+cp "$WRAPPER" "$WBOTH_DIR/scripts/parity_family.sh"
+cat > "$WBOTH_DIR/scripts/parity_temp0.sh" <<'STUBEOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/../delegate_args.txt"
+exit 0
+STUBEOF
+chmod +x "$WBOTH_DIR/scripts/parity_temp0.sh"
+
+MLXD_PARITY_CKPT_ROOT="$WBOTH_DIR/root" MLXD_PARITY_CKPT_QWEN3="$WBOTH_DIR/override" \
+    sh "$WBOTH_DIR/scripts/parity_family.sh" qwen3 "test" >/dev/null 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$WBOTH_DIR/delegate_args.txt" ]; then
+    arg1=$(sed -n '1p' "$WBOTH_DIR/delegate_args.txt")
+    if [ "$arg1" = "$WBOTH_DIR/override" ]; then
+        pass "wrapper-override-beats-root"
+    else
+        fail "wrapper-override-beats-root" "wrong dir: $arg1 (expected override)"
+    fi
+else
+    fail "wrapper-override-beats-root" "delegate not called (rc=$rc)"
+fi
+rm -rf "$WBOTH_DIR"
+
+# --- wrapper: run-all with one failing family -> exit 1 (N4) ---
+
+WFAIL_DIR=$(mktemp -d)
+mkdir -p "$WFAIL_DIR/ckpt"
+mkdir -p "$WFAIL_DIR/scripts"
+cp "$WRAPPER" "$WFAIL_DIR/scripts/parity_family.sh"
+cat > "$WFAIL_DIR/scripts/parity_temp0.sh" <<'STUBEOF'
+#!/bin/sh
+exit 1
+STUBEOF
+chmod +x "$WFAIL_DIR/scripts/parity_temp0.sh"
+
+out=$(env -u MLXD_PARITY_CKPT_ROOT -u MLXD_PARITY_CKPT_GEMMA3 -u MLXD_PARITY_CKPT_QWEN2 \
+    -u MLXD_PARITY_CKPT_LLAMA -u MLXD_PARITY_CKPT_MISTRAL -u MLXD_PARITY_CKPT_GEMMA4 \
+    -u MLXD_PARITY_CKPT_QWEN3_5 \
+    MLXD_PARITY_CKPT_QWEN3="$WFAIL_DIR/ckpt" \
+    sh "$WFAIL_DIR/scripts/parity_family.sh" all 2>&1) && rc=0 || rc=$?
+rm -rf "$WFAIL_DIR"
+if [ "$rc" -eq 1 ]; then
+    pass "wrapper-run-all-one-fail"
+else
+    fail "wrapper-run-all-one-fail" "expected exit 1 (rc=$rc)"
 fi
 
 exit "$FAILS"

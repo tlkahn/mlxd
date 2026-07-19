@@ -162,8 +162,9 @@ test-parity-skip:
 		printf '%s\n' "$$out" | grep -q 'skipped' || \
 		{ printf "  %-40sFAIL (wrapper-skip)\n" "parity-family-skip"; exit 1; }
 	@printf "  %-40sOK\n" "parity-family-skip"
-	@sh scripts/parity_family.sh bogus >/dev/null 2>&1 && \
-		{ printf "  %-40sFAIL (wrapper-unknown should fail)\n" "parity-family-unknown"; exit 1; } || true
+	@rc=0; sh scripts/parity_family.sh bogus >/dev/null 2>&1 || rc=$$?; \
+		[ "$$rc" -eq 2 ] || \
+		{ printf "  %-40sFAIL (expected exit 2, got %d)\n" "parity-family-unknown" "$$rc"; exit 1; }
 	@printf "  %-40sOK\n" "parity-family-unknown"
 
 test-parity-script:
