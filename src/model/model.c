@@ -315,8 +315,6 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         cfg->hidden_act          = HIDDEN_ACT_GELU_APPROX;
         if (apply_hidden_act_string(cfg, cfg_obj))
             return -1;
-        if (yyjson_obj_get(cfg_obj, "use_double_wide_mlp") == NULL)
-            cfg->use_double_wide_mlp = true;
         cfg->norm_has_offset     = false;
         cfg->scale_embeddings    = true;
         cfg->has_pre_ff_norm     = true;

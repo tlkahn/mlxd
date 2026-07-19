@@ -474,6 +474,18 @@ int main(void) {
     }
     printf("  test_gemma4_silu_config_rejected: passed\n");
 
+    /* E2E: minimal config (omits use_double_wide_mlp) should pass the gate */
+    {
+        model_config_t cfg;
+        int rc = model_config_load(&cfg,
+                                   MLXD_FIXTURES_DIR "/model_config_gemma4_minimal");
+        assert(rc == 0);
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+        model_config_free(&cfg);
+    }
+    printf("  test_gemma4_minimal_config_passes: passed\n");
+
     test_llama_plain_passes();
     printf("  test_llama_plain_passes: passed\n");
 
