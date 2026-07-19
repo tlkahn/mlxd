@@ -317,6 +317,38 @@ cleanup:
     return rc;
 }
 
+int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n) {
+    if (!cfg || !out) return -1;
+    if (!cfg->rope_scaling_type || strcmp(cfg->rope_scaling_type, "llama3") != 0)
+        return -1;
+    if (n != cfg->head_dim / 2) return -1;
+
+    double base = (double)cfg->rope_theta;
+    double factor = (double)cfg->rope_scaling_factor;
+    double low_freq_factor = (double)cfg->rope_low_freq_factor;
+    double high_freq_factor = (double)cfg->rope_high_freq_factor;
+    double old_ctx = (double)cfg->rope_original_max_position_embeddings;
+    int head_dim = cfg->head_dim;
+
+    double low_wl = old_ctx / low_freq_factor;
+    double high_wl = old_ctx / high_freq_factor;
+
+    for (int i = 0; i < n; i++) {
+        double freq = 1.0 / pow(base, 2.0 * i / (double)head_dim);
+        double wavelen = 2.0 * M_PI / freq;
+
+        if (wavelen > low_wl) {
+            freq = freq / factor;
+        } else if (wavelen > high_wl) {
+            double smooth = (old_ctx / wavelen - low_freq_factor) /
+                            (high_freq_factor - low_freq_factor);
+            freq = freq * ((1.0 - smooth) / factor + smooth);
+        }
+        out[i] = (float)freq;
+    }
+    return 0;
+}
+
 /* Custom rope frequency seam: when a family supplies a freqs array the rope
    call switches to base has_value=false, scale 1.0. No family uses it yet. */
 static mlx_array fwd_rope_freqs(const model_config_t *cfg, int layer) {

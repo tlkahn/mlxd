@@ -43,4 +43,6 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
                       const weights_t *w, const model_config_t *cfg,
                       kvcache_t *kv, mlx_stream s);
 
+int fwd_rope_llama3_freqs(const model_config_t *cfg, float *out, int n);
+
 #endif /* MLXD_ENGINE_FORWARD_H */
