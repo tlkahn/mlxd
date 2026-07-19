@@ -491,7 +491,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
         goto cleanup;
 
     /* KV cache update */
-    if (kvcache_update(kv, layer, k_roped, v_transposed, &kview, &vview, s) != 0)
+    if (kvcache_update(kv, layer, k_roped, v_transposed, 0, &kview, &vview, s) != 0)
         goto cleanup;
 
     /* SDPA */
