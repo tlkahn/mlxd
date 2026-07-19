@@ -1058,6 +1058,17 @@ static void test_gemma4_family_defaults(void) {
     model_config_free(&cfg);
 }
 
+static void test_gemma4_null_defaults(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg,
+                               MLXD_FIXTURES_DIR "/model_config_gemma4_null_defaults");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_GEMMA4);
+    assert(cfg.final_logit_softcapping == 30.0f);
+    assert(cfg.hidden_size_per_layer_input == 256);
+    model_config_free(&cfg);
+}
+
 static void test_gemma4_hidden_act_parsed(void) {
     model_config_t cfg;
     int rc = model_config_load(&cfg,
@@ -1104,6 +1115,7 @@ int main(void) {
     test_tiny_gemma4_config();
     test_gemma4_family_defaults();
     test_gemma4_hidden_act_parsed();
+    test_gemma4_null_defaults();
 
     printf("test_model_config: all passed\n");
     return 0;

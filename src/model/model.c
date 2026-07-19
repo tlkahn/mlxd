@@ -329,10 +329,16 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         }
         if (yyjson_obj_get(cfg_obj, "query_pre_attn_scalar") == NULL)
             cfg->query_pre_attn_scalar = cfg->head_dim;
-        if (yyjson_obj_get(cfg_obj, "final_logit_softcapping") == NULL)
-            cfg->final_logit_softcapping = 30.0f;
-        if (yyjson_obj_get(cfg_obj, "hidden_size_per_layer_input") == NULL)
-            cfg->hidden_size_per_layer_input = 256;
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "final_logit_softcapping");
+            if (!v || yyjson_is_null(v))
+                cfg->final_logit_softcapping = 30.0f;
+        }
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "hidden_size_per_layer_input");
+            if (!v || yyjson_is_null(v))
+                cfg->hidden_size_per_layer_input = 256;
+        }
         ensure_gemma_terminators(cfg);
         break;
 
