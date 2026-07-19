@@ -98,8 +98,10 @@ cleanup:
 }
 
 int kvcache_update(kvcache_t *kv, int layer, mlx_array new_k, mlx_array new_v,
-                   mlx_array *k_view, mlx_array *v_view, mlx_stream s) {
+                   int max_kv, mlx_array *k_view, mlx_array *v_view,
+                   mlx_stream s) {
     if (!kv || !kv->entries || layer < 0 || layer >= kv->num_layers) return -1;
+    if (max_kv < 0) return -1;
 
     if ((int)mlx_array_ndim(new_k) != 4 || (int)mlx_array_ndim(new_v) != 4)
         return -1;
@@ -140,10 +142,12 @@ int kvcache_update(kvcache_t *kv, int layer, mlx_array new_k, mlx_array new_v,
         goto cleanup;
 
     int new_off = e->offset + new_len;
-    int vstart[] = {0, 0, 0, 0};
+    int view_start = (max_kv > 0 && new_len == 1 && new_off > max_kv)
+                         ? new_off - max_kv : 0;
+    int vstart[] = {0, 0, view_start, 0};
     int vstop[]  = {B, H, new_off, D};
 
-    if (new_off == e->capacity) {
+    if (new_off == e->capacity && view_start == 0) {
         if (!MLXB_CHECK(mlx_array_set(&local_kview, updated_k))) goto cleanup;
         if (!MLXB_CHECK(mlx_array_set(&local_vview, updated_v))) goto cleanup;
     } else {

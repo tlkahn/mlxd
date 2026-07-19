@@ -143,6 +143,24 @@ int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
         }
     }
 
+    /* gemma-style embed scaling: bf16-rounded sqrt(hidden_size), bf16 x bf16 */
+    if (cfg->scale_embeddings) {
+        mlx_array scale_f32 = mlx_array_new_float(sqrtf((float)cfg->hidden_size));
+        mlx_array scale = mlx_array_new();
+        mlx_array scaled = mlx_array_new();
+        bool ok = MLXB_CHECK(mlx_astype(&scale, scale_f32, MLX_BFLOAT16, s)) &&
+                  MLXB_CHECK(mlx_multiply(&scaled, result, scale, s));
+        mlx_array_free(scale);
+        mlx_array_free(scale_f32);
+        if (!ok) {
+            mlx_array_free(scaled);
+            weights_triplet_free(&tri);
+            goto cleanup;
+        }
+        mlx_array_free(result);
+        result = scaled;
+    }
+
     weights_triplet_free(&tri);
     mlx_array_free(*out);
     *out = result;
@@ -163,16 +181,202 @@ cleanup:
 }
 
 int fwd_rmsnorm(mlx_array *out, mlx_array x, mlx_array weight, float eps,
-                mlx_stream s) {
+                bool add_unit_offset, mlx_stream s) {
     if (!out) return -1;
+    int rc = -1;
     mlx_array result = mlx_array_new();
-    if (!MLXB_CHECK(mlx_fast_rms_norm(&result, x, weight, eps, s))) {
-        mlx_array_free(result);
-        return -1;
+    mlx_array w_eff = mlx_array_new();
+
+    if (add_unit_offset) {
+        mlx_array one_f32 = mlx_array_new_float(1.0f);
+        mlx_array one = mlx_array_new();
+        if (!MLXB_CHECK(mlx_astype(&one, one_f32, MLX_BFLOAT16, s)) ||
+            !MLXB_CHECK(mlx_add(&w_eff, one, weight, s))) {
+            mlx_array_free(one);
+            mlx_array_free(one_f32);
+            goto cleanup;
+        }
+        mlx_array_free(one);
+        mlx_array_free(one_f32);
+    } else {
+        if (!MLXB_CHECK(mlx_array_set(&w_eff, weight))) goto cleanup;
     }
+
+    if (!MLXB_CHECK(mlx_fast_rms_norm(&result, x, w_eff, eps, s)))
+        goto cleanup;
     mlx_array_free(*out);
     *out = result;
-    return 0;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(w_eff);
+    mlx_array_free(result);
+    return rc;
+}
+
+/* Cast an f32 0/-inf mask to bf16 and reshape to [1,1,rows,cols]. */
+static int mask_finalize(mlx_array *out, mlx_array vals, int rows, int cols,
+                         mlx_stream s) {
+    int rc = -1;
+    mlx_array bf16 = mlx_array_new();
+    mlx_array result = mlx_array_new();
+    int shape[] = {1, 1, rows, cols};
+    if (!MLXB_CHECK(mlx_astype(&bf16, vals, MLX_BFLOAT16, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_reshape(&result, bf16, shape, 4, s))) goto cleanup;
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(bf16);
+    return rc;
+}
+
+int fwd_sliding_window_mask(mlx_array *out, int q_len, int kv_len, int window,
+                            mlx_stream s) {
+    if (!out || q_len <= 0 || kv_len <= 0 || window <= 0 || q_len > kv_len) return -1;
+    int rc = -1;
+    mlx_array rows = mlx_array_new();
+    mlx_array cols = mlx_array_new();
+    mlx_array rows2 = mlx_array_new();
+    mlx_array cols2 = mlx_array_new();
+    mlx_array diff = mlx_array_new();
+    mlx_array causal = mlx_array_new();
+    mlx_array within = mlx_array_new();
+    mlx_array allowed = mlx_array_new();
+    mlx_array vals = mlx_array_new();
+    mlx_array zero_i = mlx_array_new_int(0);
+    mlx_array win_i = mlx_array_new_int(window);
+    mlx_array zero_f = mlx_array_new_float(0.0f);
+    mlx_array neginf_f = mlx_array_new_float(-INFINITY);
+    int rshape[] = {q_len, 1};
+    int cshape[] = {1, kv_len};
+
+    /* absolute position of query row i is kv_len - q_len + i */
+    if (!MLXB_CHECK(mlx_arange(&rows, (double)(kv_len - q_len), (double)kv_len,
+                               1.0, MLX_INT32, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_arange(&cols, 0.0, (double)kv_len, 1.0, MLX_INT32, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_reshape(&rows2, rows, rshape, 2, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_reshape(&cols2, cols, cshape, 2, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_subtract(&diff, rows2, cols2, s))) goto cleanup;
+    /* allowed iff 0 <= row - col < window */
+    if (!MLXB_CHECK(mlx_greater_equal(&causal, diff, zero_i, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_less(&within, diff, win_i, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_logical_and(&allowed, causal, within, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_where(&vals, allowed, zero_f, neginf_f, s)))
+        goto cleanup;
+    rc = mask_finalize(out, vals, q_len, kv_len, s);
+
+cleanup:
+    mlx_array_free(neginf_f);
+    mlx_array_free(zero_f);
+    mlx_array_free(win_i);
+    mlx_array_free(zero_i);
+    mlx_array_free(vals);
+    mlx_array_free(allowed);
+    mlx_array_free(within);
+    mlx_array_free(causal);
+    mlx_array_free(diff);
+    mlx_array_free(cols2);
+    mlx_array_free(rows2);
+    mlx_array_free(cols);
+    mlx_array_free(rows);
+    return rc;
+}
+
+int fwd_sliding_window_decode_mask(mlx_array *out, int kv_len, int window,
+                                   mlx_stream s) {
+    if (!out || kv_len <= 0 || window <= 0) return -1;
+    int rc = -1;
+    mlx_array cols = mlx_array_new();
+    mlx_array allowed = mlx_array_new();
+    mlx_array vals = mlx_array_new();
+    mlx_array cutoff_i = mlx_array_new_int(kv_len - window);
+    mlx_array zero_f = mlx_array_new_float(0.0f);
+    mlx_array neginf_f = mlx_array_new_float(-INFINITY);
+
+    if (!MLXB_CHECK(mlx_arange(&cols, 0.0, (double)kv_len, 1.0, MLX_INT32, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_greater_equal(&allowed, cols, cutoff_i, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_where(&vals, allowed, zero_f, neginf_f, s)))
+        goto cleanup;
+    rc = mask_finalize(out, vals, 1, kv_len, s);
+
+cleanup:
+    mlx_array_free(neginf_f);
+    mlx_array_free(zero_f);
+    mlx_array_free(cutoff_i);
+    mlx_array_free(vals);
+    mlx_array_free(allowed);
+    mlx_array_free(cols);
+    return rc;
+}
+
+/* Custom rope frequency seam: when a family supplies a freqs array the rope
+   call switches to base has_value=false, scale 1.0. No family uses it yet. */
+static mlx_array fwd_rope_freqs(const model_config_t *cfg, int layer) {
+    (void)cfg;
+    (void)layer;
+    return (mlx_array){.ctx = NULL};
+}
+
+/* Per-layer rope: global layers use rope_theta (scaled by a linear factor
+   when set); local layers use rope_local_base_freq at scale 1.0. */
+static int fwd_rope_apply(mlx_array *res, mlx_array x, int dims,
+                          const model_config_t *cfg, int layer, int offset,
+                          mlx_stream s) {
+    mlx_array freqs = fwd_rope_freqs(cfg, layer);
+    if (freqs.ctx) {
+        int ok = MLXB_CHECK(mlx_fast_rope(res, x, dims, false,
+            (mlx_optional_float){.has_value = false}, 1.0f, offset, freqs, s));
+        mlx_array_free(freqs);
+        return ok ? 0 : -1;
+    }
+
+    bool global = model_layer_is_global(cfg, layer);
+    float base = cfg->rope_theta;
+    float scale = 1.0f;
+    if (global) {
+        /* Apply 1/factor for simple (NULL or "linear") scaling types.
+           llama3-style uses the freqs seam path above; proportional goes
+           through fwd_rope_freqs. */
+        bool simple = !cfg->rope_scaling_type ||
+                      strcmp(cfg->rope_scaling_type, "linear") == 0;
+        if (simple && cfg->rope_scaling_factor > 0.0f)
+            scale = 1.0f / cfg->rope_scaling_factor;
+    } else if (cfg->rope_local_base_freq > 0.0f) {
+        base = cfg->rope_local_base_freq;
+    }
+
+    return MLXB_CHECK(mlx_fast_rope(res, x, dims, false,
+        (mlx_optional_float){.value = base, .has_value = true},
+        scale, offset, (mlx_array){.ctx = NULL}, s)) ? 0 : -1;
+}
+
+/* Add {base}.bias to *io in place (broadcast over [B,S,D]). */
+static int add_proj_bias(mlx_array *io, const weights_t *w, const char *base,
+                         mlx_stream s) {
+    char bname[270];
+    snprintf(bname, sizeof(bname), "%s.bias", base);
+    int rc = -1;
+    mlx_array bias = mlx_array_new();
+    mlx_array sum = mlx_array_new();
+    if (weights_get(&bias, w, bname) != 0) goto cleanup;
+    if (!MLXB_CHECK(mlx_add(&sum, *io, bias, s))) goto cleanup;
+    mlx_array_free(*io);
+    *io = sum;
+    sum = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(sum);
+    mlx_array_free(bias);
+    return rc;
 }
 
 int fwd_attention(mlx_array *out, mlx_array x, int layer,
@@ -186,7 +390,10 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     int n_heads = cfg->num_attention_heads;
     int n_kv = cfg->num_key_value_heads;
     int hd = cfg->head_dim;
-    float attn_scale = 1.0f / sqrtf((float)hd);
+    /* gemma4 pins scale to 1.0; query_pre_attn_scalar defaults to head_dim */
+    int qpas = cfg->query_pre_attn_scalar > 0 ? cfg->query_pre_attn_scalar : hd;
+    float attn_scale =
+        cfg->family == MODEL_GEMMA4 ? 1.0f : 1.0f / sqrtf((float)qpas);
 
     mlx_array q = mlx_array_new();
     mlx_array k = mlx_array_new();
@@ -203,6 +410,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     mlx_array k_roped = mlx_array_new();
     mlx_array kview = mlx_array_new();
     mlx_array vview = mlx_array_new();
+    mlx_array sdpa_mask = mlx_array_new();
     mlx_array attn_out = mlx_array_new();
     mlx_array attn_back = mlx_array_new();
     mlx_array attn_reshaped = mlx_array_new();
@@ -218,14 +426,17 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.q_proj");
     if (weights_get_triplet(&q_tri, w, name) != 0) goto cleanup;
     if (fwd_linear(&q, x, &q_tri, cfg, s) != 0) goto cleanup;
+    if (cfg->attention_bias && add_proj_bias(&q, w, name, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.k_proj");
     if (weights_get_triplet(&k_tri, w, name) != 0) goto cleanup;
     if (fwd_linear(&k, x, &k_tri, cfg, s) != 0) goto cleanup;
+    if (cfg->attention_bias && add_proj_bias(&k, w, name, s) != 0) goto cleanup;
 
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.v_proj");
     if (weights_get_triplet(&v_tri, w, name) != 0) goto cleanup;
     if (fwd_linear(&v, x, &v_tri, cfg, s) != 0) goto cleanup;
+    if (cfg->attention_bias && add_proj_bias(&v, w, name, s) != 0) goto cleanup;
 
     /* Reshape to [B,S,H,D] */
     int B = mlx_array_dim(x, 0);
@@ -254,8 +465,10 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
             mlx_array_free(q_norm_w);
             goto cleanup;
         }
-        if (fwd_rmsnorm(&q_normed, q_reshaped, q_norm_w, cfg->rms_norm_eps, s) != 0 ||
-            fwd_rmsnorm(&k_normed, k_reshaped, k_norm_w, cfg->rms_norm_eps, s) != 0) {
+        if (fwd_rmsnorm(&q_normed, q_reshaped, q_norm_w, cfg->rms_norm_eps,
+                        cfg->norm_has_offset, s) != 0 ||
+            fwd_rmsnorm(&k_normed, k_reshaped, k_norm_w, cfg->rms_norm_eps,
+                        cfg->norm_has_offset, s) != 0) {
             mlx_array_free(k_norm_w);
             mlx_array_free(q_norm_w);
             goto cleanup;
@@ -276,22 +489,37 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     /* RoPE - offset read BEFORE kvcache_update */
     int offset = kvcache_layer_offset(kv, layer);
     assert(offset >= 0);
-    if (!MLXB_CHECK(mlx_fast_rope(&q_roped, q_transposed, hd, false,
-            (mlx_optional_float){.value = cfg->rope_theta, .has_value = true},
-            1.0f, offset, (mlx_array){.ctx = NULL}, s))) goto cleanup;
-    if (!MLXB_CHECK(mlx_fast_rope(&k_roped, k_transposed, hd, false,
-            (mlx_optional_float){.value = cfg->rope_theta, .has_value = true},
-            1.0f, offset, (mlx_array){.ctx = NULL}, s))) goto cleanup;
-
-    /* KV cache update */
-    if (kvcache_update(kv, layer, k_roped, v_transposed, &kview, &vview, s) != 0)
+    if (fwd_rope_apply(&q_roped, q_transposed, hd, cfg, layer, offset, s) != 0)
+        goto cleanup;
+    if (fwd_rope_apply(&k_roped, k_transposed, hd, cfg, layer, offset, s) != 0)
         goto cleanup;
 
-    /* SDPA */
-    const char *mask_mode = S > 1 ? "causal" : "";
+    /* KV cache update */
+    bool local = !model_layer_is_global(cfg, layer) &&
+                 cfg->has_sliding_window && cfg->sliding_window > 0;
+    int max_kv = local ? cfg->sliding_window : 0;
+    if (kvcache_update(kv, layer, k_roped, v_transposed, max_kv, &kview, &vview, s) != 0)
+        goto cleanup;
+
+    /* SDPA: local decode relies on the max_kv view trim in kvcache_update to
+       enforce the window; nothing re-selects a mask if that trim goes away.
+       If a later design stops trimming (e.g. max_kv = 0 for local layers),
+       re-wire fwd_sliding_window_decode_mask here or SWA silently becomes
+       full attention on decode. */
+    const char *mask_mode;
+    if (local && S > 1) {
+        int kv_len = mlx_array_dim(kview, 2);
+        if (fwd_sliding_window_mask(&sdpa_mask, S, kv_len, cfg->sliding_window, s) != 0)
+            goto cleanup;
+        mask_mode = "array";
+    } else if (local) {
+        mask_mode = "";
+    } else {
+        mask_mode = S > 1 ? "causal" : "";
+    }
     if (!MLXB_CHECK(mlx_fast_scaled_dot_product_attention(
             &attn_out, q_roped, kview, vview, attn_scale, mask_mode,
-            (mlx_array){.ctx = NULL}, (mlx_array){.ctx = NULL}, s)))
+            sdpa_mask, (mlx_array){.ctx = NULL}, s)))
         goto cleanup;
 
     /* Transpose back and reshape */
@@ -321,6 +549,7 @@ cleanup:
     mlx_array_free(attn_reshaped);
     mlx_array_free(attn_back);
     mlx_array_free(attn_out);
+    mlx_array_free(sdpa_mask);
     mlx_array_free(vview);
     mlx_array_free(kview);
     mlx_array_free(k_roped);
@@ -406,36 +635,59 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
 
     mlx_array ln1_w = mlx_array_new();
     mlx_array ln2_w = mlx_array_new();
+    mlx_array ln_pre_w = mlx_array_new();
+    mlx_array ln_post_w = mlx_array_new();
     mlx_array normed1 = mlx_array_new();
     mlx_array normed2 = mlx_array_new();
     mlx_array attn_out = mlx_array_new();
+    mlx_array attn_normed = mlx_array_new();
     mlx_array mlp_out = mlx_array_new();
+    mlx_array mlp_normed = mlx_array_new();
     mlx_array h1 = mlx_array_new();
     mlx_array result = mlx_array_new();
+    float eps = cfg->rms_norm_eps;
+    bool offs = cfg->norm_has_offset;
 
     /* input_layernorm */
     weights_tensor_name(name, sizeof(name), cfg, layer, "input_layernorm");
     snprintf(wname, sizeof(wname), "%s.weight", name);
     if (weights_get(&ln1_w, w, wname) != 0) goto cleanup;
-    if (fwd_rmsnorm(&normed1, x, ln1_w, cfg->rms_norm_eps, s) != 0) goto cleanup;
+    if (fwd_rmsnorm(&normed1, x, ln1_w, eps, offs, s) != 0) goto cleanup;
 
     /* attention */
     if (fwd_attention(&attn_out, normed1, layer, w, cfg, kv, s) != 0) goto cleanup;
 
-    /* residual */
-    if (!MLXB_CHECK(mlx_add(&h1, x, attn_out, s))) goto cleanup;
-
-    /* post_attention_layernorm */
     weights_tensor_name(name, sizeof(name), cfg, layer, "post_attention_layernorm");
     snprintf(wname, sizeof(wname), "%s.weight", name);
     if (weights_get(&ln2_w, w, wname) != 0) goto cleanup;
-    if (fwd_rmsnorm(&normed2, h1, ln2_w, cfg->rms_norm_eps, s) != 0) goto cleanup;
 
-    /* MLP */
-    if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;
+    if (cfg->has_pre_ff_norm) {
+        /* sandwich: h = x + norm(attn_out); out = h + norm(mlp(norm(h))) */
+        weights_tensor_name(name, sizeof(name), cfg, layer,
+                            "pre_feedforward_layernorm");
+        snprintf(wname, sizeof(wname), "%s.weight", name);
+        if (weights_get(&ln_pre_w, w, wname) != 0) goto cleanup;
+        weights_tensor_name(name, sizeof(name), cfg, layer,
+                            "post_feedforward_layernorm");
+        snprintf(wname, sizeof(wname), "%s.weight", name);
+        if (weights_get(&ln_post_w, w, wname) != 0) goto cleanup;
 
-    /* residual */
-    if (!MLXB_CHECK(mlx_add(&result, h1, mlp_out, s))) goto cleanup;
+        if (fwd_rmsnorm(&attn_normed, attn_out, ln2_w, eps, offs, s) != 0)
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_add(&h1, x, attn_normed, s))) goto cleanup;
+        if (fwd_rmsnorm(&normed2, h1, ln_pre_w, eps, offs, s) != 0)
+            goto cleanup;
+        if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;
+        if (fwd_rmsnorm(&mlp_normed, mlp_out, ln_post_w, eps, offs, s) != 0)
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_add(&result, h1, mlp_normed, s))) goto cleanup;
+    } else {
+        /* pre-norm: h = x + attn_out; out = h + mlp(norm(h)) */
+        if (!MLXB_CHECK(mlx_add(&h1, x, attn_out, s))) goto cleanup;
+        if (fwd_rmsnorm(&normed2, h1, ln2_w, eps, offs, s) != 0) goto cleanup;
+        if (fwd_swiglu(&mlp_out, normed2, layer, w, cfg, s) != 0) goto cleanup;
+        if (!MLXB_CHECK(mlx_add(&result, h1, mlp_out, s))) goto cleanup;
+    }
 
     mlx_array_free(*out);
     *out = result;
@@ -445,10 +697,14 @@ int fwd_decoder_layer(mlx_array *out, mlx_array x, int layer,
 cleanup:
     mlx_array_free(result);
     mlx_array_free(h1);
+    mlx_array_free(mlp_normed);
     mlx_array_free(mlp_out);
+    mlx_array_free(attn_normed);
     mlx_array_free(attn_out);
     mlx_array_free(normed2);
     mlx_array_free(normed1);
+    mlx_array_free(ln_post_w);
+    mlx_array_free(ln_pre_w);
     mlx_array_free(ln2_w);
     mlx_array_free(ln1_w);
     return rc;

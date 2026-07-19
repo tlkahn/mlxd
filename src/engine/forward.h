@@ -17,12 +17,24 @@ int fwd_linear(mlx_array *out, mlx_array x, const weight_triplet_t *tri,
 int fwd_embed(mlx_array *out, mlx_array ids, const weights_t *w,
               const model_config_t *cfg, mlx_stream s);
 
+/* add_unit_offset applies the gemma-style (1 + weight) variant: bf16 1.0 is
+   added to the raw weight before the norm. */
 int fwd_rmsnorm(mlx_array *out, mlx_array x, mlx_array weight, float eps,
-                mlx_stream s);
+                bool add_unit_offset, mlx_stream s);
 
 int fwd_attention(mlx_array *out, mlx_array x, int layer,
                   const weights_t *w, const model_config_t *cfg,
                   kvcache_t *kv, mlx_stream s);
+
+/* Sliding-window additive masks (bf16, 0 / -inf) for SDPA mask mode "array".
+   Prefill mask is [1,1,q_len,kv_len]: causal + window over absolute
+   positions, where query row i sits at absolute position kv_len - q_len + i.
+   Decode mask is [1,1,1,kv_len]: positions before kv_len - window masked. */
+int fwd_sliding_window_mask(mlx_array *out, int q_len, int kv_len, int window,
+                            mlx_stream s);
+
+int fwd_sliding_window_decode_mask(mlx_array *out, int kv_len, int window,
+                                   mlx_stream s);
 
 int fwd_swiglu(mlx_array *out, mlx_array x, int layer,
                const weights_t *w, const model_config_t *cfg, mlx_stream s);

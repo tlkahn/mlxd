@@ -50,7 +50,7 @@ static void test_single_step(void) {
     mlx_array vview = mlx_array_new();
 
     /* First update */
-    rc = kvcache_update(&kv, 0, new_k, new_v, &kview, &vview, s);
+    rc = kvcache_update(&kv, 0, new_k, new_v, 0, &kview, &vview, s);
     assert(rc == 0);
     assert(kvcache_layer_offset(&kv, 0) == 1);
 
@@ -82,7 +82,7 @@ static void test_single_step(void) {
     mlx_array kview2 = mlx_array_new();
     mlx_array vview2 = mlx_array_new();
 
-    rc = kvcache_update(&kv, 0, new_k2, new_v2, &kview2, &vview2, s);
+    rc = kvcache_update(&kv, 0, new_k2, new_v2, 0, &kview2, &vview2, s);
     assert(rc == 0);
     assert(kvcache_layer_offset(&kv, 0) == 2);
 
@@ -138,7 +138,7 @@ static void test_doubling(void) {
 
         mlx_array kview = mlx_array_new();
         mlx_array vview = mlx_array_new();
-        assert(kvcache_update(&kv, 0, nk, nv, &kview, &vview, s) == 0);
+        assert(kvcache_update(&kv, 0, nk, nv, 0, &kview, &vview, s) == 0);
 
         assert(kvcache_capacity(&kv, 0) == expected_cap[step]);
         assert(kvcache_layer_offset(&kv, 0) == step + 1);
@@ -188,7 +188,7 @@ static void test_bulk(void) {
 
     mlx_array kview = mlx_array_new();
     mlx_array vview = mlx_array_new();
-    assert(kvcache_update(&kv, 0, bk, bv, &kview, &vview, s) == 0);
+    assert(kvcache_update(&kv, 0, bk, bv, 0, &kview, &vview, s) == 0);
     assert(kvcache_layer_offset(&kv, 0) == 3);
     assert(kvcache_capacity(&kv, 0) == 4);
 
@@ -207,7 +207,7 @@ static void test_bulk(void) {
 
     mlx_array kview2 = mlx_array_new();
     mlx_array vview2 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, dk, dv, &kview2, &vview2, s) == 0);
+    assert(kvcache_update(&kv, 0, dk, dv, 0, &kview2, &vview2, s) == 0);
     assert(kvcache_layer_offset(&kv, 0) == 4);
     assert(kvcache_capacity(&kv, 0) == 4);
 
@@ -258,7 +258,7 @@ static void test_bulk_grow(void) {
 
     mlx_array kv0 = mlx_array_new();
     mlx_array vv0 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, sk, sv, &kv0, &vv0, s) == 0);
+    assert(kvcache_update(&kv, 0, sk, sv, 0, &kv0, &vv0, s) == 0);
     assert(kvcache_layer_offset(&kv, 0) == 1);
     assert(kvcache_capacity(&kv, 0) == 1);
 
@@ -277,7 +277,7 @@ static void test_bulk_grow(void) {
 
     mlx_array kv1 = mlx_array_new();
     mlx_array vv1 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, bk, bv, &kv1, &vv1, s) == 0);
+    assert(kvcache_update(&kv, 0, bk, bv, 0, &kv1, &vv1, s) == 0);
     assert(kvcache_layer_offset(&kv, 0) == 4);
     assert(kvcache_capacity(&kv, 0) == 4);
 
@@ -326,7 +326,7 @@ static void test_reject_wrong_heads(void) {
     MLXB_CHECK(mlx_astype(&ok_v, vf32, MLX_BFLOAT16, s));
     mlx_array kv0 = mlx_array_new();
     mlx_array vv0 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, ok_k, ok_v, &kv0, &vv0, s) == 0);
+    assert(kvcache_update(&kv, 0, ok_k, ok_v, 0, &kv0, &vv0, s) == 0);
     assert(kvcache_layer_offset(&kv, 0) == 1);
 
     /* Wrong H: 3 heads instead of 2 */
@@ -341,7 +341,7 @@ static void test_reject_wrong_heads(void) {
 
     mlx_array kv1 = mlx_array_new();
     mlx_array vv1 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, bad_k, bad_v, &kv1, &vv1, s) == -1);
+    assert(kvcache_update(&kv, 0, bad_k, bad_v, 0, &kv1, &vv1, s) == -1);
     assert(kvcache_layer_offset(&kv, 0) == 1);
 
     mlx_array_free(vv1);
@@ -374,7 +374,7 @@ static void test_reject_wrong_dim(void) {
 
     mlx_array kv0 = mlx_array_new();
     mlx_array vv0 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, bad_k, bad_v, &kv0, &vv0, s) == -1);
+    assert(kvcache_update(&kv, 0, bad_k, bad_v, 0, &kv0, &vv0, s) == -1);
     assert(kvcache_layer_offset(&kv, 0) == 0);
 
     mlx_array_free(vv0);
@@ -402,7 +402,7 @@ static void test_reject_wrong_rank(void) {
 
     mlx_array kv0 = mlx_array_new();
     mlx_array vv0 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, bad_k, bad_v, &kv0, &vv0, s) == -1);
+    assert(kvcache_update(&kv, 0, bad_k, bad_v, 0, &kv0, &vv0, s) == -1);
     assert(kvcache_layer_offset(&kv, 0) == 0);
 
     mlx_array_free(vv0);
@@ -435,7 +435,7 @@ static void test_reject_kv_shape_mismatch(void) {
 
     mlx_array kv0 = mlx_array_new();
     mlx_array vv0 = mlx_array_new();
-    assert(kvcache_update(&kv, 0, ok_k, ok_v, &kv0, &vv0, s) == -1);
+    assert(kvcache_update(&kv, 0, ok_k, ok_v, 0, &kv0, &vv0, s) == -1);
     assert(kvcache_layer_offset(&kv, 0) == 0);
 
     mlx_array_free(vv0);
@@ -444,6 +444,95 @@ static void test_reject_kv_shape_mismatch(void) {
     mlx_array_free(vf32);
     mlx_array_free(ok_k);
     mlx_array_free(kf32);
+    kvcache_free(&kv);
+}
+
+/* ---- F7b: max_kv sliding-window view trim (decode only) ---- */
+
+static void test_max_kv_trim(void) {
+    mlx_stream s = mlxbridge_gpu_stream();
+    kvcache_t kv;
+    assert(kvcache_init(&kv, 1, 2, 16) == 0);
+
+    /* Prefill 3 tokens (rows 1,2,3) with max_kv=2: prefill is never trimmed */
+    int shape3[] = {1, 2, 3, 16};
+    float bulk_vals[96];
+    for (int h = 0; h < 2; h++)
+        for (int t = 0; t < 3; t++)
+            for (int d = 0; d < 16; d++)
+                bulk_vals[h * 48 + t * 16 + d] = (float)(t + 1);
+    mlx_array bf32 = mlx_array_new_data(bulk_vals, shape3, 4, MLX_FLOAT32);
+    mlx_array bk = mlx_array_new();
+    mlx_array bv = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&bk, bf32, MLX_BFLOAT16, s));
+    MLXB_CHECK(mlx_astype(&bv, bf32, MLX_BFLOAT16, s));
+
+    mlx_array kv0 = mlx_array_new();
+    mlx_array vv0 = mlx_array_new();
+    assert(kvcache_update(&kv, 0, bk, bv, 2, &kv0, &vv0, s) == 0);
+    assert(kvcache_layer_offset(&kv, 0) == 3);
+    assert(MLXB_CHECK(mlx_array_eval(kv0)));
+    assert(mlx_array_dim(kv0, 2) == 3);
+
+    /* Decode 1 token (row 4) with max_kv=2: view trimmed to last 2 rows,
+       offset keeps absolute semantics */
+    int shape1[] = {1, 2, 1, 16};
+    float dvals[32];
+    for (int i = 0; i < 32; i++) dvals[i] = 4.0f;
+    mlx_array df32 = mlx_array_new_data(dvals, shape1, 4, MLX_FLOAT32);
+    mlx_array dk = mlx_array_new();
+    mlx_array dv = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&dk, df32, MLX_BFLOAT16, s));
+    MLXB_CHECK(mlx_astype(&dv, df32, MLX_BFLOAT16, s));
+
+    mlx_array kv1 = mlx_array_new();
+    mlx_array vv1 = mlx_array_new();
+    assert(kvcache_update(&kv, 0, dk, dv, 2, &kv1, &vv1, s) == 0);
+    assert(kvcache_layer_offset(&kv, 0) == 4);
+    assert(MLXB_CHECK(mlx_array_eval(kv1)));
+    assert(mlx_array_dim(kv1, 2) == 2);
+
+    mlx_array kf32 = mlx_array_new();
+    MLXB_CHECK(mlx_astype(&kf32, kv1, MLX_FLOAT32, s));
+    assert(MLXB_CHECK(mlx_array_eval(kf32)));
+    const float *kdata = mlx_array_data_float32(kf32);
+    /* head 0: rows are the last two tokens: 3.0 then 4.0 */
+    for (int d = 0; d < 16; d++) {
+        assert(fabsf(kdata[d] - 3.0f) < 1e-2f);
+        assert(fabsf(kdata[16 + d] - 4.0f) < 1e-2f);
+    }
+    mlx_array_free(kf32);
+
+    /* Decode with max_kv=0: uncapped, full [0, offset) view */
+    mlx_array kv2 = mlx_array_new();
+    mlx_array vv2 = mlx_array_new();
+    assert(kvcache_update(&kv, 0, dk, dv, 0, &kv2, &vv2, s) == 0);
+    assert(kvcache_layer_offset(&kv, 0) == 5);
+    assert(MLXB_CHECK(mlx_array_eval(kv2)));
+    assert(mlx_array_dim(kv2, 2) == 5);
+
+    /* Decode still within the window: untrimmed */
+    mlx_array kv3 = mlx_array_new();
+    mlx_array vv3 = mlx_array_new();
+    assert(kvcache_update(&kv, 0, dk, dv, 16, &kv3, &vv3, s) == 0);
+    assert(kvcache_layer_offset(&kv, 0) == 6);
+    assert(MLXB_CHECK(mlx_array_eval(kv3)));
+    assert(mlx_array_dim(kv3, 2) == 6);
+
+    mlx_array_free(vv3);
+    mlx_array_free(kv3);
+    mlx_array_free(vv2);
+    mlx_array_free(kv2);
+    mlx_array_free(vv1);
+    mlx_array_free(kv1);
+    mlx_array_free(dv);
+    mlx_array_free(dk);
+    mlx_array_free(df32);
+    mlx_array_free(vv0);
+    mlx_array_free(kv0);
+    mlx_array_free(bv);
+    mlx_array_free(bk);
+    mlx_array_free(bf32);
     kvcache_free(&kv);
 }
 
@@ -474,6 +563,9 @@ int main(void) {
 
     test_reject_kv_shape_mismatch();
     printf("  test_reject_kv_shape_mismatch: passed\n");
+
+    test_max_kv_trim();
+    printf("  test_max_kv_trim: passed\n");
 
     printf("test_kvcache_gpu: all passed\n");
     return 0;

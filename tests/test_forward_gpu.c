@@ -264,7 +264,7 @@ static void test_fwd_rmsnorm(void) {
     assert(weights_get(&norm_w, &w_dense, wname) == 0);
 
     mlx_array out = mlx_array_new();
-    assert(fwd_rmsnorm(&out, x, norm_w, cfg_dense.rms_norm_eps, gpu) == 0);
+    assert(fwd_rmsnorm(&out, x, norm_w, cfg_dense.rms_norm_eps, false, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(out)));
     assert(mlx_array_ndim(out) == 3);
     assert(mlx_array_dim(out, 0) == 1);
@@ -283,7 +283,7 @@ static void test_fwd_rmsnorm(void) {
     assert(weights_get(&qnorm_w, &w_dense, wname) == 0);
 
     mlx_array out_head = mlx_array_new();
-    assert(fwd_rmsnorm(&out_head, x_head, qnorm_w, cfg_dense.rms_norm_eps, gpu) == 0);
+    assert(fwd_rmsnorm(&out_head, x_head, qnorm_w, cfg_dense.rms_norm_eps, false, gpu) == 0);
     assert(MLXB_CHECK(mlx_array_eval(out_head)));
     assert(mlx_array_ndim(out_head) == 4);
     assert(mlx_array_dim(out_head, 0) == 1);
@@ -465,7 +465,7 @@ static void test_decoder_layer(void) {
     assert(weights_get(&norm_w, &w_dense, wname) == 0);
 
     mlx_array normed = mlx_array_new();
-    assert(fwd_rmsnorm(&normed, out, norm_w, cfg_dense.rms_norm_eps, gpu) == 0);
+    assert(fwd_rmsnorm(&normed, out, norm_w, cfg_dense.rms_norm_eps, false, gpu) == 0);
 
     /* lm_head (untied: separate lm_head weight) */
     if (!cfg_dense.tie_word_embeddings) {

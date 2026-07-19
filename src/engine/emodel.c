@@ -124,7 +124,8 @@ int model_forward(engine_model_t *em, mlx_array ids, kvcache_t *kv,
         mlx_array_free(norm_w);
         goto cleanup;
     }
-    if (fwd_rmsnorm(&normed, h, norm_w, cfg->rms_norm_eps, s) != 0) {
+    if (fwd_rmsnorm(&normed, h, norm_w, cfg->rms_norm_eps,
+                    cfg->norm_has_offset, s) != 0) {
         mlx_array_free(norm_w);
         goto cleanup;
     }

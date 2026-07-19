@@ -30,9 +30,16 @@ void kvcache_free(kvcache_t *kv);
 int kvcache_layer_offset(const kvcache_t *kv, int layer);
 
 /* *k_view and *v_view must be live mlx_array (e.g. from mlx_array_new()); on
-   success the previous values are freed and replaced; unchanged on failure. */
+   success the previous values are freed and replaced; unchanged on failure.
+   max_kv (0 = uncapped) caps the returned views at the last max_kv rows on
+   decode steps only (new_len == 1); prefill views stay full because the
+   sliding-window prefill mask handles older positions. offset semantics are
+   unchanged: it keeps growing (absolute rope positions).
+   Note: max_kv trims the returned view only; backing storage and offset grow
+   unbounded (D0 scope; ring-buffer compaction is a follow-up). */
 int kvcache_update(kvcache_t *kv, int layer, mlx_array new_k, mlx_array new_v,
-                   mlx_array *k_view, mlx_array *v_view, mlx_stream s);
+                   int max_kv, mlx_array *k_view, mlx_array *v_view,
+                   mlx_stream s);
 
 int kvcache_capacity(const kvcache_t *kv, int layer);
 
