@@ -620,15 +620,18 @@ static void test_route_deepseek_bias_breaks_group_ties(void) {
 
 /* ---- Cycle 5: batch/seq + bf16 ---- */
 
-static void test_route_deepseek_batch_seq_shapes(void) {
+/* ndim==3 group path: shape + per-row value match vs host_group_expert_select.
+   Catches wrong group axis (-2) bugs that still emit [B,S,K] shapes. */
+static void test_route_deepseek_batch_seq_matches_host_rows(void) {
+    const int B = 2, S = 3, E = 8, K = 2;
     float logits_h[2 * 3 * 8];
-    for (int i = 0; i < 2 * 3 * 8; i++)
+    for (int i = 0; i < B * S * E; i++)
         logits_h[i] = 0.1f * (float)((i * 7) % 11) - 0.4f;
-    mlx_array logits = make_f32(logits_h, (int[]){2, 3, 8}, 3);
-    mlx_array bias = make_zero_bias(8);
+    mlx_array logits = make_f32(logits_h, (int[]){B, S, E}, 3);
+    mlx_array bias = make_zero_bias(E);
 
     fwd_moe_route_deepseek_params_t p = {
-        .top_k = 2,
+        .top_k = K,
         .n_group = 2,
         .topk_group = 1,
         .routed_scaling_factor = 1.f,
@@ -641,13 +644,46 @@ static void test_route_deepseek_batch_seq_shapes(void) {
     assert(MLXB_CHECK(mlx_array_eval(inds)));
     assert(MLXB_CHECK(mlx_array_eval(scores)));
     assert(mlx_array_ndim(inds) == 3);
-    assert(mlx_array_dim(inds, 0) == 2);
-    assert(mlx_array_dim(inds, 1) == 3);
-    assert(mlx_array_dim(inds, 2) == 2);
-    assert(mlx_array_dim(scores, 0) == 2);
-    assert(mlx_array_dim(scores, 1) == 3);
-    assert(mlx_array_dim(scores, 2) == 2);
+    assert(mlx_array_dim(inds, 0) == B);
+    assert(mlx_array_dim(inds, 1) == S);
+    assert(mlx_array_dim(inds, 2) == K);
+    assert(mlx_array_dim(scores, 0) == B);
+    assert(mlx_array_dim(scores, 1) == S);
+    assert(mlx_array_dim(scores, 2) == K);
     assert(is_finite_f32(scores, gpu));
+
+    int32_t ih[2 * 3 * 2];
+    float sh[2 * 3 * 2];
+    read_i32(inds, ih, (size_t)(B * S * K));
+    read_f32(scores, sh, (size_t)(B * S * K));
+
+    float zb[8] = {0};
+    for (int b = 0; b < B; b++) {
+        for (int s = 0; s < S; s++) {
+            int row = b * S + s;
+            const float *row_logits = logits_h + row * E;
+            int exp_i[2];
+            float exp_s[2];
+            assert(host_group_expert_select(row_logits, E, zb, K, 2, 1, 1.f, 0,
+                                            exp_i, exp_s) == 0);
+
+            int32_t got_i[2] = {ih[row * K + 0], ih[row * K + 1]};
+            float got_s[2] = {sh[row * K + 0], sh[row * K + 1]};
+            assert(set_eq_inds(got_i, exp_i, K));
+
+            /* Align scores by expert id for order-stable compare. */
+            for (int k = 0; k < K; k++) {
+                float expect = -1.f;
+                for (int j = 0; j < K; j++) {
+                    if (exp_i[j] == got_i[k]) {
+                        expect = exp_s[j];
+                        break;
+                    }
+                }
+                assert(fabsf(got_s[k] - expect) < 1e-5f);
+            }
+        }
+    }
 
     mlx_array_free(scores);
     mlx_array_free(inds);
@@ -811,6 +847,51 @@ static void test_route_deepseek_rejects_null_bias(void) {
     mlx_array_free(logits);
 }
 
+/* Bias contract is rank-1 [E]. Broadcastable [1, E] must still be rejected
+   at the prologue (not deferred to mlx_add). Live GPU stream required so a
+   currently-accepted rank-2 bias would succeed and fail this assert. */
+static void test_route_deepseek_rejects_bias_rank_ne_1(void) {
+    float logits_h[] = {0.f, 1.f, 2.f, 3.f};
+    float bias_h[] = {0.f, 0.f, 0.f, 0.f};
+    mlx_array logits = make_f32(logits_h, (int[]){1, 1, 4}, 3);
+    mlx_array bias = make_f32(bias_h, (int[]){1, 4}, 2);
+    fwd_moe_route_deepseek_params_t p = {
+        .top_k = 2,
+        .n_group = 1,
+        .topk_group = 1,
+        .routed_scaling_factor = 1.f,
+        .norm_topk_prob = false,
+    };
+    mlx_array inds = mlx_array_new();
+    mlx_array scores = mlx_array_new();
+    assert(fwd_moe_route_deepseek(&inds, &scores, logits, bias, &p, gpu) == -1);
+    mlx_array_free(scores);
+    mlx_array_free(inds);
+    mlx_array_free(bias);
+    mlx_array_free(logits);
+}
+
+static void test_route_deepseek_rejects_bias_last_dim_ne_E(void) {
+    float logits_h[] = {0.f, 1.f, 2.f, 3.f};
+    float bias_h[] = {0.f, 0.f, 0.f};
+    mlx_array logits = make_f32(logits_h, (int[]){1, 1, 4}, 3);
+    mlx_array bias = make_f32(bias_h, (int[]){3}, 1);
+    fwd_moe_route_deepseek_params_t p = {
+        .top_k = 2,
+        .n_group = 1,
+        .topk_group = 1,
+        .routed_scaling_factor = 1.f,
+        .norm_topk_prob = false,
+    };
+    mlx_array inds = mlx_array_new();
+    mlx_array scores = mlx_array_new();
+    assert(fwd_moe_route_deepseek(&inds, &scores, logits, bias, &p, gpu) == -1);
+    mlx_array_free(scores);
+    mlx_array_free(inds);
+    mlx_array_free(bias);
+    mlx_array_free(logits);
+}
+
 /* ---- Cycle 7: mlx-lm frozen goldens ---- */
 
 /* Generated with mlx-lm group_expert_select (mlx-lm 0.31.x). */
@@ -853,7 +934,13 @@ static void test_route_deepseek_matches_mlx_lm_golden_vectors(void) {
     }
 
     /* Case B: n_group=4, E=16, topk_group=2, top_k=4, norm=true, scale=2.5,
-       non-zero bias. Seed 42 from numpy RandomState. */
+       non-zero bias.
+       Generation recipe (numpy):
+         rs = numpy.RandomState(42)
+         gates = rs.randn(16)
+         bias  = 0.5 * rs.randn(16)
+       Frozen inds/scores are mlx-lm group_expert_select outputs on those
+       arrays. */
     {
         float gates[] = {
             0.49671414494514465f,  -0.13826429843902588f, 0.6476885676383972f,
@@ -1171,8 +1258,8 @@ int main(void) {
     test_route_deepseek_bias_breaks_group_ties();
     printf("  test_route_deepseek_bias_breaks_group_ties: passed\n");
 
-    test_route_deepseek_batch_seq_shapes();
-    printf("  test_route_deepseek_batch_seq_shapes: passed\n");
+    test_route_deepseek_batch_seq_matches_host_rows();
+    printf("  test_route_deepseek_batch_seq_matches_host_rows: passed\n");
     test_route_deepseek_bf16_logits_match_f32_host();
     printf("  test_route_deepseek_bf16_logits_match_f32_host: passed\n");
 
@@ -1186,6 +1273,10 @@ int main(void) {
     printf("  test_route_deepseek_rejects_tiny_group: passed\n");
     test_route_deepseek_rejects_null_bias();
     printf("  test_route_deepseek_rejects_null_bias: passed\n");
+    test_route_deepseek_rejects_bias_rank_ne_1();
+    printf("  test_route_deepseek_rejects_bias_rank_ne_1: passed\n");
+    test_route_deepseek_rejects_bias_last_dim_ne_E();
+    printf("  test_route_deepseek_rejects_bias_last_dim_ne_E: passed\n");
 
     test_route_deepseek_matches_mlx_lm_golden_vectors();
     printf("  test_route_deepseek_matches_mlx_lm_golden_vectors: passed\n");

@@ -118,7 +118,8 @@ int fwd_moe_route_softmax(mlx_array *inds, mlx_array *scores,
 
 /* DeepSeek / noaux_tc MoE gate (sigmoid + group top-k + correction bias).
    Family-agnostic: callers pass precomputed router logits [..., E] and
-   e_score_correction_bias [E] (required; pass zeros when absent).
+   e_score_correction_bias rank-1 [E] (required; pass zeros when absent;
+   multi-rank bias is rejected even if last dim is E).
    Selection uses biased sigmoid scores; returned weights are gathered from
    pre-bias sigmoid (orig_scores), then optional norm (only if top_k > 1)
    and * routed_scaling_factor. Out: owned inds [..., K] (int), scores

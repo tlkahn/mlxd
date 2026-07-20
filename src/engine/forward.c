@@ -1498,9 +1498,8 @@ int fwd_moe_route_deepseek(mlx_array *inds,
     if (p->n_group > 1 && experts_per_group < 2) return -1;
 
     int bias_ndim = (int)mlx_array_ndim(e_score_correction_bias);
-    if (bias_ndim < 1) return -1;
-    if (mlx_array_dim(e_score_correction_bias, bias_ndim - 1) != E)
-        return -1;
+    if (bias_ndim != 1) return -1;
+    if (mlx_array_dim(e_score_correction_bias, 0) != E) return -1;
 
     int rc = -1;
     int top_k = p->top_k;
