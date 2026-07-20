@@ -1475,6 +1475,212 @@ cleanup:
     return rc;
 }
 
+int fwd_moe_route_deepseek(mlx_array *inds,
+                           mlx_array *scores,
+                           mlx_array router_logits,
+                           mlx_array e_score_correction_bias,
+                           const fwd_moe_route_deepseek_params_t *p,
+                           mlx_stream s) {
+    if (!inds || !scores || !p || !router_logits.ctx ||
+        !e_score_correction_bias.ctx)
+        return -1;
+    if (p->top_k < 1 || p->n_group < 1 || p->topk_group < 1)
+        return -1;
+    if (p->topk_group > p->n_group) return -1;
+
+    int ndim = (int)mlx_array_ndim(router_logits);
+    if (ndim < 1) return -1;
+    int E = mlx_array_dim(router_logits, ndim - 1);
+    if (p->top_k > E) return -1;
+    if (E % p->n_group != 0) return -1;
+    int experts_per_group = E / p->n_group;
+    /* top-2 group score is undefined when a group has < 2 experts */
+    if (p->n_group > 1 && experts_per_group < 2) return -1;
+
+    int bias_ndim = (int)mlx_array_ndim(e_score_correction_bias);
+    if (bias_ndim < 1) return -1;
+    if (mlx_array_dim(e_score_correction_bias, bias_ndim - 1) != E)
+        return -1;
+
+    int rc = -1;
+    int top_k = p->top_k;
+    int n_group = p->n_group;
+    int topk_group = p->topk_group;
+
+    mlx_array gates_f32 = mlx_array_new();
+    mlx_array bias_f32 = mlx_array_new();
+    mlx_array orig_scores = mlx_array_new();
+    mlx_array scores_sel = mlx_array_new();
+    mlx_array unflat = mlx_array_new();
+    mlx_array top2 = mlx_array_new();
+    mlx_array group_scores = mlx_array_new();
+    mlx_array group_part = mlx_array_new();
+    mlx_array group_idx = mlx_array_new();
+    mlx_array group_idx_sg = mlx_array_new();
+    mlx_array zero_v = mlx_array_new();
+    mlx_array masked = mlx_array_new();
+    mlx_array flat = mlx_array_new();
+    mlx_array neg = mlx_array_new();
+    mlx_array partitioned = mlx_array_new();
+    mlx_array inds_tmp = mlx_array_new();
+    mlx_array top_w = mlx_array_new();
+    mlx_array weight_sum = mlx_array_new();
+    mlx_array scores_tmp = mlx_array_new();
+    mlx_array scale_v = mlx_array_new();
+    mlx_array scores_scaled = mlx_array_new();
+
+    /* S8: cast logits to f32 before sigmoid. */
+    if (!MLXB_CHECK(mlx_astype(&gates_f32, router_logits, MLX_FLOAT32, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_sigmoid(&orig_scores, gates_f32, s))) goto cleanup;
+
+    /* Bias also in f32 for the add. */
+    if (mlx_array_dtype(e_score_correction_bias) != MLX_FLOAT32) {
+        if (!MLXB_CHECK(mlx_astype(&bias_f32, e_score_correction_bias,
+                                   MLX_FLOAT32, s)))
+            goto cleanup;
+    } else {
+        if (!MLXB_CHECK(mlx_array_set(&bias_f32, e_score_correction_bias)))
+            goto cleanup;
+    }
+
+    /* Selection uses biased scores; returned weights use orig_scores (S1). */
+    if (!MLXB_CHECK(mlx_add(&scores_sel, orig_scores, bias_f32, s)))
+        goto cleanup;
+
+    /* Working tensor for selection; may be rewritten by the group path. */
+    mlx_array sel = scores_sel;
+
+    if (n_group > 1) {
+        int ug_shape[2] = {n_group, experts_per_group};
+        if (!MLXB_CHECK(mlx_unflatten(&unflat, scores_sel, -1, ug_shape, 2, s)))
+            goto cleanup;
+
+        int k_drop = n_group - topk_group;
+        /* D7: k_drop == 0 => skip zeroing (topk_group == n_group). */
+        if (k_drop > 0) {
+            /* Group score = sum of top-2 experts inside the group (S5). */
+            if (!MLXB_CHECK(mlx_topk_axis(&top2, unflat, 2, -1, s)))
+                goto cleanup;
+            if (!MLXB_CHECK(mlx_sum_axis(&group_scores, top2, -1, true, s)))
+                goto cleanup;
+
+            /* Indices of the k_drop worst groups (axis = group axis = -2). */
+            if (!MLXB_CHECK(mlx_argpartition_axis(&group_part, group_scores,
+                                                 k_drop - 1, -2, s)))
+                goto cleanup;
+
+            int g_ndim = (int)mlx_array_ndim(group_part);
+            if (g_ndim < 2 || g_ndim > 8) goto cleanup;
+            {
+                int start[8], stop[8], strides[8];
+                for (int d = 0; d < g_ndim; d++) {
+                    start[d] = 0;
+                    strides[d] = 1;
+                    if (d == g_ndim - 2)
+                        stop[d] = k_drop;
+                    else
+                        stop[d] = mlx_array_dim(group_part, d);
+                }
+                if (!MLXB_CHECK(mlx_slice(&group_idx, group_part, start,
+                                          (size_t)g_ndim, stop, (size_t)g_ndim,
+                                          strides, (size_t)g_ndim, s)))
+                    goto cleanup;
+            }
+
+            /* S7: stop_gradient on group_idx for graph parity. */
+            if (!MLXB_CHECK(mlx_stop_gradient(&group_idx_sg, group_idx, s)))
+                goto cleanup;
+
+            mlx_array_free(zero_v);
+            zero_v = mlx_array_new_float(0.0f);
+            if (!MLXB_CHECK(mlx_put_along_axis(&masked, unflat, group_idx_sg,
+                                              zero_v, -2, s)))
+                goto cleanup;
+
+            if (!MLXB_CHECK(mlx_flatten(&flat, masked, -2, -1, s)))
+                goto cleanup;
+        } else {
+            if (!MLXB_CHECK(mlx_flatten(&flat, unflat, -2, -1, s)))
+                goto cleanup;
+        }
+        sel = flat;
+    }
+
+    /* Top-k largest on (possibly group-masked) biased scores. */
+    if (!MLXB_CHECK(mlx_negative(&neg, sel, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_argpartition_axis(&partitioned, neg, top_k - 1, -1, s)))
+        goto cleanup;
+
+    {
+        int p_ndim = (int)mlx_array_ndim(partitioned);
+        if (p_ndim < 1 || p_ndim > 8) goto cleanup;
+        int start[8], stop[8], strides[8];
+        for (int d = 0; d < p_ndim; d++) {
+            start[d] = 0;
+            strides[d] = 1;
+            stop[d] = (d == p_ndim - 1) ? top_k : mlx_array_dim(partitioned, d);
+        }
+        if (!MLXB_CHECK(mlx_slice(&inds_tmp, partitioned, start, (size_t)p_ndim,
+                                  stop, (size_t)p_ndim, strides, (size_t)p_ndim,
+                                  s)))
+            goto cleanup;
+    }
+
+    /* S1: gather weights from pre-bias sigmoid. */
+    if (!MLXB_CHECK(mlx_take_along_axis(&top_w, orig_scores, inds_tmp, -1, s)))
+        goto cleanup;
+
+    /* S2: norm only when top_k > 1 and flag set (differs from softmax route). */
+    if (top_k > 1 && p->norm_topk_prob) {
+        if (!MLXB_CHECK(mlx_sum_axis(&weight_sum, top_w, -1, true, s)))
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_divide(&scores_tmp, top_w, weight_sum, s)))
+            goto cleanup;
+    } else {
+        if (!MLXB_CHECK(mlx_contiguous(&scores_tmp, top_w, false, s)))
+            goto cleanup;
+    }
+
+    /* S3: always multiply final scores by routed_scaling_factor. */
+    mlx_array_free(scale_v);
+    scale_v = mlx_array_new_float(p->routed_scaling_factor);
+    if (!MLXB_CHECK(mlx_multiply(&scores_scaled, scores_tmp, scale_v, s)))
+        goto cleanup;
+
+    mlx_array_free(*inds);
+    mlx_array_free(*scores);
+    *inds = inds_tmp;
+    *scores = scores_scaled;
+    inds_tmp = mlx_array_new();
+    scores_scaled = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(scores_scaled);
+    mlx_array_free(scale_v);
+    mlx_array_free(scores_tmp);
+    mlx_array_free(weight_sum);
+    mlx_array_free(top_w);
+    mlx_array_free(inds_tmp);
+    mlx_array_free(partitioned);
+    mlx_array_free(neg);
+    mlx_array_free(flat);
+    mlx_array_free(masked);
+    mlx_array_free(zero_v);
+    mlx_array_free(group_idx_sg);
+    mlx_array_free(group_idx);
+    mlx_array_free(group_part);
+    mlx_array_free(group_scores);
+    mlx_array_free(top2);
+    mlx_array_free(unflat);
+    mlx_array_free(scores_sel);
+    mlx_array_free(orig_scores);
+    mlx_array_free(bias_f32);
+    mlx_array_free(gates_f32);
+    return rc;
+}
+
 int fwd_gather_expert_linear(mlx_array *out, mlx_array x, mlx_array inds,
                              const weight_triplet_t *tri,
                              mlx_array lhs_indices, bool sorted,

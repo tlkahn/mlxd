@@ -22,6 +22,17 @@ static void test_structs_zero_init(void) {
     assert(mw.switch_gate.weight.ctx == NULL);
 }
 
+static void test_deepseek_params_zero_init(void) {
+    fwd_moe_route_deepseek_params_t p;
+    memset(&p, 0, sizeof(p));
+    assert(sizeof(fwd_moe_route_deepseek_params_t) > 0);
+    assert(p.top_k == 0);
+    assert(p.n_group == 0);
+    assert(p.topk_group == 0);
+    assert(p.routed_scaling_factor == 0.f);
+    assert(!p.norm_topk_prob);
+}
+
 static void test_null_args_return_error(void) {
     mlx_array dummy = mlx_array_new();
     mlx_stream s = {.ctx = NULL};
@@ -43,11 +54,40 @@ static void test_null_args_return_error(void) {
     mlx_array_free(dummy);
 }
 
+static void test_route_deepseek_null_args(void) {
+    mlx_array dummy = mlx_array_new();
+    mlx_stream s = {.ctx = NULL};
+    fwd_moe_route_deepseek_params_t p = {
+        .top_k = 1,
+        .n_group = 1,
+        .topk_group = 1,
+        .routed_scaling_factor = 1.f,
+        .norm_topk_prob = false,
+    };
+
+    assert(fwd_moe_route_deepseek(NULL, &dummy, dummy, dummy, &p, s) == -1);
+    assert(fwd_moe_route_deepseek(&dummy, NULL, dummy, dummy, &p, s) == -1);
+    assert(fwd_moe_route_deepseek(&dummy, &dummy, (mlx_array){.ctx = NULL},
+                                  dummy, &p, s) == -1);
+    assert(fwd_moe_route_deepseek(&dummy, &dummy, dummy,
+                                  (mlx_array){.ctx = NULL}, &p, s) == -1);
+    assert(fwd_moe_route_deepseek(&dummy, &dummy, dummy, dummy, NULL, s) == -1);
+
+    p.top_k = 0;
+    assert(fwd_moe_route_deepseek(&dummy, &dummy, dummy, dummy, &p, s) == -1);
+
+    mlx_array_free(dummy);
+}
+
 int main(void) {
     test_structs_zero_init();
     printf("  test_structs_zero_init: passed\n");
+    test_deepseek_params_zero_init();
+    printf("  test_deepseek_params_zero_init: passed\n");
     test_null_args_return_error();
     printf("  test_null_args_return_error: passed\n");
+    test_route_deepseek_null_args();
+    printf("  test_route_deepseek_null_args: passed\n");
     printf("all test_fwd_moe_api tests passed\n");
     return 0;
 }
