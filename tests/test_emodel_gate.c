@@ -31,7 +31,7 @@ static void test_reject_unsupported_family(void) {
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
     assert(strcmp(err,
-        "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)") == 0);
+        "unsupported model family (only qwen3/llama/gemma4/qwen3_5/mistral dense supported)") == 0);
 }
 
 static void test_reject_attention_bias(void) {
@@ -126,7 +126,7 @@ static void test_reject_all_other_families(void) {
     static const model_family_t others[] = {
         MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3,
         MODEL_QWEN2, MODEL_QWEN3_5_MOE,
-        MODEL_MISTRAL, MODEL_LFM2,
+        MODEL_LFM2,
         MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
     };
     for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
@@ -135,7 +135,7 @@ static void test_reject_all_other_families(void) {
         char err[256] = {0};
         assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
         assert(strcmp(err,
-            "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)") == 0);
+            "unsupported model family (only qwen3/llama/gemma4/qwen3_5/mistral dense supported)") == 0);
     }
 }
 
@@ -215,7 +215,7 @@ static void test_qwen3_5_moe_family_still_rejected(void) {
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
     assert(strcmp(err,
-        "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)") == 0);
+        "unsupported model family (only qwen3/llama/gemma4/qwen3_5/mistral dense supported)") == 0);
 }
 
 static void test_qwen3_5_rejects_linear_heads(void) {
@@ -361,6 +361,93 @@ static void test_llama_reject_sliding_window(void) {
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
     assert(strcmp(err, "sliding window attention not supported") == 0);
+}
+
+/* --- mistral-specific gate tests (Stage D2) ------------------------------ */
+
+static model_config_t make_mistral_supported(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_MISTRAL;
+    cfg.hidden_act = HIDDEN_ACT_SILU;
+    cfg.partial_rotary_factor = 1.0f;
+    cfg.has_sliding_window = true;
+    cfg.sliding_window = 4096;
+    cfg.sliding_window_pattern = 0;
+    cfg.has_qk_norm = false;
+    return cfg;
+}
+
+static void test_mistral_windowed_passes(void) {
+    model_config_t cfg = make_mistral_supported();
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+    assert(err[0] == '\0');
+}
+
+static void test_mistral_null_window_passes(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.has_sliding_window = false;
+    cfg.sliding_window = 0;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+    assert(err[0] == '\0');
+}
+
+static void test_mistral_reject_qk_norm(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.has_qk_norm = true;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "qk_norm not supported for mistral") == 0);
+}
+
+static void test_mistral_reject_attention_bias(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.attention_bias = true;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "attention_bias not supported") == 0);
+}
+
+static void test_mistral_reject_moe(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.num_experts = 8;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "MoE models not supported") == 0);
+}
+
+static void test_mistral_reject_non_silu(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.hidden_act = HIDDEN_ACT_GELU_APPROX;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "only SiLU activation supported") == 0);
+}
+
+static void test_mistral_reject_partial_rotary(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.partial_rotary_factor = 0.5f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "partial rotary embedding not supported") == 0);
+}
+
+static void test_mistral_reject_attn_output_gate(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.attn_output_gate = true;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "attention output gate not supported") == 0);
+}
+
+static void test_mistral_reject_rope_scaling(void) {
+    model_config_t cfg = make_mistral_supported();
+    cfg.rope_scaling_type = "linear";
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "RoPE scaling not supported") == 0);
 }
 
 static void test_llama_reject_moe(void) {
@@ -672,6 +759,33 @@ int main(void) {
 
     test_llama_reject_sliding_window();
     printf("  test_llama_reject_sliding_window: passed\n");
+
+    test_mistral_windowed_passes();
+    printf("  test_mistral_windowed_passes: passed\n");
+
+    test_mistral_null_window_passes();
+    printf("  test_mistral_null_window_passes: passed\n");
+
+    test_mistral_reject_qk_norm();
+    printf("  test_mistral_reject_qk_norm: passed\n");
+
+    test_mistral_reject_attention_bias();
+    printf("  test_mistral_reject_attention_bias: passed\n");
+
+    test_mistral_reject_moe();
+    printf("  test_mistral_reject_moe: passed\n");
+
+    test_mistral_reject_non_silu();
+    printf("  test_mistral_reject_non_silu: passed\n");
+
+    test_mistral_reject_partial_rotary();
+    printf("  test_mistral_reject_partial_rotary: passed\n");
+
+    test_mistral_reject_attn_output_gate();
+    printf("  test_mistral_reject_attn_output_gate: passed\n");
+
+    test_mistral_reject_rope_scaling();
+    printf("  test_mistral_reject_rope_scaling: passed\n");
 
     test_llama_reject_moe();
     printf("  test_llama_reject_moe: passed\n");

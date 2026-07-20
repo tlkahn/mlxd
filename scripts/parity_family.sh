@@ -24,7 +24,10 @@ family_id() {
         gemma3)  echo "" ;;
         qwen2)   echo "" ;;
         llama)   echo "mlx-community/TinyLlama-1.1B-Chat-v1.0-4bit" ;;
-        mistral) echo "" ;;
+        # D2: v0.1-era checkpoint with sliding_window=4096 (not null). Short-context
+        # parity validates the family path; window-boundary math is covered by
+        # tiny_mistral GPU tests (CI will not exceed 4096 tokens).
+        mistral) echo "mlx-community/Mistral-7B-Instruct-v0.1-4bit-mlx" ;;
         gemma4)  echo "mlx-community/gemma-4-e4b-it-4bit" ;;
         # D6 records the smallest dense 4-bit Qwen3.5 id. Real checkpoints are
         # hybrid (linear + full attention). mlxd Stage D rejects linear

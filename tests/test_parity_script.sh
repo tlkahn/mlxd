@@ -634,6 +634,13 @@ else
     fail "wrapper-skip-absent-gemma4" "expected exit 0 + skipped:dir absent (rc=$rc)"
 fi
 
+out=$(MLXD_PARITY_CKPT_ROOT=/tmp sh "$WRAPPER" mistral 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped.*checkpoint dir absent'; then
+    pass "wrapper-skip-absent-mistral"
+else
+    fail "wrapper-skip-absent-mistral" "expected exit 0 + skipped:dir absent (rc=$rc)"
+fi
+
 out=$(MLXD_PARITY_CKPT_ROOT=/tmp sh "$WRAPPER" qwen3_5 2>&1) && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped.*checkpoint dir absent'; then
     pass "wrapper-skip-absent-qwen3_5"
