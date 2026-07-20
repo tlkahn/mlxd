@@ -83,6 +83,49 @@ void message_content_free(message_content_t *content) {
     free(content->parts);
 }
 
+/* OpenAI content-part union: only type == "text" carries prompt text. */
+static bool content_part_is_text(const content_part_t *p) {
+    return p && p->type && p->text && strcmp(p->type, "text") == 0;
+}
+
+char *message_content_text(const message_content_t *c) {
+    if (!c)
+        return NULL;
+
+    switch (c->kind) {
+    case CONTENT_NONE:
+        return NULL;
+
+    case CONTENT_STRING:
+        if (!c->string)
+            return NULL;
+        return strdup(c->string);
+
+    case CONTENT_PARTS: {
+        size_t total = 0;
+        for (int i = 0; i < c->part_count; i++) {
+            if (!content_part_is_text(&c->parts[i]))
+                continue;
+            total += strlen(c->parts[i].text);
+        }
+        char *out = malloc(total + 1);
+        if (!out)
+            return NULL;
+        size_t off = 0;
+        for (int i = 0; i < c->part_count; i++) {
+            if (!content_part_is_text(&c->parts[i]))
+                continue;
+            size_t n = strlen(c->parts[i].text);
+            memcpy(out + off, c->parts[i].text, n);
+            off += n;
+        }
+        out[off] = '\0';
+        return out;
+    }
+    }
+    return NULL;
+}
+
 void message_free(message_t *msg) {
     if (!msg)
         return;

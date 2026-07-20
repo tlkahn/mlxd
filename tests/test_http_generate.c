@@ -979,6 +979,84 @@ static void test_enable_thinking_true(void) {
     gen_fixture_down(&f);
 }
 
+
+/* --- Issue #126: content-part array format must not fail template render -- */
+
+/* Real HF templates call string methods on message.content; array content
+ * makes those fail. TRIVIAL_TMPL alone silently renders arrays as empty. */
+#define PARTS_TMPL "{{ messages[0].content.strip() }}"
+
+static void test_chat_content_parts_array_ok(void) {
+    gen_fixture_t f = gen_fixture_up(true, true, PARTS_TMPL, 0);
+
+    /* Single text part array - the SDK default that previously 400'd */
+    {
+        http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+            "{\"model\":\"gpt2\",\"messages\":["
+            "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}"
+            "],\"max_tokens\":8}");
+        assert(resp.status == 200);
+
+        yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(root, "object")),
+                      "chat.completion") == 0);
+        yyjson_val *choices = yyjson_obj_get(root, "choices");
+        assert(yyjson_arr_size(choices) == 1);
+        yyjson_val *msg = yyjson_obj_get(yyjson_arr_get(choices, 0), "message");
+        assert(msg != NULL);
+        const char *content = yyjson_get_str(yyjson_obj_get(msg, "content"));
+        assert(content != NULL);
+        assert(strcmp(content, "hello") == 0);
+        yyjson_doc_free(doc);
+        http_client_response_free(&resp);
+    }
+
+    /* Multi-part text still 200 with flattened content */
+    {
+        http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+            "{\"model\":\"gpt2\",\"messages\":["
+            "{\"role\":\"user\",\"content\":["
+            "{\"type\":\"text\",\"text\":\"hel\"},"
+            "{\"type\":\"text\",\"text\":\"lo\"}"
+            "]}"
+            "],\"max_tokens\":8}");
+        assert(resp.status == 200);
+
+        yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        yyjson_val *msg = yyjson_obj_get(
+            yyjson_arr_get(yyjson_obj_get(root, "choices"), 0), "message");
+        const char *content = yyjson_get_str(yyjson_obj_get(msg, "content"));
+        assert(content != NULL);
+        assert(strcmp(content, "hello") == 0);
+        yyjson_doc_free(doc);
+        http_client_response_free(&resp);
+    }
+
+    /* Plain string still works with the same template */
+    {
+        http_client_response_t resp = post_json(f.port, "/v1/chat/completions",
+            "{\"model\":\"gpt2\",\"messages\":["
+            "{\"role\":\"user\",\"content\":\"hello\"}"
+            "],\"max_tokens\":8}");
+        assert(resp.status == 200);
+        yyjson_doc *doc = yyjson_read(resp.body, resp.body_len, 0);
+        assert(doc != NULL);
+        yyjson_val *msg = yyjson_obj_get(
+            yyjson_arr_get(yyjson_obj_get(yyjson_doc_get_root(doc), "choices"), 0),
+            "message");
+        const char *content = yyjson_get_str(yyjson_obj_get(msg, "content"));
+        assert(content && strcmp(content, "hello") == 0);
+        yyjson_doc_free(doc);
+        http_client_response_free(&resp);
+    }
+
+    gen_fixture_down(&f);
+}
+
 /* --- enable_thinking: non-boolean -> 400 --------------------------------- */
 
 static void test_enable_thinking_non_boolean_400(void) {
@@ -1039,6 +1117,7 @@ int main(void) {
     test_enable_thinking_false();
     test_enable_thinking_true();
     test_enable_thinking_non_boolean_400();
+    test_chat_content_parts_array_ok();
     printf("test_http_generate: all passed\n");
 
     unsetenv("MLXD_CACHE_DIR");

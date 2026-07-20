@@ -29,6 +29,13 @@ typedef struct {
 int  chat_completion_request_parse(chat_completion_request_t *req, yyjson_val *root, const char **err);
 void chat_completion_request_free(chat_completion_request_t *req);
 
+/* Serialize messages for chat-template input: content is always string or null
+ * (content-part arrays are flattened via message_content_text).
+ * Returns NULL on OOM or on CONTENT_STRING with NULL string (parse-OOM shape).
+ * Intentional absent/null content is CONTENT_NONE and serializes as JSON null. */
+yyjson_mut_val *messages_template_serialize(const message_t *msgs, int count,
+                                            yyjson_mut_doc *doc);
+
 /* --- Chat completion response --------------------------------------------- */
 
 /* One candidate in a sampled token's top_logprobs list. */
