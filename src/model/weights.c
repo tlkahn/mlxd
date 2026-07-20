@@ -280,6 +280,16 @@ static const weights_family_desc_t family_descs[] = {
         .layer_biases   = NULL,
         .extra_tensors  = NULL,
     },
+    {
+        /* mistral: llama-shaped dense set (no qk-norm). Sliding window is a
+           forward/config concern and does not add weight tensor names. */
+        .family         = MODEL_MISTRAL,
+        .layer_matmuls  = dense_std_layer_matmuls,
+        .layer_norms    = dense_std_layer_norms,
+        .layer_qk_norms = NULL,
+        .layer_biases   = NULL,
+        .extra_tensors  = NULL,
+    },
 };
 
 static const weights_family_desc_t *family_desc(model_family_t fam) {

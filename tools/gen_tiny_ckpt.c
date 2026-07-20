@@ -271,6 +271,25 @@ static const recipe_t LLAMA3 = {
     .fixture_base = "tiny_llama3",
 };
 
+/* mistral: llama-shaped tensors + uniform sliding window (pattern=0 => all
+   local). rope_theta=10000, no rope_scaling. sliding_window=8 so GPU tests
+   can cross the boundary cheaply. */
+static const recipe_t MISTRAL = {
+    .model_type = "mistral",
+    .vocab = 256, .hidden = 64, .heads = 4, .kv_heads = 2,
+    .head_dim = 16, .inter = 128, .layers = 2,
+    .group_size = 32, .quant_bits = 4,
+    .max_position_embeddings = 512,
+    .rms_norm_eps = 1e-6, .rope_theta = 10000.0,
+    .sliding_window = 8, .sliding_window_pattern = 0,
+    .query_pre_attn_scalar = 0, .rope_local_base_freq = 0,
+    .has_lm_head = true, .tie_word_embeddings = false,
+    .top = LLAMA3_TOP, .n_top = LEN(LLAMA3_TOP),
+    .layer = LLAMA3_LAYER, .n_layer = LEN(LLAMA3_LAYER),
+    .emit_dense = true, .emit_sharded = false, .emit_tied = true,
+    .fixture_base = "tiny_mistral",
+};
+
 /* Pure-dense qwen3_5: full-attn deltas only (gate + partial rope).
    No linear_attn tensors / hybrid layer_types - those are Stage E. */
 static const recipe_t QWEN3_5 = {
@@ -521,8 +540,10 @@ static void write_gemma4_config(const char *dir) {
     yyjson_mut_doc_free(doc);
 }
 
-static const recipe_t *RECIPES[] = { &QWEN3, &GEMMA3, &LLAMA3, &QWEN3_5 };
-static const int N_RECIPES = 4;
+static const recipe_t *RECIPES[] = {
+    &QWEN3, &GEMMA3, &LLAMA3, &MISTRAL, &QWEN3_5,
+};
+static const int N_RECIPES = 5;
 
 /* --- Build tensors (table-driven) ---------------------------------------- */
 
@@ -594,8 +615,12 @@ static void write_config_json(const recipe_t *r, const char *dir,
 
     if (r->sliding_window > 0) {
         yyjson_mut_obj_add_int(doc, root, "sliding_window", r->sliding_window);
-        yyjson_mut_obj_add_int(doc, root, "sliding_window_pattern",
-                               r->sliding_window_pattern);
+        /* pattern==0 means all-local (mistral). get_dim_int rejects 0, and real
+           Mistral configs omit the key - only emit when pattern > 0. */
+        if (r->sliding_window_pattern > 0) {
+            yyjson_mut_obj_add_int(doc, root, "sliding_window_pattern",
+                                   r->sliding_window_pattern);
+        }
     }
     if (r->query_pre_attn_scalar > 0)
         yyjson_mut_obj_add_int(doc, root, "query_pre_attn_scalar",

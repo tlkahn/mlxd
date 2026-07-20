@@ -15,8 +15,9 @@
 
 /* Flags that relax reject_dense_common for families that need the feature. */
 enum {
-    REJECT_ALLOW_PARTIAL_ROPE = 1 << 0, /* skip partial_rotary_factor != 1 */
-    REJECT_ALLOW_ATTN_GATE    = 1 << 1, /* skip attn_output_gate reject */
+    REJECT_ALLOW_PARTIAL_ROPE    = 1 << 0, /* skip partial_rotary_factor != 1 */
+    REJECT_ALLOW_ATTN_GATE       = 1 << 1, /* skip attn_output_gate reject */
+    REJECT_ALLOW_SLIDING_WINDOW  = 1 << 2, /* skip has_sliding_window reject */
 };
 
 static int reject_dense_common(const model_config_t *cfg,
@@ -24,8 +25,9 @@ static int reject_dense_common(const model_config_t *cfg,
                                 unsigned flags) {
     REJECT(cfg->attention_bias,
            "attention_bias not supported");
-    REJECT(cfg->has_sliding_window,
-           "sliding window attention not supported");
+    if (!(flags & REJECT_ALLOW_SLIDING_WINDOW))
+        REJECT(cfg->has_sliding_window,
+               "sliding window attention not supported");
     REJECT(cfg->num_experts > 0,
            "MoE models not supported");
     REJECT(cfg->has_hybrid_layers,
@@ -78,6 +80,19 @@ int engine_model_check_supported(const model_config_t *cfg,
         }
         REJECT(cfg->has_qk_norm,
                "qk_norm not supported for llama");
+        return 0;
+
+    case MODEL_MISTRAL:
+        /* llama-shaped dense + optional uniform sliding window (pattern<=0
+           => all layers local via model_layer_is_global). v0.2+ null-window
+           configs are allowed and behave llama-identically. */
+        if (reject_dense_common(cfg, err, errlen,
+                                REJECT_ALLOW_SLIDING_WINDOW) != 0)
+            return -1;
+        REJECT(cfg->has_qk_norm,
+               "qk_norm not supported for mistral");
+        REJECT(cfg->rope_scaling_type != NULL,
+               "RoPE scaling not supported");
         return 0;
 
     case MODEL_GEMMA4:
@@ -150,7 +165,7 @@ int engine_model_check_supported(const model_config_t *cfg,
 
     default:
         REJECT(true,
-               "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)");
+               "unsupported model family (only qwen3/llama/gemma4/qwen3_5/mistral dense supported)");
     }
 }
 

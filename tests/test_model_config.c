@@ -577,11 +577,50 @@ static void test_sliding_window_and_layers(void) {
     /* mistral: sliding_window but no pattern - all layers are sliding, none global */
     rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_mistral");
     assert(rc == 0);
+    assert(cfg.family == MODEL_MISTRAL);
+    assert(cfg.has_sliding_window == true);
+    assert(cfg.sliding_window == 4096);
+    assert(cfg.sliding_window_pattern == 0);
+    assert(cfg.has_qk_norm == false);
+    assert(cfg.attention_bias == false);
+    assert(cfg.hidden_act == HIDDEN_ACT_SILU);
+    for (int i = 0; i < cfg.num_hidden_layers; i++)
+        assert(model_layer_is_global(&cfg, i) == false);
+    /* dense sample including 0 / mid / last for the 32-layer fixture */
     assert(model_layer_is_global(&cfg, 0) == false);
     assert(model_layer_is_global(&cfg, 4) == false);
     assert(model_layer_is_global(&cfg, 5) == false);
     assert(model_layer_is_global(&cfg, 11) == false);
+    assert(model_layer_is_global(&cfg, 31) == false);
     model_config_free(&cfg);
+
+    /* null-window mistral: no sliding window => all layers global */
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_window_null");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_MISTRAL);
+    assert(cfg.has_sliding_window == false);
+    assert(model_layer_is_global(&cfg, 0) == true);
+    assert(model_layer_is_global(&cfg, 5) == true);
+    assert(model_layer_is_global(&cfg, 11) == true);
+    model_config_free(&cfg);
+
+    /* synthetic: pattern=0 all-local; pattern=6 gemma-style (layer 5 global) */
+    {
+        model_config_t syn;
+        memset(&syn, 0, sizeof(syn));
+        syn.has_sliding_window = true;
+        syn.sliding_window = 8;
+        syn.sliding_window_pattern = 0;
+        syn.num_hidden_layers = 12;
+        assert(model_layer_is_global(&syn, 0) == false);
+        assert(model_layer_is_global(&syn, 5) == false);
+        assert(model_layer_is_global(&syn, 11) == false);
+
+        syn.sliding_window_pattern = 6;
+        assert(model_layer_is_global(&syn, 5) == true);
+        assert(model_layer_is_global(&syn, 4) == false);
+        assert(model_layer_is_global(&syn, 11) == true);
+    }
 
     /* gemma3 without explicit sliding_window_pattern key: family default fills 6 */
     rc = model_config_load(&cfg,
@@ -1022,6 +1061,36 @@ static void test_bert_explicit_head_dim_ignored(void) {
 
 /* --- Phase 3: tiny_gemma3 fixture config --------------------------------- */
 
+static void test_tiny_mistral_config(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/tiny_mistral");
+    assert(rc == 0);
+
+    assert(cfg.family == MODEL_MISTRAL);
+    assert(cfg.vocab_size == 256);
+    assert(cfg.hidden_size == 64);
+    assert(cfg.num_hidden_layers == 2);
+    assert(cfg.num_attention_heads == 4);
+    assert(cfg.num_key_value_heads == 2);
+    assert(cfg.head_dim == 16);
+    assert(cfg.intermediate_size == 128);
+
+    assert(cfg.has_sliding_window == true);
+    assert(cfg.sliding_window == 8);
+    assert(cfg.sliding_window_pattern == 0);
+    assert(cfg.has_qk_norm == false);
+    assert(cfg.attention_bias == false);
+    assert(cfg.hidden_act == HIDDEN_ACT_SILU);
+    assert(cfg.rope_theta == 10000.0f);
+    assert(cfg.rope_scaling_type == NULL);
+    assert(cfg.tie_word_embeddings == false);
+
+    for (int i = 0; i < cfg.num_hidden_layers; i++)
+        assert(model_layer_is_global(&cfg, i) == false);
+
+    model_config_free(&cfg);
+}
+
 static void test_tiny_gemma3_config(void) {
     model_config_t cfg;
     int rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/tiny_gemma3");
@@ -1189,6 +1258,7 @@ int main(void) {
     test_generation_config();
     test_float_overflow();
     test_bert_explicit_head_dim_ignored();
+    test_tiny_mistral_config();
     test_tiny_gemma3_config();
     test_tiny_gemma4_config();
     test_gemma4_family_defaults();
