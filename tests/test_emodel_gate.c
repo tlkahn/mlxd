@@ -148,22 +148,64 @@ static model_config_t make_qwen3_5_supported(void) {
     cfg.hidden_act = HIDDEN_ACT_SILU;
     cfg.attn_output_gate = true;
     cfg.partial_rotary_factor = 0.25f;
+    cfg.head_dim = 16; /* 16 * 0.25 = 4, even and >= 2 */
     cfg.has_qk_norm = true;
     cfg.num_experts = 0;
     cfg.linear_num_key_heads = 0;
     cfg.linear_num_value_heads = 0;
+    cfg.full_attention_interval = 0;
     return cfg;
 }
 
 static void test_qwen3_5_pure_dense_passes(void) {
     model_config_t cfg = make_qwen3_5_supported();
     char err[256] = {0};
+    assert(cfg.attn_output_gate == true);
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
     assert(err[0] == '\0');
+}
 
-    /* gate-off pure dense also allowed */
+static void test_qwen3_5_rejects_gate_off(void) {
+    model_config_t cfg = make_qwen3_5_supported();
     cfg.attn_output_gate = false;
-    cfg.partial_rotary_factor = 1.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "qwen3_5 requires attn_output_gate") != NULL);
+}
+
+static void test_qwen3_5_full_attention_interval(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    char err[256] = {0};
+
+    /* interval > 1 implies hybrid layers (is_linear when (idx+1)%interval != 0) */
+    cfg.full_attention_interval = 4;
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "full_attention_interval") != NULL);
+
+    /* interval == 1 is pure dense (every layer full-attn) */
+    cfg.full_attention_interval = 1;
+    memset(err, 0, sizeof(err));
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+
+    /* interval == 0 accepted (unset / no hybrid schedule) */
+    cfg.full_attention_interval = 0;
+    memset(err, 0, sizeof(err));
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+}
+
+static void test_qwen3_5_rejects_odd_rope_dims(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    /* head_dim=6, prf=0.5 -> dims=3 (odd); mx.fast.rope requires even >= 2 */
+    cfg.head_dim = 6;
+    cfg.partial_rotary_factor = 0.5f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial_rotary_factor yields invalid rope dims") != NULL);
+
+    /* even product stays accepted (16 * 0.25 = 4) */
+    cfg.head_dim = 16;
+    cfg.partial_rotary_factor = 0.25f;
+    memset(err, 0, sizeof(err));
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
 }
 
@@ -646,6 +688,15 @@ int main(void) {
 
     test_qwen3_5_pure_dense_passes();
     printf("  test_qwen3_5_pure_dense_passes: passed\n");
+
+    test_qwen3_5_rejects_gate_off();
+    printf("  test_qwen3_5_rejects_gate_off: passed\n");
+
+    test_qwen3_5_full_attention_interval();
+    printf("  test_qwen3_5_full_attention_interval: passed\n");
+
+    test_qwen3_5_rejects_odd_rope_dims();
+    printf("  test_qwen3_5_rejects_odd_rope_dims: passed\n");
 
     test_qwen3_5_moe_family_still_rejected();
     printf("  test_qwen3_5_moe_family_still_rejected: passed\n");

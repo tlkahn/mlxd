@@ -80,6 +80,17 @@ run_one() {
         return 0
     fi
 
+    # qwen3_5: real checkpoints are hybrid (linear + full attention). Stage D
+    # rejects linear attention at the support gate, so the recorded canonical
+    # id cannot run parity yet. Hard-skip when resolved via the family table /
+    # MLXD_PARITY_CKPT_ROOT path. MLXD_PARITY_CKPT_QWEN3_5 remains an escape
+    # hatch for a future dense checkpoint (checked above via _override).
+    # Stage E deletes this branch.
+    if [ "$_fam" = "qwen3_5" ] && [ -z "$_override" ]; then
+        printf 'skipped: qwen3_5 hybrid parity deferred to Stage E\n'
+        return 0
+    fi
+
     # gemma4-it: use chat-template parity. Raw completion on this instruct
     # checkpoint collapses into short token loops; mlx-serve's degenerate-loop
     # detector then stops early and creates length-only mismatches against

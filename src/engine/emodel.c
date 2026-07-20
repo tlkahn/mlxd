@@ -13,8 +13,15 @@
     } \
 } while (0)
 
+/* Flags that relax reject_dense_common for families that need the feature. */
+enum {
+    REJECT_ALLOW_PARTIAL_ROPE = 1 << 0, /* skip partial_rotary_factor != 1 */
+    REJECT_ALLOW_ATTN_GATE    = 1 << 1, /* skip attn_output_gate reject */
+};
+
 static int reject_dense_common(const model_config_t *cfg,
-                                char *err, size_t errlen) {
+                                char *err, size_t errlen,
+                                unsigned flags) {
     REJECT(cfg->attention_bias,
            "attention_bias not supported");
     REJECT(cfg->has_sliding_window,
@@ -31,10 +38,12 @@ static int reject_dense_common(const model_config_t *cfg,
            "scale_embeddings not supported");
     REJECT(cfg->has_pre_ff_norm,
            "pre-feedforward norm not supported");
-    REJECT(cfg->partial_rotary_factor != 1.0f,
-           "partial rotary embedding not supported");
-    REJECT(cfg->attn_output_gate,
-           "attention output gate not supported");
+    if (!(flags & REJECT_ALLOW_PARTIAL_ROPE))
+        REJECT(cfg->partial_rotary_factor != 1.0f,
+               "partial rotary embedding not supported");
+    if (!(flags & REJECT_ALLOW_ATTN_GATE))
+        REJECT(cfg->attn_output_gate,
+               "attention output gate not supported");
     return 0;
 }
 
@@ -44,13 +53,13 @@ int engine_model_check_supported(const model_config_t *cfg,
 
     switch (cfg->family) {
     case MODEL_QWEN3:
-        if (reject_dense_common(cfg, err, errlen) != 0) return -1;
+        if (reject_dense_common(cfg, err, errlen, 0) != 0) return -1;
         REJECT(cfg->rope_scaling_type != NULL,
                "RoPE scaling not supported");
         return 0;
 
     case MODEL_LLAMA:
-        if (reject_dense_common(cfg, err, errlen) != 0) return -1;
+        if (reject_dense_common(cfg, err, errlen, 0) != 0) return -1;
         REJECT(cfg->rope_scaling_type != NULL &&
                strcmp(cfg->rope_scaling_type, "linear") != 0 &&
                strcmp(cfg->rope_scaling_type, "llama3") != 0 &&
@@ -97,39 +106,41 @@ int engine_model_check_supported(const model_config_t *cfg,
         return 0;
 
     case MODEL_QWEN3_5: {
-        /* Pure-dense qwen3_5 only. Do not call reject_dense_common: it rejects
-           attn_output_gate and partial_rotary_factor != 1, both required here.
+        /* Pure-dense qwen3_5 only. Common dense rejects apply, but partial rope
+           and attn_output_gate are required features here (not rejects).
            Hybrid linear-attention / MoE stay Stage E. */
-        REJECT(cfg->attention_bias,
-               "attention_bias not supported");
-        REJECT(cfg->has_sliding_window,
-               "sliding window attention not supported");
-        REJECT(cfg->num_experts > 0,
-               "MoE models not supported");
+        if (reject_dense_common(cfg, err, errlen,
+                                REJECT_ALLOW_PARTIAL_ROPE |
+                                REJECT_ALLOW_ATTN_GATE) != 0)
+            return -1;
         REJECT(cfg->linear_num_key_heads > 0 || cfg->linear_num_value_heads > 0,
                "linear attention / hybrid layers not supported");
-        REJECT(cfg->has_hybrid_layers,
-               "hybrid layer architectures not supported");
         if (cfg->has_explicit_layer_types) {
             for (int i = 0; i < cfg->num_hidden_layers; i++) {
                 REJECT(!cfg->layer_is_global[i],
                        "linear attention / hybrid layers not supported");
             }
         }
-        REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
-               "only SiLU activation supported");
-        REJECT(cfg->norm_has_offset,
-               "norm_has_offset not supported");
-        REJECT(cfg->scale_embeddings,
-               "scale_embeddings not supported");
-        REJECT(cfg->has_pre_ff_norm,
-               "pre-feedforward norm not supported");
         REJECT(cfg->partial_rotary_factor <= 0.0f ||
                cfg->partial_rotary_factor > 1.0f,
                "partial_rotary_factor must be in (0, 1]");
+        /* mlx.fast.rope requires dims even and positive. Mirror mlx-lm's
+           int(head_dim * prf) and fail fast on odd/degenerate products. */
+        {
+            int dims = (int)((float)cfg->head_dim * cfg->partial_rotary_factor);
+            REJECT(dims < 2 || (dims & 1),
+                   "partial_rotary_factor yields invalid rope dims (must be even, >= 2)");
+        }
+        /* interval==0 unset, interval==1 pure dense (every layer full-attn).
+           interval>1 implies hybrid: is_linear = (layer_idx+1) % interval != 0. */
+        REJECT(cfg->full_attention_interval > 1,
+               "full_attention_interval > 1 implies hybrid layers; not supported");
         REJECT(cfg->rope_scaling_type != NULL,
                "RoPE scaling not supported");
-        /* attn_output_gate allowed (true or false) */
+        /* Gate is mandatory: mlx-lm gates unconditionally; no oracle or real
+           checkpoint for gate-off. Explicit false is parsed but unsupported. */
+        REJECT(!cfg->attn_output_gate,
+               "qwen3_5 requires attn_output_gate");
         return 0;
     }
 

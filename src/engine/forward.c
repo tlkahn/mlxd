@@ -477,7 +477,9 @@ cleanup:
 }
 
 /* RoPE dims for partial_rotary_factor on the full-attention path (qwen3_5).
-   Does not consult partial_rotary_factor_global (gemma4 freqs path). */
+   Does not consult partial_rotary_factor_global (gemma4 freqs path).
+   Mirrors mlx-lm int(head_dim * prf). The qwen3_5 support gate rejects
+   odd/degenerate products so dims reaching here are even and >= 2. */
 static int fwd_rope_dims_partial(const model_config_t *cfg, int head_dim) {
     float prf = cfg->partial_rotary_factor;
     if (prf <= 0.0f || prf > 1.0f)

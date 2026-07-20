@@ -11,8 +11,7 @@
   "rms_norm_eps": 1e-06,
   "hidden_act": "silu",
   "attention_bias": false,
-  "attn_output_gate": true,
-  "full_attention_interval": 1,
+  "attn_output_gate": false,
   "tie_word_embeddings": true,
   "rope_parameters": {
     "rope_type": "default",

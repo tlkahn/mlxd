@@ -57,6 +57,7 @@ typedef struct {
     /* qwen3_5 full-attn deltas (0 = unset / default) */
     bool attn_output_gate;
     double partial_rotary_factor; /* emit under rope_parameters when > 0 */
+    int full_attention_interval; /* 0 = do not emit; 1 = pure dense */
 
     const tensor_spec_t *top;   int n_top;
     const tensor_spec_t *layer; int n_layer;
@@ -284,6 +285,7 @@ static const recipe_t QWEN3_5 = {
     .has_lm_head = true, .tie_word_embeddings = false,
     .attn_output_gate = true,
     .partial_rotary_factor = 0.25,
+    .full_attention_interval = 1,
     .top = QWEN3_TOP, .n_top = LEN(QWEN3_TOP),
     .layer = QWEN3_LAYER, .n_layer = LEN(QWEN3_LAYER),
     .emit_dense = true, .emit_sharded = false, .emit_tied = true,
@@ -584,7 +586,10 @@ static void write_config_json(const recipe_t *r, const char *dir,
     yyjson_mut_obj_add_int(doc, root, "max_position_embeddings",
                            r->max_position_embeddings);
     yyjson_mut_obj_add_real(doc, root, "rms_norm_eps", r->rms_norm_eps);
-    yyjson_mut_obj_add_real(doc, root, "rope_theta", r->rope_theta);
+    /* When rope_parameters carries rope_theta (partial_rotary path), skip the
+       flat top-level duplicate to match real qwen3_5 configs. */
+    if (!(r->partial_rotary_factor > 0.0))
+        yyjson_mut_obj_add_real(doc, root, "rope_theta", r->rope_theta);
     yyjson_mut_obj_add_bool(doc, root, "tie_word_embeddings", tied);
 
     if (r->sliding_window > 0) {
@@ -614,6 +619,10 @@ static void write_config_json(const recipe_t *r, const char *dir,
 
     if (r->attn_output_gate)
         yyjson_mut_obj_add_bool(doc, root, "attn_output_gate", true);
+
+    if (r->full_attention_interval > 0)
+        yyjson_mut_obj_add_int(doc, root, "full_attention_interval",
+                               r->full_attention_interval);
 
     if (r->partial_rotary_factor > 0.0) {
         yyjson_mut_val *rp = yyjson_mut_obj(doc);

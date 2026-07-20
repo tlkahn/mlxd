@@ -450,6 +450,7 @@ static void test_qwen3_5_dense_full_and_hybrid(void) {
     assert(cfg.linear_num_value_heads == 0);
     assert(cfg.head_dim == 256);
     assert(cfg.rope_theta == 10000000.0f);
+    assert(cfg.full_attention_interval == 1);
     assert(cfg.has_explicit_layer_types == false);
     model_config_free(&cfg);
 
@@ -466,6 +467,43 @@ static void test_qwen3_5_dense_full_and_hybrid(void) {
     assert(cfg.has_explicit_layer_types == true);
     assert(cfg.layer_is_global[0] == false); /* linear_attention */
     assert(cfg.layer_is_global[3] == true);  /* full_attention */
+    model_config_free(&cfg);
+}
+
+/* Explicit attn_output_gate:false must survive parse (not clobbered by defaults).
+   Absent key still defaults to true (covered by model_config_qwen3_5). */
+/* tiny_qwen3_5 fixtures emit full_attention_interval:1 and rope_theta only
+   under rope_parameters (no flat duplicate). */
+static void test_tiny_qwen3_5_interval_and_rope(void) {
+    model_config_t cfg;
+    int rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/tiny_qwen3_5");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_QWEN3_5);
+    assert(cfg.full_attention_interval == 1);
+    assert(cfg.rope_theta == 10000000.0f);
+    assert(cfg.partial_rotary_factor == 0.25f);
+    model_config_free(&cfg);
+
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/tiny_qwen3_5_tied");
+    assert(rc == 0);
+    assert(cfg.full_attention_interval == 1);
+    assert(cfg.rope_theta == 10000000.0f);
+    model_config_free(&cfg);
+}
+
+static void test_qwen3_5_attn_output_gate_explicit_false(void) {
+    model_config_t cfg;
+    int rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_gate_off");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_QWEN3_5);
+    assert(cfg.attn_output_gate == false);
+    model_config_free(&cfg);
+
+    /* Absent key: default stays true */
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5");
+    assert(rc == 0);
+    assert(cfg.attn_output_gate == true);
     model_config_free(&cfg);
 }
 
@@ -1134,6 +1172,8 @@ int main(void) {
     test_family_defaults();
     test_qwen3_5_dense_vs_moe();
     test_qwen3_5_dense_full_and_hybrid();
+    test_qwen3_5_attn_output_gate_explicit_false();
+    test_tiny_qwen3_5_interval_and_rope();
     test_nested_text_config();
     test_sliding_window_and_layers();
     test_stage_e_dims();
