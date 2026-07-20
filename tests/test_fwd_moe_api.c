@@ -37,6 +37,7 @@ static void test_null_args_return_error(void) {
                                     (mlx_array){.ctx = NULL}, false,
                                     NULL, s) == -1);
     assert(fwd_switch_glu(NULL, dummy, dummy, NULL, NULL, NULL, NULL, s) == -1);
+    assert(fwd_moe_combine(NULL, dummy, dummy, dummy, NULL, NULL, s) == -1);
     assert(fwd_moe(NULL, dummy, NULL, NULL, NULL, s) == -1);
 
     mlx_array_free(dummy);

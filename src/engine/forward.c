@@ -1489,6 +1489,8 @@ int fwd_gather_expert_linear(mlx_array *out, mlx_array x, mlx_array inds,
     if (tri->quantized) {
         mlx_array biases = tri->biases.ctx ? tri->biases : fwd_null_array;
         /* R4: gather_qmm honors sorted; transpose=true for [E,out,in]. */
+        /* TODO(quant-mode): thread mode from triplet/cfg when non-affine (nvfp4)
+           lands; matches fwd_linear hardcode today. */
         if (!MLXB_CHECK(mlx_gather_qmm(
                 &result, x, tri->weight, tri->scales, biases,
                 lhs, inds, true,
@@ -1769,19 +1771,11 @@ cleanup:
     return rc;
 }
 
-int fwd_moe(mlx_array *out, mlx_array x,
-            const fwd_moe_weights_t *mw,
-            const fwd_moe_params_t *p,
-            const model_config_t *cfg,
-            mlx_stream s) {
-    if (!out || !mw || !p || !cfg || !x.ctx) return -1;
-    if (p->top_k < 1 || p->num_experts < 1 || p->top_k > p->num_experts)
-        return -1;
-    if (!fwd_triplet_present(&mw->router) ||
-        !fwd_triplet_present(&mw->switch_gate) ||
-        !fwd_triplet_present(&mw->switch_up) ||
-        !fwd_triplet_present(&mw->switch_down))
-        return -1;
+/* Shared residual / presence validation for fwd_moe and fwd_moe_combine. */
+static int fwd_moe_validate_weights(const fwd_moe_weights_t *mw) {
+    if (!mw) return -1;
+    /* Gate without shared is a struct footgun - reject explicitly. */
+    if (mw->has_shared_expert_gate && !mw->has_shared) return -1;
     if (mw->has_shared) {
         if (!fwd_triplet_present(&mw->shared_gate) ||
             !fwd_triplet_present(&mw->shared_up) ||
@@ -1791,12 +1785,22 @@ int fwd_moe(mlx_array *out, mlx_array x,
             !fwd_triplet_present(&mw->shared_expert_gate))
             return -1;
     }
+    return 0;
+}
+
+/* Score-combine + optional shared residual.
+   y_exp [B,S,K,H], scores [B,S,K] -> out [B,S,H]. */
+int fwd_moe_combine(mlx_array *out,
+                    mlx_array y_exp,
+                    mlx_array scores,
+                    mlx_array x,
+                    const fwd_moe_weights_t *mw,
+                    const model_config_t *cfg,
+                    mlx_stream s) {
+    if (!out || !mw || !cfg || !y_exp.ctx || !scores.ctx || !x.ctx) return -1;
+    if (fwd_moe_validate_weights(mw) != 0) return -1;
 
     int rc = -1;
-    mlx_array logits = mlx_array_new();
-    mlx_array inds = mlx_array_new();
-    mlx_array scores = mlx_array_new();
-    mlx_array y_exp = mlx_array_new();
     mlx_array scores_exp = mlx_array_new();
     mlx_array weighted = mlx_array_new();
     mlx_array routed = mlx_array_new();
@@ -1805,14 +1809,6 @@ int fwd_moe(mlx_array *out, mlx_array x,
     mlx_array gate_sig = mlx_array_new();
     mlx_array shared_gated = mlx_array_new();
     mlx_array result = mlx_array_new();
-
-    if (fwd_linear(&logits, x, &mw->router, cfg, s) != 0) goto cleanup;
-    if (fwd_moe_route_softmax(&inds, &scores, logits, p->top_k,
-                              p->norm_topk_prob, s) != 0)
-        goto cleanup;
-    if (fwd_switch_glu(&y_exp, x, inds, &mw->switch_gate, &mw->switch_up,
-                       &mw->switch_down, cfg, s) != 0)
-        goto cleanup;
 
     /* (y_exp * scores[..., None]).sum(-2) */
     if (!MLXB_CHECK(mlx_expand_dims(&scores_exp, scores, -1, s))) goto cleanup;
@@ -1859,6 +1855,51 @@ cleanup:
     mlx_array_free(routed);
     mlx_array_free(weighted);
     mlx_array_free(scores_exp);
+    return rc;
+}
+
+int fwd_moe(mlx_array *out, mlx_array x,
+            const fwd_moe_weights_t *mw,
+            const fwd_moe_params_t *p,
+            const model_config_t *cfg,
+            mlx_stream s) {
+    if (!out || !mw || !p || !cfg || !x.ctx) return -1;
+    if (p->top_k < 1 || p->num_experts < 1 || p->top_k > p->num_experts)
+        return -1;
+    if (!fwd_triplet_present(&mw->router) ||
+        !fwd_triplet_present(&mw->switch_gate) ||
+        !fwd_triplet_present(&mw->switch_up) ||
+        !fwd_triplet_present(&mw->switch_down))
+        return -1;
+    if (fwd_moe_validate_weights(mw) != 0) return -1;
+
+    int rc = -1;
+    mlx_array logits = mlx_array_new();
+    mlx_array inds = mlx_array_new();
+    mlx_array scores = mlx_array_new();
+    mlx_array y_exp = mlx_array_new();
+
+    if (fwd_linear(&logits, x, &mw->router, cfg, s) != 0) goto cleanup;
+
+    /* M2: num_experts must match router logits last dim. */
+    {
+        int ndim = (int)mlx_array_ndim(logits);
+        if (ndim < 1) goto cleanup;
+        int E = mlx_array_dim(logits, ndim - 1);
+        if (E != p->num_experts) goto cleanup;
+    }
+
+    if (fwd_moe_route_softmax(&inds, &scores, logits, p->top_k,
+                              p->norm_topk_prob, s) != 0)
+        goto cleanup;
+    if (fwd_switch_glu(&y_exp, x, inds, &mw->switch_gate, &mw->switch_up,
+                       &mw->switch_down, cfg, s) != 0)
+        goto cleanup;
+    if (fwd_moe_combine(out, y_exp, scores, x, mw, cfg, s) != 0)
+        goto cleanup;
+    rc = 0;
+
+cleanup:
     mlx_array_free(y_exp);
     mlx_array_free(scores);
     mlx_array_free(inds);

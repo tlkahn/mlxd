@@ -79,19 +79,25 @@ int fwd_rope_freqs_build(mlx_array *out, const model_config_t *cfg);
      dispatched via mlx_gather_qmm with transpose=true.
    - bf16 triplets: weight pre-shaped [E, in, out], dispatched via
      mlx_gather_mm (sorted_indices always false on mlx 0.31.2).
-   Optional pieces: pass NULL triplet pointer, or a zeroed triplet with
-   weight.ctx == NULL, to mean absent. */
+   - Expert stacks are bias-free today (no SwitchLinear bias[indices] path);
+     Qwen/DeepSeek MoE experts do not ship expert bias.
+   Presence is flag-driven on this struct:
+   - has_shared / has_shared_expert_gate select shared residual modes.
+   - Absent optional weights are zeroed triplets (weight.ctx == NULL), not
+     NULL pointers (fields are by value).
+   For fwd_switch_glu / fwd_gather_expert_linear args, pass a NULL
+   weight_triplet_t* or a zeroed triplet to mean absent. */
 typedef struct {
     weight_triplet_t router;            /* [E, H] or quant equiv via fwd_linear */
     weight_triplet_t switch_gate;       /* expert stack */
     weight_triplet_t switch_up;
     weight_triplet_t switch_down;
-    /* shared expert dense SwiGLU (non-stacked); all null => no shared */
+    /* shared expert dense SwiGLU (non-stacked); used when has_shared */
     weight_triplet_t shared_gate;
     weight_triplet_t shared_up;
     weight_triplet_t shared_down;
-    /* optional scalar gate for qwen-style shared; null => always-active
-       when has_shared is set */
+    /* optional scalar gate for qwen-style shared; always-active when
+       has_shared is set and has_shared_expert_gate is false */
     weight_triplet_t shared_expert_gate;
     bool has_shared;
     bool has_shared_expert_gate;
@@ -127,8 +133,21 @@ int fwd_switch_glu(mlx_array *out, mlx_array x, mlx_array inds,
                    const weight_triplet_t *down,
                    const model_config_t *cfg, mlx_stream s);
 
+/* Score-combine + optional shared residual.
+   y_exp [B,S,K,H], scores [B,S,K] -> out [B,S,H].
+   Weighted sum over K, then optional shared residual from mw flags.
+   x is required for shared expert(s). *out replaced only on success. */
+int fwd_moe_combine(mlx_array *out,
+                    mlx_array y_exp,
+                    mlx_array scores,
+                    mlx_array x,
+                    const fwd_moe_weights_t *mw,
+                    const model_config_t *cfg,
+                    mlx_stream s);
+
 /* Full MoE block. x [B,S,H] -> out [B,S,H]. Softmax route + switch +
-   score-combine + optional shared expert residual. */
+   score-combine + optional shared expert residual. Convenience wrapper
+   over route_softmax + switch_glu + combine. */
 int fwd_moe(mlx_array *out, mlx_array x,
             const fwd_moe_weights_t *mw,
             const fwd_moe_params_t *p,

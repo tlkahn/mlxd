@@ -365,7 +365,7 @@ static void test_gather_mm_bf16_matches_per_expert_matmul(void) {
 
 /* ---- Cycle 5: contiguous gotcha ---- */
 
-static void test_gather_qmm_lazy_slice_zeros_without_contiguous(void) {
+static void test_gather_qmm_contiguous_slice_matches_independent_quant(void) {
     /* Geometry near real 4-bit/gs64 layout so the strided path fires. */
     const int E = 16, M = 128, IN = 512, gs = 64, bits = 4;
     cfg_init_quant(bits, gs);
@@ -740,7 +740,57 @@ static void test_switch_glu_sort_threshold_s1_small_stays_decode_path(void) {
     weights_triplet_free(&gate);
 }
 
-/* ---- Cycle 8-10: fwd_moe ---- */
+/* R2 second disjunct: S==1 && total_inds >= 64 must sort. */
+static void test_switch_glu_sort_threshold_s1_large_uses_sorted_path(void) {
+    const int B = 1, S = 1, K = 64, E = 64, H = 32, MI = 32, gs = 32, bits = 4;
+    cfg_init_quant(bits, gs);
+    cfg.hidden_size = H;
+
+    weight_triplet_t gate, up, down;
+    build_quant_switch(&gate, &up, &down, E, H, MI, gs, bits);
+
+    float x_h[H];
+    for (int i = 0; i < H; i++) x_h[i] = 0.01f * (float)(i + 1);
+    mlx_array x = make_bf16(x_h, (int[]){B, S, H}, 3);
+
+    uint32_t idata[K];
+    for (int i = 0; i < K; i++) idata[i] = (uint32_t)(i % E);
+    mlx_array inds =
+        mlx_array_new_data(idata, (int[]){B, S, K}, 3, MLX_UINT32);
+
+    mlx_array got = mlx_array_new();
+    assert(fwd_switch_glu(&got, x, inds, &gate, &up, &down, &cfg, gpu) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(got)));
+    assert(mlx_array_ndim(got) == 4);
+    assert(mlx_array_dim(got, 0) == B);
+    assert(mlx_array_dim(got, 1) == S);
+    assert(mlx_array_dim(got, 2) == K);
+    assert(mlx_array_dim(got, 3) == H);
+
+    mlx_array ref = mlx_array_new();
+    switch_glu_ref_decode(&ref, x, inds, &gate, &up, &down);
+    assert(MLXB_CHECK(mlx_array_eval(ref)));
+
+    size_t n = (size_t)B * S * K * H;
+    float *gh = (float *)malloc(n * sizeof(float));
+    float *rh = (float *)malloc(n * sizeof(float));
+    read_f32(got, gh, n);
+    read_f32(ref, rh, n);
+    assert(max_abs_diff(gh, rh, n) < 0.08f);
+    assert(has_nonzero(gh, n, 1e-4f));
+
+    free(rh);
+    free(gh);
+    mlx_array_free(ref);
+    mlx_array_free(got);
+    mlx_array_free(inds);
+    mlx_array_free(x);
+    weights_triplet_free(&down);
+    weights_triplet_free(&up);
+    weights_triplet_free(&gate);
+}
+
+/* ---- Cycle 8-10: fwd_moe / fwd_moe_combine ---- */
 
 static weight_triplet_t make_router(int E, int H, int seed) {
     float *w = (float *)malloc((size_t)E * H * sizeof(float));
@@ -758,6 +808,158 @@ static weight_triplet_t make_dense_linear(int out, int in, int seed) {
     weight_triplet_t tri = clone_bf16_weight(w, (int[]){out, in}, 2);
     free(w);
     return tri;
+}
+
+static void test_fwd_moe_combine_matches_manual_weighted_sum(void) {
+    const int E = 4, H = 32, MI = 32, S = 2, K = 2, gs = 32, bits = 4;
+    cfg_init_quant(bits, gs);
+    cfg.hidden_size = H;
+
+    weight_triplet_t gate, up, down;
+    build_quant_switch(&gate, &up, &down, E, H, MI, gs, bits);
+
+    float x_h[S * H];
+    for (int i = 0; i < S * H; i++) x_h[i] = 0.01f * (float)(i + 1);
+    mlx_array x = make_bf16(x_h, (int[]){1, S, H}, 3);
+
+    /* Fixed logits -> known scores path. */
+    float logits_h[S * E];
+    for (int i = 0; i < S * E; i++)
+        logits_h[i] = 0.2f * (float)((i * 3) % 7);
+    mlx_array logits = make_bf16(logits_h, (int[]){1, S, E}, 3);
+
+    mlx_array inds = mlx_array_new(), scores = mlx_array_new();
+    assert(fwd_moe_route_softmax(&inds, &scores, logits, K, true, gpu) == 0);
+
+    mlx_array y_exp = mlx_array_new();
+    assert(fwd_switch_glu(&y_exp, x, inds, &gate, &up, &down, &cfg, gpu) == 0);
+
+    fwd_moe_weights_t mw;
+    memset(&mw, 0, sizeof(mw));
+    mw.has_shared = false;
+
+    mlx_array out = mlx_array_new();
+    assert(fwd_moe_combine(&out, y_exp, scores, x, &mw, &cfg, gpu) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(out)));
+    assert(mlx_array_ndim(out) == 3);
+    assert(mlx_array_dim(out, 0) == 1);
+    assert(mlx_array_dim(out, 1) == S);
+    assert(mlx_array_dim(out, 2) == H);
+
+    /* Manual ref: (y_exp * scores[..., None]).sum(-2) */
+    mlx_array scores_exp = mlx_array_new(), weighted = mlx_array_new(),
+              ref = mlx_array_new();
+    assert(MLXB_CHECK(mlx_expand_dims(&scores_exp, scores, -1, gpu)));
+    assert(MLXB_CHECK(mlx_multiply(&weighted, y_exp, scores_exp, gpu)));
+    assert(MLXB_CHECK(mlx_sum_axis(&ref, weighted, -2, false, gpu)));
+    assert(MLXB_CHECK(mlx_array_eval(ref)));
+
+    size_t n = (size_t)S * H;
+    float *oh = (float *)malloc(n * sizeof(float));
+    float *rh = (float *)malloc(n * sizeof(float));
+    read_f32(out, oh, n);
+    read_f32(ref, rh, n);
+    assert(max_abs_diff(oh, rh, n) < 0.05f);
+    assert(has_nonzero(oh, n, 1e-5f));
+
+    free(rh);
+    free(oh);
+    mlx_array_free(ref);
+    mlx_array_free(weighted);
+    mlx_array_free(scores_exp);
+    mlx_array_free(out);
+    mlx_array_free(y_exp);
+    mlx_array_free(scores);
+    mlx_array_free(inds);
+    mlx_array_free(logits);
+    mlx_array_free(x);
+    weights_triplet_free(&down);
+    weights_triplet_free(&up);
+    weights_triplet_free(&gate);
+}
+
+static void test_fwd_moe_combine_shared_always_active(void) {
+    const int E = 4, H = 32, MI = 32, SI = 24, S = 2, K = 2, gs = 32, bits = 4;
+    cfg_init_quant(bits, gs);
+    cfg.hidden_size = H;
+
+    weight_triplet_t gate, up, down;
+    build_quant_switch(&gate, &up, &down, E, H, MI, gs, bits);
+
+    float x_h[S * H];
+    for (int i = 0; i < S * H; i++) x_h[i] = 0.015f * (float)(i + 1);
+    mlx_array x = make_bf16(x_h, (int[]){1, S, H}, 3);
+
+    float logits_h[S * E];
+    for (int i = 0; i < S * E; i++)
+        logits_h[i] = 0.15f * (float)((i * 5) % 9);
+    mlx_array logits = make_bf16(logits_h, (int[]){1, S, E}, 3);
+
+    mlx_array inds = mlx_array_new(), scores = mlx_array_new();
+    assert(fwd_moe_route_softmax(&inds, &scores, logits, K, true, gpu) == 0);
+    mlx_array y_exp = mlx_array_new();
+    assert(fwd_switch_glu(&y_exp, x, inds, &gate, &up, &down, &cfg, gpu) == 0);
+
+    fwd_moe_weights_t mw;
+    memset(&mw, 0, sizeof(mw));
+    mw.shared_gate = make_dense_linear(SI, H, 80);
+    mw.shared_up = make_dense_linear(SI, H, 81);
+    mw.shared_down = make_dense_linear(H, SI, 82);
+    mw.has_shared = true;
+    mw.has_shared_expert_gate = false;
+
+    mlx_array out = mlx_array_new();
+    assert(fwd_moe_combine(&out, y_exp, scores, x, &mw, &cfg, gpu) == 0);
+    assert(MLXB_CHECK(mlx_array_eval(out)));
+
+    /* routed-only combine + dense swiglu residual */
+    fwd_moe_weights_t mw_r = mw;
+    mw_r.has_shared = false;
+    mlx_array routed = mlx_array_new();
+    assert(fwd_moe_combine(&routed, y_exp, scores, x, &mw_r, &cfg, gpu) == 0);
+
+    mlx_array g = mlx_array_new(), u = mlx_array_new(),
+              gate_s = mlx_array_new(), silu = mlx_array_new(),
+              mid = mlx_array_new(), shared = mlx_array_new(),
+              ref = mlx_array_new();
+    assert(fwd_linear(&g, x, &mw.shared_gate, &cfg, gpu) == 0);
+    assert(fwd_linear(&u, x, &mw.shared_up, &cfg, gpu) == 0);
+    assert(MLXB_CHECK(mlx_sigmoid(&gate_s, g, gpu)));
+    assert(MLXB_CHECK(mlx_multiply(&silu, g, gate_s, gpu)));
+    assert(MLXB_CHECK(mlx_multiply(&mid, silu, u, gpu)));
+    assert(fwd_linear(&shared, mid, &mw.shared_down, &cfg, gpu) == 0);
+    assert(MLXB_CHECK(mlx_add(&ref, routed, shared, gpu)));
+    assert(MLXB_CHECK(mlx_array_eval(ref)));
+
+    size_t n = (size_t)S * H;
+    float *oh = (float *)malloc(n * sizeof(float));
+    float *rh = (float *)malloc(n * sizeof(float));
+    read_f32(out, oh, n);
+    read_f32(ref, rh, n);
+    assert(max_abs_diff(oh, rh, n) < 0.08f);
+
+    free(rh);
+    free(oh);
+    mlx_array_free(ref);
+    mlx_array_free(shared);
+    mlx_array_free(mid);
+    mlx_array_free(silu);
+    mlx_array_free(gate_s);
+    mlx_array_free(u);
+    mlx_array_free(g);
+    mlx_array_free(routed);
+    mlx_array_free(out);
+    mlx_array_free(y_exp);
+    mlx_array_free(scores);
+    mlx_array_free(inds);
+    mlx_array_free(logits);
+    mlx_array_free(x);
+    weights_triplet_free(&mw.shared_down);
+    weights_triplet_free(&mw.shared_up);
+    weights_triplet_free(&mw.shared_gate);
+    weights_triplet_free(&down);
+    weights_triplet_free(&up);
+    weights_triplet_free(&gate);
 }
 
 static void test_fwd_moe_routed_only_shape_and_manual_parity(void) {
@@ -1061,6 +1263,79 @@ static void test_fwd_moe_error_hygiene(void) {
     mlx_array_free(x);
 }
 
+/* M2: num_experts must match router logits last dim. */
+static void test_fwd_moe_rejects_router_expert_count_mismatch(void) {
+    const int E_router = 4, E_claim = 8, H = 32, MI = 32, K = 2, gs = 32,
+              bits = 4;
+    cfg_init_quant(bits, gs);
+    cfg.hidden_size = H;
+
+    fwd_moe_weights_t mw;
+    memset(&mw, 0, sizeof(mw));
+    mw.router = make_router(E_router, H, 11);
+    build_quant_switch(&mw.switch_gate, &mw.switch_up, &mw.switch_down,
+                       E_router, H, MI, gs, bits);
+    mw.has_shared = false;
+
+    /* top_k still <= E_router so bare route_softmax would succeed. */
+    fwd_moe_params_t p = {
+        .num_experts = E_claim, .top_k = K, .norm_topk_prob = false};
+
+    float x_h[H];
+    for (int i = 0; i < H; i++) x_h[i] = 0.01f * (float)(i + 1);
+    mlx_array x = make_bf16(x_h, (int[]){1, 1, H}, 3);
+
+    mlx_array out = mlx_array_new();
+    void *sentinel_ctx = out.ctx;
+
+    assert(fwd_moe(&out, x, &mw, &p, &cfg, gpu) == -1);
+    assert(out.ctx == sentinel_ctx);
+
+    mlx_array_free(out);
+    mlx_array_free(x);
+    weights_triplet_free(&mw.switch_down);
+    weights_triplet_free(&mw.switch_up);
+    weights_triplet_free(&mw.switch_gate);
+    weights_triplet_free(&mw.router);
+}
+
+/* L3: gate flag without shared is inconsistent. */
+static void test_fwd_moe_rejects_gate_without_shared(void) {
+    const int E = 4, H = 32, MI = 32, K = 2, gs = 32, bits = 4;
+    cfg_init_quant(bits, gs);
+    cfg.hidden_size = H;
+
+    fwd_moe_weights_t mw;
+    memset(&mw, 0, sizeof(mw));
+    mw.router = make_router(E, H, 12);
+    build_quant_switch(&mw.switch_gate, &mw.switch_up, &mw.switch_down,
+                       E, H, MI, gs, bits);
+    /* Live gate triplet so only the flag inconsistency can reject. */
+    mw.shared_expert_gate = make_dense_linear(1, H, 70);
+    mw.has_shared = false;
+    mw.has_shared_expert_gate = true;
+
+    fwd_moe_params_t p = {.num_experts = E, .top_k = K, .norm_topk_prob = false};
+
+    float x_h[H];
+    for (int i = 0; i < H; i++) x_h[i] = 0.01f * (float)(i + 1);
+    mlx_array x = make_bf16(x_h, (int[]){1, 1, H}, 3);
+
+    mlx_array out = mlx_array_new();
+    void *sentinel_ctx = out.ctx;
+
+    assert(fwd_moe(&out, x, &mw, &p, &cfg, gpu) == -1);
+    assert(out.ctx == sentinel_ctx);
+
+    mlx_array_free(out);
+    mlx_array_free(x);
+    weights_triplet_free(&mw.shared_expert_gate);
+    weights_triplet_free(&mw.switch_down);
+    weights_triplet_free(&mw.switch_up);
+    weights_triplet_free(&mw.switch_gate);
+    weights_triplet_free(&mw.router);
+}
+
 /* ---- Cycle 12: quant + bf16 integration ---- */
 
 static void test_fwd_moe_all_bf16_experts(void) {
@@ -1151,8 +1426,8 @@ int main(void) {
     test_gather_mm_bf16_matches_per_expert_matmul();
     printf("  test_gather_mm_bf16_matches_per_expert_matmul: passed\n");
 
-    test_gather_qmm_lazy_slice_zeros_without_contiguous();
-    printf("  test_gather_qmm_lazy_slice_zeros_without_contiguous: passed\n");
+    test_gather_qmm_contiguous_slice_matches_independent_quant();
+    printf("  test_gather_qmm_contiguous_slice_matches_independent_quant: passed\n");
 
     test_switch_glu_decode_matches_three_gather_steps();
     printf("  test_switch_glu_decode_matches_three_gather_steps: passed\n");
@@ -1160,7 +1435,13 @@ int main(void) {
     printf("  test_switch_glu_sorted_path_matches_unsorted_reference: passed\n");
     test_switch_glu_sort_threshold_s1_small_stays_decode_path();
     printf("  test_switch_glu_sort_threshold_s1_small_stays_decode_path: passed\n");
+    test_switch_glu_sort_threshold_s1_large_uses_sorted_path();
+    printf("  test_switch_glu_sort_threshold_s1_large_uses_sorted_path: passed\n");
 
+    test_fwd_moe_combine_matches_manual_weighted_sum();
+    printf("  test_fwd_moe_combine_matches_manual_weighted_sum: passed\n");
+    test_fwd_moe_combine_shared_always_active();
+    printf("  test_fwd_moe_combine_shared_always_active: passed\n");
     test_fwd_moe_routed_only_shape_and_manual_parity();
     printf("  test_fwd_moe_routed_only_shape_and_manual_parity: passed\n");
     test_fwd_moe_shared_always_active_adds_dense_swiglu();
@@ -1170,6 +1451,10 @@ int main(void) {
 
     test_fwd_moe_error_hygiene();
     printf("  test_fwd_moe_error_hygiene: passed\n");
+    test_fwd_moe_rejects_router_expert_count_mismatch();
+    printf("  test_fwd_moe_rejects_router_expert_count_mismatch: passed\n");
+    test_fwd_moe_rejects_gate_without_shared();
+    printf("  test_fwd_moe_rejects_gate_without_shared: passed\n");
 
     test_fwd_moe_all_bf16_experts();
     printf("  test_fwd_moe_all_bf16_experts: passed\n");
