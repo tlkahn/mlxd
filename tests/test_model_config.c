@@ -435,6 +435,40 @@ static void test_qwen3_5_dense_vs_moe(void) {
     model_config_free(&cfg);
 }
 
+/* Stage D6: pure-dense qwen3_5 shape + hybrid-dense R1 boundary */
+static void test_qwen3_5_dense_full_and_hybrid(void) {
+    model_config_t cfg;
+    int rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_dense_full");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_QWEN3_5);
+    assert(cfg.attn_output_gate == true);
+    assert(cfg.partial_rotary_factor == 0.25f);
+    assert(cfg.has_qk_norm == true);
+    assert(cfg.num_experts == 0);
+    assert(cfg.linear_num_key_heads == 0);
+    assert(cfg.linear_num_value_heads == 0);
+    assert(cfg.head_dim == 256);
+    assert(cfg.rope_theta == 10000000.0f);
+    assert(cfg.has_explicit_layer_types == false);
+    model_config_free(&cfg);
+
+    /* R1: hybrid linear fields do not reclassify as MOE */
+    rc = model_config_load(
+        &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_hybrid_dense");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_QWEN3_5);
+    assert(cfg.num_experts == 0);
+    assert(cfg.linear_num_key_heads == 16);
+    assert(cfg.linear_num_value_heads == 16);
+    assert(cfg.attn_output_gate == true);
+    assert(cfg.partial_rotary_factor == 0.25f);
+    assert(cfg.has_explicit_layer_types == true);
+    assert(cfg.layer_is_global[0] == false); /* linear_attention */
+    assert(cfg.layer_is_global[3] == true);  /* full_attention */
+    model_config_free(&cfg);
+}
+
 /* --- A1 Cycle 7: nested text_config -------------------------------------- */
 
 static void test_nested_text_config(void) {
@@ -1099,6 +1133,7 @@ int main(void) {
     test_family_from_type();
     test_family_defaults();
     test_qwen3_5_dense_vs_moe();
+    test_qwen3_5_dense_full_and_hybrid();
     test_nested_text_config();
     test_sliding_window_and_layers();
     test_stage_e_dims();

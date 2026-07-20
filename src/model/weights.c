@@ -263,6 +263,16 @@ static const weights_family_desc_t family_descs[] = {
         .extra_tensors  = NULL,
     },
     {
+        /* qwen3_5 dense reuses the qwen3 name set; attn_output_gate doubles
+           q_proj out-features but does not add a separate tensor name. */
+        .family         = MODEL_QWEN3_5,
+        .layer_matmuls  = dense_std_layer_matmuls,
+        .layer_norms    = dense_std_layer_norms,
+        .layer_qk_norms = dense_std_layer_qk_norms,
+        .layer_biases   = NULL,
+        .extra_tensors  = NULL,
+    },
+    {
         .family         = MODEL_LLAMA,
         .layer_matmuls  = dense_std_layer_matmuls,
         .layer_norms    = dense_std_layer_norms,

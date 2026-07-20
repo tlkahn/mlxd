@@ -1,0 +1,24 @@
+{
+    "model_type": "qwen3_5",
+    "vocab_size": 256,
+    "hidden_size": 64,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "intermediate_size": 128,
+    "max_position_embeddings": 512,
+    "rms_norm_eps": 0.000001,
+    "rope_theta": 10000000.0,
+    "tie_word_embeddings": true,
+    "attn_output_gate": true,
+    "rope_parameters": {
+        "rope_theta": 10000000.0,
+        "partial_rotary_factor": 0.25
+    },
+    "quantization": {
+        "bits": 4,
+        "group_size": 32,
+        "mode": "affine"
+    }
+}

@@ -26,7 +26,11 @@ family_id() {
         llama)   echo "mlx-community/TinyLlama-1.1B-Chat-v1.0-4bit" ;;
         mistral) echo "" ;;
         gemma4)  echo "mlx-community/gemma-4-e4b-it-4bit" ;;
-        qwen3_5) echo "" ;;
+        # D6 records the smallest dense 4-bit Qwen3.5 id. Real checkpoints are
+        # hybrid (linear + full attention). mlxd Stage D rejects linear
+        # attention; byte parity is Stage E. skip-if-absent still applies when
+        # the snapshot is not on disk.
+        qwen3_5) echo "mlx-community/Qwen3.5-0.8B-4bit" ;;
         *)       return 1 ;;
     esac
 }

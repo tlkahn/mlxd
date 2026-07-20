@@ -96,9 +96,46 @@ int engine_model_check_supported(const model_config_t *cfg,
         }
         return 0;
 
+    case MODEL_QWEN3_5: {
+        /* Pure-dense qwen3_5 only. Do not call reject_dense_common: it rejects
+           attn_output_gate and partial_rotary_factor != 1, both required here.
+           Hybrid linear-attention / MoE stay Stage E. */
+        REJECT(cfg->attention_bias,
+               "attention_bias not supported");
+        REJECT(cfg->has_sliding_window,
+               "sliding window attention not supported");
+        REJECT(cfg->num_experts > 0,
+               "MoE models not supported");
+        REJECT(cfg->linear_num_key_heads > 0 || cfg->linear_num_value_heads > 0,
+               "linear attention / hybrid layers not supported");
+        REJECT(cfg->has_hybrid_layers,
+               "hybrid layer architectures not supported");
+        if (cfg->has_explicit_layer_types) {
+            for (int i = 0; i < cfg->num_hidden_layers; i++) {
+                REJECT(!cfg->layer_is_global[i],
+                       "linear attention / hybrid layers not supported");
+            }
+        }
+        REJECT(cfg->hidden_act != HIDDEN_ACT_SILU,
+               "only SiLU activation supported");
+        REJECT(cfg->norm_has_offset,
+               "norm_has_offset not supported");
+        REJECT(cfg->scale_embeddings,
+               "scale_embeddings not supported");
+        REJECT(cfg->has_pre_ff_norm,
+               "pre-feedforward norm not supported");
+        REJECT(cfg->partial_rotary_factor <= 0.0f ||
+               cfg->partial_rotary_factor > 1.0f,
+               "partial_rotary_factor must be in (0, 1]");
+        REJECT(cfg->rope_scaling_type != NULL,
+               "RoPE scaling not supported");
+        /* attn_output_gate allowed (true or false) */
+        return 0;
+    }
+
     default:
         REJECT(true,
-               "unsupported model family (only qwen3/llama/gemma4 dense supported)");
+               "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)");
     }
 }
 
