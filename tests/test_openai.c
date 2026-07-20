@@ -1191,6 +1191,68 @@ static void test_message_content_text(void) {
         assert(out == NULL);
     }
 
+    /* CONTENT_STRING "" -> non-NULL "" (strip()-safe distinction from null) */
+    {
+        message_content_t c = {.kind = CONTENT_STRING, .string = (char *)""};
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(out[0] == '\0');
+        free(out);
+    }
+
+    /* Unknown / non-text type with non-NULL text must NOT be joined. */
+    {
+        content_part_t parts[2] = {
+            {.type = (char *)"text", .text = (char *)"keep"},
+            {.type = (char *)"input_audio", .text = (char *)"drop-me"},
+        };
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 2,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "keep") == 0);
+        free(out);
+    }
+
+    /* image_url with spurious text must NOT be joined. */
+    {
+        content_part_t parts[2] = {
+            {.type = (char *)"text", .text = (char *)"see"},
+            {.type = (char *)"image_url",
+             .text = (char *)"ignore",
+             .has_image_url = true,
+             .image_url = {.url = (char *)"https://example.com/x.png"}},
+        };
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 2,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "see") == 0);
+        free(out);
+    }
+
+    /* NULL type with text: do not join (strict OpenAI union). */
+    {
+        content_part_t parts[1] = {
+            {.type = NULL, .text = (char *)"nope"},
+        };
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 1,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "") == 0);
+        free(out);
+    }
+
     printf("  test_message_content_text: passed\n");
 }
 
@@ -1341,6 +1403,87 @@ static void test_messages_template_serialize(void) {
         assert(yyjson_is_arr(yyjson_doc_get_root(doc)));
         assert(yyjson_arr_size(yyjson_doc_get_root(doc)) == 0);
         yyjson_doc_free(doc);
+    }
+
+    /* CONTENT_STRING "" must be JSON "", not null (strip()-safe). */
+    {
+        message_t msgs[1] = {{
+            .role = ROLE_USER,
+            .content = {.kind = CONTENT_STRING, .string = (char *)""},
+        }};
+        yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+        assert(mdoc != NULL);
+        yyjson_mut_val *arr = messages_template_serialize(msgs, 1, mdoc);
+        assert(arr != NULL);
+        yyjson_mut_doc_set_root(mdoc, arr);
+        char *json = yyjson_mut_write(mdoc, 0, NULL);
+        assert(json != NULL);
+        yyjson_mut_doc_free(mdoc);
+
+        yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+        free(json);
+        assert(doc != NULL);
+        yyjson_val *m0 = yyjson_arr_get(yyjson_doc_get_root(doc), 0);
+        yyjson_val *c0 = yyjson_obj_get(m0, "content");
+        assert(yyjson_is_str(c0));
+        assert(!yyjson_is_null(c0));
+        assert(strcmp(yyjson_get_str(c0), "") == 0);
+        yyjson_doc_free(doc);
+    }
+
+    /* CONTENT_STRING + NULL string is parse-OOM shape: serialize must fail. */
+    {
+        message_t msgs[1] = {{
+            .role = ROLE_USER,
+            .content = {.kind = CONTENT_STRING, .string = NULL},
+        }};
+        yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+        assert(mdoc != NULL);
+        yyjson_mut_val *arr = messages_template_serialize(msgs, 1, mdoc);
+        assert(arr == NULL);
+        yyjson_mut_doc_free(mdoc);
+    }
+
+    /* CONTENT_NONE still succeeds with JSON null (control). */
+    {
+        message_t msgs[1] = {{
+            .role = ROLE_ASSISTANT,
+            .content = {.kind = CONTENT_NONE},
+        }};
+        yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+        assert(mdoc != NULL);
+        yyjson_mut_val *arr = messages_template_serialize(msgs, 1, mdoc);
+        assert(arr != NULL);
+        yyjson_mut_doc_set_root(mdoc, arr);
+        char *json = yyjson_mut_write(mdoc, 0, NULL);
+        assert(json != NULL);
+        yyjson_mut_doc_free(mdoc);
+
+        yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+        free(json);
+        assert(doc != NULL);
+        yyjson_val *m0 = yyjson_arr_get(yyjson_doc_get_root(doc), 0);
+        assert(yyjson_is_null(yyjson_obj_get(m0, "content")));
+        yyjson_doc_free(doc);
+    }
+
+    /* Good message then STRING+NULL fails the whole serialize. */
+    {
+        message_t msgs[2] = {
+            {
+                .role = ROLE_USER,
+                .content = {.kind = CONTENT_STRING, .string = (char *)"ok"},
+            },
+            {
+                .role = ROLE_USER,
+                .content = {.kind = CONTENT_STRING, .string = NULL},
+            },
+        };
+        yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+        assert(mdoc != NULL);
+        yyjson_mut_val *arr = messages_template_serialize(msgs, 2, mdoc);
+        assert(arr == NULL);
+        yyjson_mut_doc_free(mdoc);
     }
 
     printf("  test_messages_template_serialize: passed\n");

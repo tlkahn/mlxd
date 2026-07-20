@@ -460,14 +460,33 @@ yyjson_mut_val *messages_template_serialize(const message_t *msgs, int count,
 
         yyjson_mut_obj_add_strcpy(doc, o, "role", role_str(msg->role));
 
-        char *text = message_content_text(&msg->content);
-        if (text) {
+        /* Content rules for template input:
+         *   CONTENT_NONE          -> JSON null (intentional absent/null)
+         *   CONTENT_STRING + ptr  -> JSON string (incl. ""); direct copy
+         *   CONTENT_STRING + NULL  -> fail (parse-OOM shape, not intentional null)
+         *   CONTENT_PARTS         -> flatten; NULL flatten is OOM -> fail
+         */
+        switch (msg->content.kind) {
+        case CONTENT_NONE:
+            yyjson_mut_obj_add_null(doc, o, "content");
+            break;
+        case CONTENT_STRING:
+            /* NULL string is parse-OOM shape, not intentional null. */
+            if (!msg->content.string)
+                return NULL;
+            /* Direct copy - avoids strdup + add_strcpy double copy. */
+            yyjson_mut_obj_add_strcpy(doc, o, "content", msg->content.string);
+            break;
+        case CONTENT_PARTS: {
+            char *text = message_content_text(&msg->content);
+            if (!text)
+                return NULL; /* OOM: never emit null for parts */
             yyjson_mut_obj_add_strcpy(doc, o, "content", text);
             free(text);
-        } else {
-            /* CONTENT_NONE, NULL string, or OOM on flatten: emit JSON null.
-             * Serialize callers that need OOM distinction check kind first. */
-            yyjson_mut_obj_add_null(doc, o, "content");
+            break;
+        }
+        default:
+            return NULL;
         }
 
         if (msg->name)

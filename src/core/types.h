@@ -111,9 +111,11 @@ void message_content_free(message_content_t *content);
 
 /* Flatten message content to a single owned C string for chat-template input.
  * CONTENT_NONE / NULL input / NULL string -> NULL.
- * CONTENT_STRING -> strdup of the string.
- * CONTENT_PARTS -> concatenation of every non-NULL part text (no separator);
- *                 empty string if no text fragments contribute.
+ * CONTENT_STRING -> strdup of the string (incl. "").
+ * CONTENT_PARTS -> concatenation of parts with type "text" and non-NULL text
+ *                 (no separator); empty string if no text fragments contribute.
+ * Note: CONTENT_STRING + NULL is the parse-OOM shape; template serialize treats
+ * that as error (returns NULL), while this helper just returns NULL.
  * Caller frees the result. */
 char *message_content_text(const message_content_t *c);
 
