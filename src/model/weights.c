@@ -926,7 +926,7 @@ int weights_load(weights_t *w, const char *model_dir,
 
     if (cfg->family == MODEL_DEEPSEEK_V4) {
         if (err && errlen > 0)
-            snprintf(err, errlen, "deepseek_v4 requires GGUF format (not supported)");
+            snprintf(err, errlen, "deepseek_v4 MLA attention not yet implemented (Stage E)");
         return -1;
     }
 

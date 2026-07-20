@@ -39,6 +39,8 @@ The full Zig implementation is `tlkahn/mlx-serve` (local checkout `../../mlx-ser
 - `src/arch/llama.zig`, `src/arch/ds4.zig` — family specifics
 - deferred follow-ups live in `src/kv_quant.zig`, `src/prefix_cache.zig`
 
+For DeepSeek V3/V3.2/V4: mlx-serve wraps a separate `ds4` engine (GGUF, custom Metal kernels) - **do not port** that path. Instead port from mlx-lm's Python implementation (`deepseek_v3.py`, `deepseek_v32.py`, `mla.py`) which runs natively on MLX safetensors. mlx-lm keeps **separate modules** for V3 vs V3.2 (DSA indexer); mlxd mirrors that with separate `model_family_t` values (decision 5 / 11). Do not port from `ds4.zig`.
+
 `tlkahn/mlxd-zig` never implemented its engine (7-line stub). Its only reusable inference artifact is `src/mlxbridge/root.zig` (~190 mlx-c externs). On the C side, `tests/test_mlxbridge_gpu.c` is the reference for call patterns.
 
 ## Intentional divergences from mlx-serve
@@ -63,7 +65,8 @@ Decisions from the pre-Stage-A/B review ([#51 comment](https://github.com/tlkahn
 | 2 | **Quantization modes**: parse `quantization.mode`; support **affine only**; hard-error with a clear message on `nvfp4` / `mxfp4` / `mxfp8` (never silent-ignore). Non-affine modes are a named follow-up. | A1 (parse), A3/B1 (enforce) |
 | 3 | **Config surface**: A1 owns the **full** `model_config_t` surface, including `weight_prefix` and behavioral flags (`has_qk_norm`, `norm_has_offset`, `scale_embeddings`, `has_pre_ff_norm`, `hidden_act`, `tie_word_embeddings`, dual rope bases), with per-family defaults, even though only qwen3 dense is exercised until D/E. No per-stage `model_config_t` rewrites. | A1 |
 | 4 | **qwen3_5 family split**: `MODEL_QWEN3_5` (dense) and `MODEL_QWEN3_5_MOE` are **separate** `model_family_t` values, discriminated at config-parse time via MoE fields. Do not copy mlx-serve's collapsed tag. | A1, D/E boundary |
-| 5 | **deepseek_v4 = GGUF**: mlx-serve rejects MLX safetensors for dsv4 (`UnsupportedDsv4MlxFormat`); the real checkpoint format is GGUF. Stage E ports the GGUF weight-load path from `ds4.zig`, scoped to dsv4 only. | E (scope grows) |
+| 5 | **~~deepseek_v4 = GGUF~~** (superseded 2026-07-20): mlx-serve wraps a separate `ds4` engine via FFI for this family, but mlx-lm (Apple's Python reference) implements DeepSeek V3/V3.2/V4 natively on MLX using **safetensors** with standard mlx ops. The architecture needs MLA (Multi-head Latent Attention) and MoE, both implementable via mlx-c. No GGUF loader needed - the Stage A safetensors path works. Stage E ports from mlx-lm's `deepseek_v3.py` / `deepseek_v32.py` + `mla.py`, not from `ds4.zig`. Target checkpoint: `mlx-community/DeepSeek-V4-Flash-4bit` (safetensors). | E |
+| 11 | **DeepSeek family enum grain** (2026-07-20): do **not** collapse `deepseek_v3` / `deepseek_v3_2`/`deepseek_v32` / `deepseek_v4` into a single `MODEL_DEEPSEEK_V4`. mlx-lm keeps separate modules; V3.2 adds a DSA **Indexer** plus dual cache (`CacheList`) - a real forward/cache fork, not a config alias (same grain as decision 4 for qwen3_5 dense vs MoE). Mapping: `deepseek_v3` -> `MODEL_DEEPSEEK_V3` (MLA+MoE); `deepseek_v3_2`/`deepseek_v32` -> `MODEL_DEEPSEEK_V32` (MLA+MoE+DSA); `deepseek_v4` -> `MODEL_DEEPSEEK_V4` (own value from day one - only alias onto V3 or V32 after the Flash `config.json`/weights are characterized). Shared code is primitives (`fwd_mla_*`, MoE gate, sanitize helpers), not one family tag. HF aliases `v3_2`/`v32` map together. Reject/error strings must name the actual family (never report "deepseek_v4" for a V3 load). **A1 interim debt:** current code still maps all four strings to `MODEL_DEEPSEEK_V4`; correct the enum + `model_family_from_type()` + tests before or at the start of Stage E2. | A1 correction, E2 |
 | 6 | **Prefill chunk**: named constant `MLXD_PREFILL_CHUNK = 512` (cancel grain vs kernel-launch overhead); no env override in v1. | B3 |
 | 7 | **Load vs tokenizer ownership**: engine `CMD_LOAD` = config + weights + eos set only; tokenizer stays caller-side (HTTP/CLI), never on the engine thread. | B3 |
 | 8 | **Oversized prompts**: prompt token count exceeding `max_position_embeddings` / KV capacity **errors the stream** with token count and limit in the message (HTTP 400, `context_length_exceeded` style). No truncation, silent or otherwise. | B3 |
@@ -100,6 +103,7 @@ Parity/CI hygiene: the parity script takes the binary via `MLXD_MLX_SERVE_BIN` p
 - `mlx_load_safetensors` must run on a **CPU stream** (GPU stream aborts).
 - Inputs to `mlx_gather_qmm` must be **materialized contiguous**.
 - Call `mlx_clear_cache` periodically during long decodes (and after each request).
+- DeepSeek `kv_b_proj` weight must be split into per-head `embed_q` + `unembed_out` at load time (reshape + slice + requantize); mlx-lm's `sanitize()` does this in Python.
 
 ---
 
@@ -115,7 +119,7 @@ Everything needed to get checkpoint bytes into named mlx arrays, before any forw
 
 - [ ] Extend `model_config_t` (`src/model/model.h`) with the **full** transformer config surface (decision 3 - owned by A1 once, no per-stage rewrites): `head_dim`, `intermediate_size`, `rope_theta`, **full rope scaling block** (type / factor / `low_freq_factor` / `high_freq_factor` / `original_max_position_embeddings` - intentional superset of mlx-serve; see divergences), `rms_norm_eps`, `sliding_window` (+ layer pattern where applicable), `attention_bias`, `max_position_embeddings`, plus `weight_prefix` and the per-family behavioral flags the forward pass branches on: `has_qk_norm`, `norm_has_offset`, `scale_embeddings`, `has_pre_ff_norm`, `hidden_act`, `tie_word_embeddings`, dual rope bases. Per-family defaults; fields unused until D/E sit with defaults, covered by parse tests.
 - [ ] Quantization block: `group_size`, `bits`, **and `mode`** (decision 2). Support `affine` only; hard-error with a clear message on `nvfp4` / `mxfp4` / `mxfp8` - never silent-ignore (loads then crashes mid-matmul). Non-affine modes are a named follow-up.
-- [ ] Add `model_family_t` enum + `model_family_from_type()` keyed off `model_type` (gemma3, gemma4, qwen2, qwen3, qwen3_5, qwen3_5_moe, llama, mistral, lfm2, nemotron_h, deepseek_v4; bert recognized but rejected for generate). `MODEL_QWEN3_5` and `MODEL_QWEN3_5_MOE` are **separate values** discriminated at config-parse time via MoE fields (decision 4 - do not copy mlx-serve's collapsed tag); this keeps the Stage D dense / Stage E MoE boundary an enum case, not a runtime branch.
+- [ ] Add `model_family_t` enum + `model_family_from_type()` keyed off `model_type` (gemma3, gemma4, qwen2, qwen3, qwen3_5, qwen3_5_moe, llama, mistral, lfm2, nemotron_h, deepseek_v3, deepseek_v32, deepseek_v4; bert recognized but rejected for generate). `MODEL_QWEN3_5` and `MODEL_QWEN3_5_MOE` are **separate values** discriminated at config-parse time via MoE fields (decision 4 - do not copy mlx-serve's collapsed tag); this keeps the Stage D dense / Stage E MoE boundary an enum case, not a runtime branch. DeepSeek likewise uses **separate** values `MODEL_DEEPSEEK_V3` / `MODEL_DEEPSEEK_V32` / `MODEL_DEEPSEEK_V4` (decision 11) - do not collapse V3/V3.2 into V4. (A1 shipped an interim collapse to `MODEL_DEEPSEEK_V4`; correct before E2.)
 - [ ] Handle nested text-config shapes (e.g. multimodal-wrapped `text_config`) the way `model_discovery.zig` / `model.zig` does (`model_type` from root; dimensional fields from `text_config` when present)
 - [ ] Parse `generation_config.json` alongside `config.json`: default sampling values **and** eos token id list (scalar or array). Merge eos with any `config.json` `eos_token_id` (union, de-duped, fixed cap). Missing/malformed `generation_config.json` is non-fatal (leave defaults unset). Intentional: mlx-serve ignores eos here.
 - [ ] CPU tests: per-family fixture configs under `tests/fixtures/`, including malformed/missing-field cases following the existing `model_config_*` fixture pattern; cover rope-scaling full block, generation_config eos list, config+generation eos merge, `weight_prefix` + behavioral-flag defaults per family, quant `mode` parse (affine accepted, nvfp4/mxfp* rejected), and qwen3_5 dense-vs-moe discrimination
@@ -210,15 +214,48 @@ Extend the dense forward path with per-family quirks, config parsing, and weight
 - [ ] Per-family weight-name mapping tables + config fixtures + CPU mapping tests
 - [ ] Parity gate script run per family; record checkpoint ids used in the script
 
-### Stage E: MoE + hybrid families (deepseek_v4, qwen3_5_moe, lfm2, nemotron_h)
+### Stage E: MoE + hybrid families (deepseek_v3/v32/v4, qwen3_5_moe, lfm2, nemotron_h)
 
 **Issue:** [#56](https://github.com/tlkahn/mlxd/issues/56) · **Depends on:** Stage D
 
 The two non-dense forward paths from the reference: `forwardMoeWith` (expert dispatch via `mlx_gather_qmm`/`mlx_gather_mm`) and `forwardHybridWith` (conv/SSM layers with their own cache entries). Green + demoable: all remaining generate families pass parity gates.
 
-- [ ] MoE block: router top-k + softmax, quantized expert dispatch via `mlx_gather_qmm` (contiguous-materialization gotcha test), bf16 path via `mlx_gather_mm`, shared experts
-- [ ] deepseek_v4 weight format (decision 5): mlx-serve **rejects MLX safetensors** for dsv4 (`UnsupportedDsv4MlxFormat`); real checkpoints are GGUF. Port the GGUF weight-load path from `ds4.zig`, scoped to dsv4 only - the safetensors/index loader from Stage A is not used for this family. This is a deliberate scope increase for Stage E; if it threatens the stage, split it into its own sub-issue rather than silently dropping the family.
-- [ ] deepseek_v4: port attention/MoE specifics from `src/arch/ds4.zig`
+#### E1: MoE infrastructure (shared by deepseek + qwen3_5_moe)
+
+- [ ] MoE block (`fwd_moe`): router top-k + softmax, quantized expert dispatch via `mlx_gather_qmm` (contiguous-materialization gotcha test), bf16 path via `mlx_gather_mm`, shared experts
+- [ ] DeepSeek-style MoE gate: sigmoid scoring (not softmax), group expert selection with `n_group`/`topk_group`, `e_score_correction_bias`, `routed_scaling_factor`, `norm_topk_prob`
+
+#### E2: DeepSeek V3 / V3.2 / V4 (MLA + MoE; separate families)
+
+> **Decision 5 superseded (2026-07-20):** mlx-lm implements DeepSeek V3/V3.2/V4 natively on safetensors - no GGUF or ds4 engine needed. Port from mlx-lm's `deepseek_v3.py` / `deepseek_v32.py` + `mla.py`, not from `ds4.zig`.
+>
+> **Decision 11 (2026-07-20):** do **not** track all DeepSeek variants as `MODEL_DEEPSEEK_V4`. Enum grain matches mlx-lm's module split and decision 4's "separate enum when paths fork" rule:
+> - `deepseek_v3` -> `MODEL_DEEPSEEK_V3` (MLA + MoE, full-sequence attention)
+> - `deepseek_v3_2` / `deepseek_v32` -> `MODEL_DEEPSEEK_V32` (MLA + MoE + DSA Indexer, dual cache)
+> - `deepseek_v4` -> `MODEL_DEEPSEEK_V4` (own value; characterize Flash before any alias onto V3/V32)
+>
+> Shared primitives (not one family tag): `fwd_mla_*`, MultiLinear, MoE gate, weight sanitize. V3.2's indexer is a real attention/cache fork - not a boolean papered over `model_type` string checks inside a collapsed family. Correct A1's interim collapse before implementing forward.
+
+- [ ] **Family split correction** (decision 11): replace interim `MODEL_DEEPSEEK_V4`-only mapping with `MODEL_DEEPSEEK_V3` / `MODEL_DEEPSEEK_V32` / `MODEL_DEEPSEEK_V4` in `model.h`, `model_family_from_type()`, config defaults, weight-load reject paths, and `tests/test_model_config.c`. Reject messages must name the actual family.
+- [ ] **MLA attention** (`fwd_mla_attention`) for `MODEL_DEEPSEEK_V3` (and shared by V3.2/V4 as the base path): a new attention path, not a variant of `fwd_attention`. Key differences from standard GQA:
+  - Q LoRA compression: `q_a_proj` (hidden -> `q_lora_rank`) -> `q_a_layernorm` (RMSNorm) -> `q_b_proj` (`q_lora_rank` -> `n_heads * q_head_dim`). First layer has no LoRA (direct `q_proj`)
+  - Compressed KV: `kv_a_proj_with_mqa` (hidden -> `kv_lora_rank + qk_rope_head_dim`) -> split into `kv_latent` (normed) + `k_pe` (positional)
+  - Split Q: `q_nope` (`qk_nope_head_dim`) + `q_pe` (`qk_rope_head_dim`); RoPE only on pe parts
+  - Per-head `MultiLinear` transforms: `embed_q` (kv_latent -> nope-key space) and `unembed_out` (kv_latent -> v space), weight shape `[n_heads, out_dim, in_dim]`
+  - Attention = SDPA(q_nope, k, v) with `pe_scores` as mask (positional component pre-computed as `q_pe @ k_pe^T`)
+  - Decode-path optimization: `embed_q` applied to q_nope (not kv_latent), then unembed_out post-SDPA
+  - Attention scale: `q_head_dim^(-0.5)`, optionally multiplied by `mscale_all_dim` correction from `rope_scaling`
+- [ ] **MultiLinear** (`fwd_multi_linear`): per-head batched matmul, weight `[H, O, I]`; quantized variant via `mlx_quantized_matmul` with per-head scales/biases (port `mla.py`'s `MultiLinear`/`QuantizedMultiLinear`)
+- [ ] **MLA KV cache**: stores compressed `kv_latent` (`[B, 1, T, kv_lora_rank]`) + `k_pe` (`[B, 1, T, qk_rope_head_dim]`), NOT full K/V. Substantially smaller per-token footprint than GQA
+- [ ] **V3.2 DSA indexer** (`MODEL_DEEPSEEK_V32`, port `deepseek_v32.py` `Indexer`): separate top-k index heads (`index_n_heads` / `index_head_dim` / `index_topk`), index-side RoPE + K cache, sparse gather (`take_along_axis`) on decode and sparse mask on prefill. Dual cache entry (MLA latent cache + indexer K cache), matching mlx-lm `CacheList`. Config fields: `index_head_dim`, `index_n_heads`, `index_topk` plus indexer weight names (`wq_b`, `wk`, `weights_proj`, ...)
+- [ ] **Weight sanitization** in `weights.c`: fp8 dequant (block-128 `weight_scale_inv`), `kv_b_proj` -> `embed_q` + `unembed_out` split (reshape `[n_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank]`, split, requantize), expert stacking (`experts.N.gate/up/down_proj` -> `switch_mlp.gate/up/down_proj` stacked), MTP layer removal; V3.2 also keeps indexer tensors
+- [ ] **Config fields** on `model_config_t` (add in this stage or backfill into A1 if convenient): `q_lora_rank`, `kv_lora_rank`, `qk_rope_head_dim`, `qk_nope_head_dim`, `v_head_dim`, `n_routed_experts`, `n_shared_experts`, `routed_scaling_factor`, `moe_layer_freq`, `first_k_dense_replace`, `n_group`, `topk_group`, `moe_intermediate_size`; `rope_scaling` as nested dict (type/factor/mscale_all_dim); V3.2 indexer fields above
+- [ ] **Dense/MoE layer mixing**: first `first_k_dense_replace` layers use standard SwiGLU MLP; remaining layers use MoE (every `moe_layer_freq`-th layer)
+- [ ] **V4 characterization**: inspect `mlx-community/DeepSeek-V4-Flash-4bit` `config.json` + weight names before implementing `MODEL_DEEPSEEK_V4` forward; only alias onto V3 or V32 if the architecture truly matches - never assume by product name
+- [ ] Parity gates (skip-if-absent; oracle = mlx-lm, not mlx-serve/ds4): at least one V3-class checkpoint, one V3.2-class checkpoint if available, and DeepSeek-V4-Flash-4bit once characterized
+
+#### E3: qwen3_5_moe, lfm2, nemotron_h
+
 - [ ] qwen3_5_moe: linear-attention layers (separate QKV/Z/A/B projections per `LinearAttnWeights`) + MoE FFN
 - [ ] Hybrid cache: SSM/conv state entries alongside KV entries (port `SSMCacheEntry`), prefill chunk boundaries respecting SSM checkpointing (`nextChunkEnd`)
 - [ ] lfm2: short-conv blocks + attention hybrid

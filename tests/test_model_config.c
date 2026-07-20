@@ -279,6 +279,9 @@ static void test_family_from_type(void) {
     assert(model_family_from_type("lfm2_moe") == MODEL_LFM2);
     assert(model_family_from_type("lfm2_audio") == MODEL_LFM2);
     assert(model_family_from_type("nemotron_h") == MODEL_NEMOTRON_H);
+    assert(model_family_from_type("deepseek_v3") == MODEL_DEEPSEEK_V4);
+    assert(model_family_from_type("deepseek_v3_2") == MODEL_DEEPSEEK_V4);
+    assert(model_family_from_type("deepseek_v32") == MODEL_DEEPSEEK_V4);
     assert(model_family_from_type("deepseek_v4") == MODEL_DEEPSEEK_V4);
     assert(model_family_from_type("bert") == MODEL_BERT);
 

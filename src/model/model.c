@@ -204,7 +204,10 @@ model_family_t model_family_from_type(const char *model_type) {
         return MODEL_LFM2;
     if (strcmp(model_type, "nemotron_h") == 0)
         return MODEL_NEMOTRON_H;
-    if (strcmp(model_type, "deepseek_v4") == 0)
+    if (strcmp(model_type, "deepseek_v3") == 0 ||
+        strcmp(model_type, "deepseek_v3_2") == 0 ||
+        strcmp(model_type, "deepseek_v32") == 0 ||
+        strcmp(model_type, "deepseek_v4") == 0)
         return MODEL_DEEPSEEK_V4;
     if (strcmp(model_type, "bert") == 0)
         return MODEL_BERT;

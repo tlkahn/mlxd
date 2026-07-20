@@ -88,7 +88,7 @@ mlxd list    # list locally available models
 
 ## Supported model families
 
-gemma3, gemma4, qwen2, qwen3, qwen3_5, llama, mistral, lfm2, nemotron_h, bert, deepseek_v4.
+gemma3, gemma4, qwen2, qwen3, qwen3_5, llama, mistral, lfm2, nemotron_h, bert, deepseek_v3 (`MODEL_DEEPSEEK_V3`), deepseek_v3_2/deepseek_v32 (`MODEL_DEEPSEEK_V32`, MLA+MoE+DSA indexer), deepseek_v4 (`MODEL_DEEPSEEK_V4`). DeepSeek variants share MLA/MoE primitives but are separate `model_family_t` values - do not collapse V3/V3.2 into V4. HF string aliases `deepseek_v3_2` and `deepseek_v32` map together.
 
 ## Explicitly deferred (v2)
 
