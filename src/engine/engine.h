@@ -16,9 +16,10 @@ typedef struct engine_model engine_model_t;
 
 /* Prefill chunk size (tokens). Cancel/shutdown polled between chunks.
    Residual non-interruptible window after cancel/shutdown is observed:
-   at most one prefill chunk or one pipelined decode step (sample +
-   optional next forward + async_eval + materialize). Second SIGINT
-   remains the operator hard escape (exits 130). */
+   at most one prefill chunk, one seed forward (last prompt token), or
+   one pipelined decode step (sample + optional next forward +
+   async_eval + materialize). Second SIGINT remains the operator hard
+   escape (exits 130). */
 #ifndef MLXD_PREFILL_CHUNK
 #define MLXD_PREFILL_CHUNK 512
 #endif
@@ -101,6 +102,8 @@ typedef enum {
    - May block (condvar) so a test thread can cancel/shutdown deterministically.
    - Not safe concurrent with an in-flight generate; set after load, before
      posting generate. hooks == NULL clears.
+   - The real path snapshots hooks at generate start; mid-generate mutation
+     of eng->gen_hooks does not change which hooks run for that request.
 
    Ordering at each site: poll flags -> hook -> re-poll flags -> work.
    The re-poll ensures a cancel that arrives while the hook is blocked is
@@ -181,7 +184,9 @@ void engine_post(engine_t *eng, engine_cmd_t *cmd);
 int engine_post_load(engine_t *eng, char *model_path);
 
 /* Install or clear generate hooks (see engine_gen_hooks_t). hooks == NULL
-   clears. Not safe concurrent with in-flight generate. */
+   clears. Not safe concurrent with in-flight generate. Real path snapshots
+   at generate start so a mid-generate clear/replace is ignored for that
+   request. */
 void engine_set_gen_hooks(engine_t *eng, const engine_gen_hooks_t *hooks);
 
 #endif

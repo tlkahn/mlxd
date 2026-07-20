@@ -58,7 +58,7 @@ Dependency direction: arrows point upward. `core` and `mlxbridge` are leaves. `e
 5. Post stop command, join engine thread, cleanup
 6. Second SIGINT exits 130
 
-Generate polls shutdown/cancel at prefill-chunk and decode-step grain (plus seed forward); residual non-interruptible window is at most one chunk or one pipelined decode step.
+Generate polls shutdown/cancel at prefill-chunk and decode-step grain (plus seed forward); residual non-interruptible window is at most one prefill chunk, one seed forward, or one pipelined decode step.
 
 ## mlx-c API pitfalls
 

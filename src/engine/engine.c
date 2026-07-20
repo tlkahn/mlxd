@@ -400,6 +400,9 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     }
     kv_inited = true;
 
+    /* stable for this generate; eng->gen_hooks may change */
+    engine_gen_hooks_t hooks = eng->gen_hooks;
+
     /* ---- chunked prefill of prompt[:-1] ---- */
     int pos = 0;
     int prefix_end = n > 0 ? n - 1 : 0;
@@ -413,8 +416,8 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         if (chunk_end > prefix_end)
             chunk_end = prefix_end;
         int chunk_len = chunk_end - pos;
-        if (eng->gen_hooks.on_prefill_chunk)
-            eng->gen_hooks.on_prefill_chunk(eng->gen_hooks.ud, pos, chunk_len);
+        if (hooks.on_prefill_chunk)
+            hooks.on_prefill_chunk(hooks.ud, pos, chunk_len);
         if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
             stream_finish_cancelled(s);
             goto out_free;
@@ -436,8 +439,8 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
             stream_finish_cancelled(s);
             goto out_free;
         }
-        if (eng->gen_hooks.on_before_seed)
-            eng->gen_hooks.on_before_seed(eng->gen_hooks.ud);
+        if (hooks.on_before_seed)
+            hooks.on_before_seed(hooks.ud);
         if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
             stream_finish_cancelled(s);
             goto out_free;
@@ -459,8 +462,8 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
             stream_finish_cancelled(s);
             goto out_free;
         }
-        if (eng->gen_hooks.on_decode_step)
-            eng->gen_hooks.on_decode_step(eng->gen_hooks.ud, emitted);
+        if (hooks.on_decode_step)
+            hooks.on_decode_step(hooks.ud, emitted);
         if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
             stream_finish_cancelled(s);
             goto out_free;
