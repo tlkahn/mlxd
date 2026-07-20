@@ -120,15 +120,30 @@ static void test_validation_missing_shard(void) {
     rmdir(tmpdir);
 }
 
-static void test_validation_deepseek_v4_rejected(void) {
+static void assert_deepseek_weights_rejected(model_family_t fam,
+                                             const char *label) {
     model_config_t cfg = {0};
-    cfg.family = MODEL_DEEPSEEK_V4;
-
+    cfg.family = fam;
     weights_t w;
     char err[256] = {0};
+    char expect_prefix[64];
     int rc = weights_load(&w, FIXTURES "/tiny_qwen3", &cfg, err, sizeof(err));
     assert(rc == -1);
-    assert(strstr(err, "GGUF") != NULL);
+    /* Message is "<label> MLA/MoE forward not yet implemented (Stage E2)".
+       Use strncmp on the full label prefix so deepseek_v3 does not match
+       deepseek_v32 (strstr would, since v3 is a prefix of v32). */
+    snprintf(expect_prefix, sizeof(expect_prefix), "%s MLA", label);
+    assert(strncmp(err, expect_prefix, strlen(expect_prefix)) == 0);
+    assert(strstr(err, "not yet implemented") != NULL);
+    assert(strstr(err, "Stage E") != NULL);
+    /* Must not claim GGUF; decision 5 superseded. */
+    assert(strstr(err, "GGUF") == NULL);
+}
+
+static void test_validation_deepseek_families_rejected(void) {
+    assert_deepseek_weights_rejected(MODEL_DEEPSEEK_V3, "deepseek_v3");
+    assert_deepseek_weights_rejected(MODEL_DEEPSEEK_V32, "deepseek_v32");
+    assert_deepseek_weights_rejected(MODEL_DEEPSEEK_V4, "deepseek_v4");
 }
 
 /* ---- Cycle 4 (review): duplicate keys across shards (M7) ---- */
@@ -816,8 +831,8 @@ int main(void) {
     test_validation_missing_shard();
     printf("  test_validation_missing_shard: passed\n");
 
-    test_validation_deepseek_v4_rejected();
-    printf("  test_validation_deepseek_v4_rejected: passed\n");
+    test_validation_deepseek_families_rejected();
+    printf("  test_validation_deepseek_families_rejected: passed\n");
 
     test_duplicate_key_across_shards();
     printf("  test_duplicate_key_across_shards: passed\n");

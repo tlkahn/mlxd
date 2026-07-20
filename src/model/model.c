@@ -204,10 +204,12 @@ model_family_t model_family_from_type(const char *model_type) {
         return MODEL_LFM2;
     if (strcmp(model_type, "nemotron_h") == 0)
         return MODEL_NEMOTRON_H;
-    if (strcmp(model_type, "deepseek_v3") == 0 ||
-        strcmp(model_type, "deepseek_v3_2") == 0 ||
-        strcmp(model_type, "deepseek_v32") == 0 ||
-        strcmp(model_type, "deepseek_v4") == 0)
+    if (strcmp(model_type, "deepseek_v3") == 0)
+        return MODEL_DEEPSEEK_V3;
+    if (strcmp(model_type, "deepseek_v3_2") == 0 ||
+        strcmp(model_type, "deepseek_v32") == 0)
+        return MODEL_DEEPSEEK_V32;
+    if (strcmp(model_type, "deepseek_v4") == 0)
         return MODEL_DEEPSEEK_V4;
     if (strcmp(model_type, "bert") == 0)
         return MODEL_BERT;
@@ -534,10 +536,24 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         }
         break;
 
+    case MODEL_DEEPSEEK_V3:
+    case MODEL_DEEPSEEK_V32:
     case MODEL_DEEPSEEK_V4:
         if (set_llama_style_defaults(cfg, cfg_obj))
             return -1;
         cfg->hidden_act = HIDDEN_ACT_SILU;
+        /* mlx-lm defaults when keys absent; explicit values already parsed win.
+           Mirrors qwen3_5 attn_output_gate key-absence pattern. */
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "norm_topk_prob");
+            if (!v || yyjson_is_null(v))
+                cfg->norm_topk_prob = true;
+        }
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "routed_scaling_factor");
+            if (!v || yyjson_is_null(v))
+                cfg->routed_scaling_factor = 1.0f;
+        }
         break;
 
     case MODEL_BERT:
@@ -751,6 +767,32 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
                        &cfg->moe_intermediate_size, 0) ||
         get_int_nonneg(cfg_obj, "shared_expert_intermediate_size",
                        &cfg->shared_expert_intermediate_size, 0) ||
+        /* DeepSeek MLA */
+        get_int_nonneg(cfg_obj, "q_lora_rank", &cfg->q_lora_rank, 0) ||
+        get_int_nonneg(cfg_obj, "kv_lora_rank", &cfg->kv_lora_rank, 0) ||
+        get_int_nonneg(cfg_obj, "qk_rope_head_dim", &cfg->qk_rope_head_dim,
+                       0) ||
+        get_int_nonneg(cfg_obj, "qk_nope_head_dim", &cfg->qk_nope_head_dim,
+                       0) ||
+        get_int_nonneg(cfg_obj, "v_head_dim", &cfg->v_head_dim, 0) ||
+        /* DeepSeek MoE extras */
+        get_int_nonneg(cfg_obj, "n_routed_experts", &cfg->n_routed_experts,
+                       0) ||
+        get_int_nonneg(cfg_obj, "n_shared_experts", &cfg->n_shared_experts,
+                       0) ||
+        get_f32(cfg_obj, "routed_scaling_factor", &cfg->routed_scaling_factor,
+                cfg->routed_scaling_factor) ||
+        get_int_nonneg(cfg_obj, "moe_layer_freq", &cfg->moe_layer_freq, 0) ||
+        get_int_nonneg(cfg_obj, "first_k_dense_replace",
+                       &cfg->first_k_dense_replace, 0) ||
+        get_int_nonneg(cfg_obj, "n_group", &cfg->n_group, 0) ||
+        get_int_nonneg(cfg_obj, "topk_group", &cfg->topk_group, 0) ||
+        get_bool(cfg_obj, "norm_topk_prob", &cfg->norm_topk_prob,
+                 cfg->norm_topk_prob) ||
+        /* DeepSeek V3.2 / Flash indexer */
+        get_int_nonneg(cfg_obj, "index_head_dim", &cfg->index_head_dim, 0) ||
+        get_int_nonneg(cfg_obj, "index_n_heads", &cfg->index_n_heads, 0) ||
+        get_int_nonneg(cfg_obj, "index_topk", &cfg->index_topk, 0) ||
         get_int_nonneg(cfg_obj, "linear_num_key_heads",
                        &cfg->linear_num_key_heads, 0) ||
         get_int_nonneg(cfg_obj, "linear_num_value_heads",
@@ -786,6 +828,12 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
             goto fail;
         }
     }
+
+    /* DeepSeek HF publishes n_routed_experts, not num_experts. One-way alias
+       so existing MoE detectors (num_experts > 0) keep working. Do not
+       overwrite an explicit num_experts. */
+    if (cfg->n_routed_experts > 0 && cfg->num_experts == 0)
+        cfg->num_experts = cfg->n_routed_experts;
 
     if (cfg->num_hidden_layers > MLXD_MAX_LAYERS)
         goto fail;
@@ -829,6 +877,8 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
                     cfg->rope_low_freq_factor) ||
             get_f32(rs, "high_freq_factor", &cfg->rope_high_freq_factor,
                     cfg->rope_high_freq_factor) ||
+            get_f32(rs, "mscale_all_dim", &cfg->rope_scaling_mscale_all_dim,
+                    cfg->rope_scaling_mscale_all_dim) ||
             get_int_nonneg(rs, "original_max_position_embeddings",
                            &cfg->rope_original_max_position_embeddings, 0))
             goto fail;

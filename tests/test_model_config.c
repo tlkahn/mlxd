@@ -279,11 +279,15 @@ static void test_family_from_type(void) {
     assert(model_family_from_type("lfm2_moe") == MODEL_LFM2);
     assert(model_family_from_type("lfm2_audio") == MODEL_LFM2);
     assert(model_family_from_type("nemotron_h") == MODEL_NEMOTRON_H);
-    assert(model_family_from_type("deepseek_v3") == MODEL_DEEPSEEK_V4);
-    assert(model_family_from_type("deepseek_v3_2") == MODEL_DEEPSEEK_V4);
-    assert(model_family_from_type("deepseek_v32") == MODEL_DEEPSEEK_V4);
+    assert(model_family_from_type("deepseek_v3") == MODEL_DEEPSEEK_V3);
+    assert(model_family_from_type("deepseek_v3_2") == MODEL_DEEPSEEK_V32);
+    assert(model_family_from_type("deepseek_v32") == MODEL_DEEPSEEK_V32);
     assert(model_family_from_type("deepseek_v4") == MODEL_DEEPSEEK_V4);
     assert(model_family_from_type("bert") == MODEL_BERT);
+
+    /* negative: do not prefix-match arbitrary deepseek* */
+    assert(model_family_from_type("deepseek_v5") == MODEL_FAMILY_UNKNOWN);
+    assert(model_family_from_type("deepseek") == MODEL_FAMILY_UNKNOWN);
 
     assert(model_family_from_type("qwen3_moe") == MODEL_FAMILY_UNKNOWN);
     assert(model_family_from_type("qwen3_next") == MODEL_FAMILY_UNKNOWN);
@@ -388,10 +392,35 @@ static void test_family_defaults(void) {
     assert(cfg.head_dim == 768 / 12);
     model_config_free(&cfg);
 
+    /* deepseek_v3 */
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_deepseek_v3");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_DEEPSEEK_V3);
+    assert(cfg.hidden_act == HIDDEN_ACT_SILU);
+    assert(cfg.weight_prefix != NULL && strcmp(cfg.weight_prefix, "model") == 0);
+    model_config_free(&cfg);
+
+    /* deepseek_v32 */
+    rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_deepseek_v32");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_DEEPSEEK_V32);
+    assert(cfg.hidden_act == HIDDEN_ACT_SILU);
+    assert(cfg.weight_prefix != NULL && strcmp(cfg.weight_prefix, "model") == 0);
+    model_config_free(&cfg);
+
+    /* deepseek_v3_2 alias through full load path */
+    rc = model_config_load(&cfg,
+                           MLXD_FIXTURES_DIR "/model_config_deepseek_v3_2_alias");
+    assert(rc == 0);
+    assert(cfg.family == MODEL_DEEPSEEK_V32);
+    model_config_free(&cfg);
+
     /* deepseek_v4 */
     rc = model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config_deepseek_v4");
     assert(rc == 0);
     assert(cfg.family == MODEL_DEEPSEEK_V4);
+    assert(cfg.hidden_act == HIDDEN_ACT_SILU);
+    assert(cfg.weight_prefix != NULL && strcmp(cfg.weight_prefix, "model") == 0);
     model_config_free(&cfg);
 
     /* qwen3 reuse */
@@ -1223,6 +1252,162 @@ static void test_gemma4_hidden_act_parsed(void) {
     model_config_free(&cfg);
 }
 
+/* --- E2 / #109: DeepSeek family split + config fields -------------------- */
+
+static void test_deepseek_fields_unset_on_non_deepseek(void) {
+    model_config_t cfg;
+    /* llama fixture has no DeepSeek keys; DeepSeek-oriented defaults must not
+       bleed into non-DeepSeek families after load. */
+    assert(model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config") == 0);
+    assert(cfg.family == MODEL_LLAMA);
+    assert(cfg.q_lora_rank == 0);
+    assert(cfg.kv_lora_rank == 0);
+    assert(cfg.qk_rope_head_dim == 0);
+    assert(cfg.qk_nope_head_dim == 0);
+    assert(cfg.v_head_dim == 0);
+    assert(cfg.n_routed_experts == 0);
+    assert(cfg.n_shared_experts == 0);
+    assert(cfg.routed_scaling_factor == 0.0f);
+    assert(cfg.moe_layer_freq == 0);
+    assert(cfg.first_k_dense_replace == 0);
+    assert(cfg.n_group == 0);
+    assert(cfg.topk_group == 0);
+    assert(cfg.rope_scaling_mscale_all_dim == 0.0f);
+    assert(cfg.index_head_dim == 0);
+    assert(cfg.index_n_heads == 0);
+    assert(cfg.index_topk == 0);
+    assert(cfg.norm_topk_prob == false);
+    model_config_free(&cfg);
+}
+
+static void test_deepseek_v3_config_fields(void) {
+    model_config_t cfg;
+    assert(model_config_load(&cfg,
+                             MLXD_FIXTURES_DIR "/model_config_deepseek_v3") == 0);
+    assert(cfg.family == MODEL_DEEPSEEK_V3);
+    assert(cfg.q_lora_rank == 128);
+    assert(cfg.kv_lora_rank == 64);
+    assert(cfg.qk_rope_head_dim == 32);
+    assert(cfg.qk_nope_head_dim == 64);
+    assert(cfg.v_head_dim == 64);
+    assert(cfg.n_routed_experts == 16);
+    assert(cfg.n_shared_experts == 1);
+    assert(cfg.num_experts == 16); /* R4 alias from n_routed_experts */
+    assert(cfg.num_experts_per_tok == 4);
+    assert(cfg.routed_scaling_factor == 2.5f);
+    assert(cfg.moe_layer_freq == 1);
+    assert(cfg.first_k_dense_replace == 1);
+    assert(cfg.n_group == 4);
+    assert(cfg.topk_group == 2);
+    assert(cfg.moe_intermediate_size == 256);
+    assert(cfg.norm_topk_prob == true);
+    assert(cfg.rope_scaling_type && strcmp(cfg.rope_scaling_type, "yarn") == 0);
+    assert(cfg.rope_scaling_factor == 40.0f);
+    assert(cfg.rope_scaling_mscale_all_dim == 1.0f);
+    assert(cfg.index_head_dim == 0); /* V3 has no indexer */
+    assert(cfg.index_n_heads == 0);
+    assert(cfg.index_topk == 0);
+    model_config_free(&cfg);
+}
+
+static void test_deepseek_v32_config_fields(void) {
+    model_config_t cfg;
+    assert(model_config_load(
+               &cfg, MLXD_FIXTURES_DIR "/model_config_deepseek_v32") == 0);
+    assert(cfg.family == MODEL_DEEPSEEK_V32);
+    assert(cfg.q_lora_rank == 128);
+    assert(cfg.kv_lora_rank == 64);
+    assert(cfg.qk_rope_head_dim == 32);
+    assert(cfg.qk_nope_head_dim == 64);
+    assert(cfg.v_head_dim == 64);
+    assert(cfg.n_routed_experts == 16);
+    assert(cfg.num_experts == 16);
+    assert(cfg.n_shared_experts == 1);
+    assert(cfg.num_experts_per_tok == 4);
+    assert(cfg.routed_scaling_factor == 2.5f);
+    assert(cfg.moe_layer_freq == 1);
+    assert(cfg.first_k_dense_replace == 1);
+    assert(cfg.n_group == 4);
+    assert(cfg.topk_group == 2);
+    assert(cfg.moe_intermediate_size == 256);
+    assert(cfg.norm_topk_prob == true);
+    assert(cfg.rope_scaling_type && strcmp(cfg.rope_scaling_type, "yarn") == 0);
+    assert(cfg.rope_scaling_factor == 40.0f);
+    assert(cfg.rope_scaling_mscale_all_dim == 1.0f);
+    assert(cfg.index_head_dim == 128);
+    assert(cfg.index_n_heads == 64);
+    assert(cfg.index_topk == 2048);
+    model_config_free(&cfg);
+}
+
+static void test_deepseek_v4_config_intersection(void) {
+    model_config_t cfg;
+    assert(model_config_load(&cfg,
+                             MLXD_FIXTURES_DIR "/model_config_deepseek_v4") == 0);
+    assert(cfg.family == MODEL_DEEPSEEK_V4);
+    assert(cfg.q_lora_rank == 1024);
+    assert(cfg.qk_rope_head_dim == 64);
+    /* Flash omits these V3 MLA fields - stay 0 */
+    assert(cfg.kv_lora_rank == 0);
+    assert(cfg.qk_nope_head_dim == 0);
+    assert(cfg.v_head_dim == 0);
+    assert(cfg.n_group == 0);
+    assert(cfg.topk_group == 0);
+    assert(cfg.moe_layer_freq == 0);
+    assert(cfg.first_k_dense_replace == 0);
+    assert(cfg.n_routed_experts == 256);
+    assert(cfg.num_experts == 256); /* R4 alias */
+    assert(cfg.n_shared_experts == 1);
+    assert(cfg.num_experts_per_tok == 6);
+    assert(cfg.routed_scaling_factor == 1.5f);
+    assert(cfg.moe_intermediate_size == 2048);
+    assert(cfg.index_head_dim == 128);
+    assert(cfg.index_n_heads == 64);
+    assert(cfg.index_topk == 512);
+    assert(cfg.rope_scaling_type && strcmp(cfg.rope_scaling_type, "yarn") == 0);
+    assert(cfg.rope_scaling_factor == 16.0f);
+    assert(cfg.rope_scaling_mscale_all_dim == 0.0f); /* absent on Flash */
+    model_config_free(&cfg);
+}
+
+static void test_deepseek_defaults_absent_keys(void) {
+    model_config_t cfg;
+    assert(model_config_load(
+               &cfg,
+               MLXD_FIXTURES_DIR "/model_config_deepseek_v3_defaults") == 0);
+    assert(cfg.family == MODEL_DEEPSEEK_V3);
+    /* mlx-lm defaults when keys absent */
+    assert(cfg.norm_topk_prob == true);
+    assert(cfg.routed_scaling_factor == 1.0f);
+    /* only n_routed_experts present -> alias into num_experts */
+    assert(cfg.n_routed_experts == 8);
+    assert(cfg.num_experts == 8);
+    model_config_free(&cfg);
+}
+
+static void test_deepseek_num_experts_not_clobbered(void) {
+    model_config_t cfg;
+    assert(model_config_load(
+               &cfg,
+               MLXD_FIXTURES_DIR "/model_config_deepseek_num_experts_both") ==
+           0);
+    assert(cfg.family == MODEL_DEEPSEEK_V3);
+    assert(cfg.num_experts == 8); /* explicit wins */
+    assert(cfg.n_routed_experts == 16);
+    model_config_free(&cfg);
+}
+
+static void test_deepseek_norm_topk_prob_explicit_false(void) {
+    model_config_t cfg;
+    assert(model_config_load(
+               &cfg,
+               MLXD_FIXTURES_DIR "/model_config_deepseek_v3_norm_topk_false") ==
+           0);
+    assert(cfg.family == MODEL_DEEPSEEK_V3);
+    assert(cfg.norm_topk_prob == false); /* explicit false must not be forced true */
+    model_config_free(&cfg);
+}
+
 int main(void) {
     test_happy_path();
     test_kv_heads_default();
@@ -1264,6 +1449,14 @@ int main(void) {
     test_gemma4_family_defaults();
     test_gemma4_hidden_act_parsed();
     test_gemma4_null_defaults();
+
+    test_deepseek_fields_unset_on_non_deepseek();
+    test_deepseek_v3_config_fields();
+    test_deepseek_v32_config_fields();
+    test_deepseek_v4_config_intersection();
+    test_deepseek_defaults_absent_keys();
+    test_deepseek_num_experts_not_clobbered();
+    test_deepseek_norm_topk_prob_explicit_false();
 
     printf("test_model_config: all passed\n");
     return 0;
