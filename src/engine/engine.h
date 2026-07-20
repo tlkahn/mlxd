@@ -14,8 +14,14 @@ typedef struct engine_model engine_model_t;
 /* Exact strcmp sentinel for the CPU-only echo path. No I/O, no mlx. */
 #define MLXD_STUB_MODEL_PATH "stub"
 
-/* Prefill chunk size (tokens). Cancel/shutdown polled between chunks. */
+/* Prefill chunk size (tokens). Cancel/shutdown polled between chunks.
+   Residual non-interruptible window after cancel/shutdown is observed:
+   at most one prefill chunk or one pipelined decode step (sample +
+   optional next forward + async_eval + materialize). Second SIGINT
+   remains the operator hard escape (exits 130). */
+#ifndef MLXD_PREFILL_CHUNK
 #define MLXD_PREFILL_CHUNK 512
+#endif
 
 /* --- Stream (per-request token channel) ----------------------------------- */
 
@@ -85,6 +91,31 @@ typedef enum {
     LOAD_FAILED,
 } load_state_t;
 
+/* --- Generate hooks (test/support; real path only) ------------------------ */
+
+/* Invoked on the engine thread inside handle_generate_real only. Stub
+   generate ignores hooks. Default NULL (no-ops).
+
+   Rules:
+   - Must not call engine_post, engine_destroy, or engine_signal_shutdown.
+   - May block (condvar) so a test thread can cancel/shutdown deterministically.
+   - Not safe concurrent with an in-flight generate; set after load, before
+     posting generate. hooks == NULL clears.
+
+   Ordering at each site: poll flags -> hook -> re-poll flags -> work.
+   The re-poll ensures a cancel that arrives while the hook is blocked is
+   observed before the next non-interruptible mlx op. */
+typedef struct {
+    /* Prefill poll site, before model_forward for this chunk.
+       pos = absolute token index; chunk_len = tokens in this chunk. */
+    void (*on_prefill_chunk)(void *ud, int pos, int chunk_len);
+    /* Decode poll site, before sampling step `step` (0-based emitted count). */
+    void (*on_decode_step)(void *ud, int step);
+    /* After prefill completes, before the last-prompt-token seed forward. */
+    void (*on_before_seed)(void *ud);
+    void *ud;
+} engine_gen_hooks_t;
+
 /* --- Engine --------------------------------------------------------------- */
 
 typedef struct {
@@ -100,6 +131,7 @@ typedef struct {
     engine_model_t *model;        /* owned by engine thread; shell allocated in init */
     char           *loaded_model; /* retained path string for logging / unload */
     stream_t       *inflight;
+    engine_gen_hooks_t gen_hooks; /* test/support; real path only */
 } engine_t;
 
 int  engine_init(engine_t *eng);
@@ -147,5 +179,9 @@ void engine_post(engine_t *eng, engine_cmd_t *cmd);
    On shutdown rejection, frees path and returns -1 without changing
    load_state. Returns 0 if enqueued. */
 int engine_post_load(engine_t *eng, char *model_path);
+
+/* Install or clear generate hooks (see engine_gen_hooks_t). hooks == NULL
+   clears. Not safe concurrent with in-flight generate. */
+void engine_set_gen_hooks(engine_t *eng, const engine_gen_hooks_t *hooks);
 
 #endif
