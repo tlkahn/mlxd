@@ -54,6 +54,11 @@ typedef struct {
     double rope_high_freq_factor;
     int rope_original_max_position_embeddings;
 
+    /* qwen3_5 full-attn deltas (0 = unset / default) */
+    bool attn_output_gate;
+    double partial_rotary_factor; /* emit under rope_parameters when > 0 */
+    int full_attention_interval; /* 0 = do not emit; 1 = pure dense */
+
     const tensor_spec_t *top;   int n_top;
     const tensor_spec_t *layer; int n_layer;
 
@@ -72,7 +77,10 @@ static void resolve_shape(const recipe_t *r, const char *suffix,
     } else if (strcmp(suffix, "lm_head.weight") == 0) {
         shape[0] = r->vocab; shape[1] = r->hidden; *ndim = 2;
     } else if (strcmp(suffix, "self_attn.q_proj.weight") == 0) {
-        shape[0] = r->heads * r->head_dim; shape[1] = r->hidden; *ndim = 2;
+        /* attn_output_gate doubles q_proj out-features: [2*H*D, hidden] */
+        int q_out = r->heads * r->head_dim;
+        if (r->attn_output_gate) q_out *= 2;
+        shape[0] = q_out; shape[1] = r->hidden; *ndim = 2;
     } else if (strcmp(suffix, "self_attn.k_proj.weight") == 0) {
         shape[0] = r->kv_heads * r->head_dim; shape[1] = r->hidden; *ndim = 2;
     } else if (strcmp(suffix, "self_attn.v_proj.weight") == 0) {
@@ -261,6 +269,27 @@ static const recipe_t LLAMA3 = {
     .layer = LLAMA3_LAYER, .n_layer = LEN(LLAMA3_LAYER),
     .emit_dense = true, .emit_sharded = false, .emit_tied = true,
     .fixture_base = "tiny_llama3",
+};
+
+/* Pure-dense qwen3_5: full-attn deltas only (gate + partial rope).
+   No linear_attn tensors / hybrid layer_types - those are Stage E. */
+static const recipe_t QWEN3_5 = {
+    .model_type = "qwen3_5",
+    .vocab = 256, .hidden = 64, .heads = 4, .kv_heads = 2,
+    .head_dim = 16, .inter = 128, .layers = 2,
+    .group_size = 32, .quant_bits = 4,
+    .max_position_embeddings = 512,
+    .rms_norm_eps = 1e-6, .rope_theta = 10000000.0,
+    .sliding_window = 0, .sliding_window_pattern = 0,
+    .query_pre_attn_scalar = 0, .rope_local_base_freq = 0,
+    .has_lm_head = true, .tie_word_embeddings = false,
+    .attn_output_gate = true,
+    .partial_rotary_factor = 0.25,
+    .full_attention_interval = 1,
+    .top = QWEN3_TOP, .n_top = LEN(QWEN3_TOP),
+    .layer = QWEN3_LAYER, .n_layer = LEN(QWEN3_LAYER),
+    .emit_dense = true, .emit_sharded = false, .emit_tied = true,
+    .fixture_base = "tiny_qwen3_5",
 };
 
 /* --- gemma4 recipe (custom build - not table driven) --------------------- */
@@ -492,8 +521,8 @@ static void write_gemma4_config(const char *dir) {
     yyjson_mut_doc_free(doc);
 }
 
-static const recipe_t *RECIPES[] = { &QWEN3, &GEMMA3, &LLAMA3 };
-static const int N_RECIPES = 3;
+static const recipe_t *RECIPES[] = { &QWEN3, &GEMMA3, &LLAMA3, &QWEN3_5 };
+static const int N_RECIPES = 4;
 
 /* --- Build tensors (table-driven) ---------------------------------------- */
 
@@ -557,7 +586,10 @@ static void write_config_json(const recipe_t *r, const char *dir,
     yyjson_mut_obj_add_int(doc, root, "max_position_embeddings",
                            r->max_position_embeddings);
     yyjson_mut_obj_add_real(doc, root, "rms_norm_eps", r->rms_norm_eps);
-    yyjson_mut_obj_add_real(doc, root, "rope_theta", r->rope_theta);
+    /* When rope_parameters carries rope_theta (partial_rotary path), skip the
+       flat top-level duplicate to match real qwen3_5 configs. */
+    if (!(r->partial_rotary_factor > 0.0))
+        yyjson_mut_obj_add_real(doc, root, "rope_theta", r->rope_theta);
     yyjson_mut_obj_add_bool(doc, root, "tie_word_embeddings", tied);
 
     if (r->sliding_window > 0) {
@@ -583,6 +615,21 @@ static void write_config_json(const recipe_t *r, const char *dir,
         yyjson_mut_obj_add_int(doc, rs, "original_max_position_embeddings",
                                r->rope_original_max_position_embeddings);
         yyjson_mut_obj_add_val(doc, root, "rope_scaling", rs);
+    }
+
+    if (r->attn_output_gate)
+        yyjson_mut_obj_add_bool(doc, root, "attn_output_gate", true);
+
+    if (r->full_attention_interval > 0)
+        yyjson_mut_obj_add_int(doc, root, "full_attention_interval",
+                               r->full_attention_interval);
+
+    if (r->partial_rotary_factor > 0.0) {
+        yyjson_mut_val *rp = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_real(doc, rp, "rope_theta", r->rope_theta);
+        yyjson_mut_obj_add_real(doc, rp, "partial_rotary_factor",
+                                r->partial_rotary_factor);
+        yyjson_mut_obj_add_val(doc, root, "rope_parameters", rp);
     }
 
     if (quantized) {

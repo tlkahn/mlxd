@@ -627,10 +627,64 @@ static void test_expected_names_gemma4(void) {
     assert(weights_expected_names(&cfg, small, 2) == -1);
 }
 
+static void test_expected_names_qwen3_5(void) {
+    model_config_t cfg = {0};
+    cfg.family = MODEL_QWEN3_5;
+    cfg.weight_prefix = "model";
+    cfg.num_hidden_layers = 2;
+    cfg.has_qk_norm = true;
+    cfg.tie_word_embeddings = false;
+    cfg.attn_output_gate = true;
+
+    /* Same name set as qwen3; gate is a q_proj shape convention, not a name. */
+    model_config_t q3 = {0};
+    q3.family = MODEL_QWEN3;
+    q3.weight_prefix = "model";
+    q3.num_hidden_layers = 2;
+    q3.has_qk_norm = true;
+    q3.tie_word_embeddings = false;
+
+    int count_q35 = weights_expected_names(&cfg, NULL, 0);
+    int count_q3 = weights_expected_names(&q3, NULL, 0);
+    assert(count_q35 == count_q3);
+    assert(count_q35 == 25);
+
+    weight_expected_t names[25];
+    int rc = weights_expected_names(&cfg, names, 25);
+    assert(rc == 25);
+
+    bool found_q0 = false, found_lm = false, found_lin = false;
+    for (int i = 0; i < rc; i++) {
+        if (strcmp(names[i].name, "model.layers.0.self_attn.q_proj") == 0) {
+            assert(names[i].kind == WEIGHT_KIND_MATMUL);
+            found_q0 = true;
+        }
+        if (strcmp(names[i].name, "lm_head") == 0) {
+            found_lm = true;
+        }
+        if (strstr(names[i].name, "linear_attn") != NULL) {
+            found_lin = true;
+        }
+    }
+    assert(found_q0);
+    assert(found_lm);
+    assert(!found_lin);
+
+    /* Tied: no lm_head */
+    cfg.tie_word_embeddings = true;
+    int tied = weights_expected_names(&cfg, NULL, 0);
+    assert(tied == 24);
+    weight_expected_t tied_names[24];
+    rc = weights_expected_names(&cfg, tied_names, 24);
+    assert(rc == 24);
+    for (int i = 0; i < rc; i++)
+        assert(strcmp(tied_names[i].name, "lm_head") != 0);
+}
+
 static void test_expected_names_other_families_zero(void) {
     static const model_family_t others[] = {
         MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3,
-        MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
+        MODEL_QWEN2, MODEL_QWEN3_5_MOE,
         MODEL_MISTRAL, MODEL_LFM2,
         MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
     };
@@ -846,6 +900,9 @@ int main(void) {
 
     test_expected_names_gemma4();
     printf("  test_expected_names_gemma4: passed\n");
+
+    test_expected_names_qwen3_5();
+    printf("  test_expected_names_qwen3_5: passed\n");
 
     test_expected_names_other_families_zero();
     printf("  test_expected_names_other_families_zero: passed\n");

@@ -30,7 +30,8 @@ static void test_reject_unsupported_family(void) {
     cfg.family = MODEL_GEMMA3;
     char err[256] = {0};
     assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-    assert(strcmp(err, "unsupported model family (only qwen3/llama/gemma4 dense supported)") == 0);
+    assert(strcmp(err,
+        "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)") == 0);
 }
 
 static void test_reject_attention_bias(void) {
@@ -124,7 +125,7 @@ static void test_reject_attn_output_gate(void) {
 static void test_reject_all_other_families(void) {
     static const model_family_t others[] = {
         MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3,
-        MODEL_QWEN2, MODEL_QWEN3_5, MODEL_QWEN3_5_MOE,
+        MODEL_QWEN2, MODEL_QWEN3_5_MOE,
         MODEL_MISTRAL, MODEL_LFM2,
         MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
     };
@@ -133,7 +134,158 @@ static void test_reject_all_other_families(void) {
         cfg.family = others[i];
         char err[256] = {0};
         assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
-        assert(strcmp(err, "unsupported model family (only qwen3/llama/gemma4 dense supported)") == 0);
+        assert(strcmp(err,
+            "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)") == 0);
+    }
+}
+
+/* --- qwen3_5 pure-dense gate tests (Stage D6 / R1) ----------------------- */
+
+static model_config_t make_qwen3_5_supported(void) {
+    model_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.family = MODEL_QWEN3_5;
+    cfg.hidden_act = HIDDEN_ACT_SILU;
+    cfg.attn_output_gate = true;
+    cfg.partial_rotary_factor = 0.25f;
+    cfg.head_dim = 16; /* 16 * 0.25 = 4, even and >= 2 */
+    cfg.has_qk_norm = true;
+    cfg.num_experts = 0;
+    cfg.linear_num_key_heads = 0;
+    cfg.linear_num_value_heads = 0;
+    cfg.full_attention_interval = 0;
+    return cfg;
+}
+
+static void test_qwen3_5_pure_dense_passes(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    char err[256] = {0};
+    assert(cfg.attn_output_gate == true);
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+    assert(err[0] == '\0');
+}
+
+static void test_qwen3_5_rejects_gate_off(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    cfg.attn_output_gate = false;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "qwen3_5 requires attn_output_gate") != NULL);
+}
+
+static void test_qwen3_5_full_attention_interval(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    char err[256] = {0};
+
+    /* interval > 1 implies hybrid layers (is_linear when (idx+1)%interval != 0) */
+    cfg.full_attention_interval = 4;
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "full_attention_interval") != NULL);
+
+    /* interval == 1 is pure dense (every layer full-attn) */
+    cfg.full_attention_interval = 1;
+    memset(err, 0, sizeof(err));
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+
+    /* interval == 0 accepted (unset / no hybrid schedule) */
+    cfg.full_attention_interval = 0;
+    memset(err, 0, sizeof(err));
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+}
+
+static void test_qwen3_5_rejects_odd_rope_dims(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    /* head_dim=6, prf=0.5 -> dims=3 (odd); mx.fast.rope requires even >= 2 */
+    cfg.head_dim = 6;
+    cfg.partial_rotary_factor = 0.5f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial_rotary_factor yields invalid rope dims") != NULL);
+
+    /* even product stays accepted (16 * 0.25 = 4) */
+    cfg.head_dim = 16;
+    cfg.partial_rotary_factor = 0.25f;
+    memset(err, 0, sizeof(err));
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+}
+
+static void test_qwen3_5_moe_family_still_rejected(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    cfg.family = MODEL_QWEN3_5_MOE;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err,
+        "unsupported model family (only qwen3/llama/gemma4/qwen3_5 dense supported)") == 0);
+}
+
+static void test_qwen3_5_rejects_linear_heads(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    cfg.linear_num_key_heads = 16;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "linear attention") != NULL);
+}
+
+static void test_qwen3_5_rejects_experts(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    cfg.num_experts = 8;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strcmp(err, "MoE models not supported") == 0);
+}
+
+static void test_qwen3_5_rejects_partial_rotary_out_of_range(void) {
+    model_config_t cfg = make_qwen3_5_supported();
+    cfg.partial_rotary_factor = 0.0f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial_rotary_factor") != NULL);
+
+    cfg.partial_rotary_factor = 1.5f;
+    memset(err, 0, sizeof(err));
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial_rotary_factor") != NULL);
+}
+
+static void test_qwen3_5_loaded_boundary_fixtures(void) {
+    /* pure-dense full fixture -> accept */
+    {
+        model_config_t cfg;
+        int rc = model_config_load(
+            &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_dense_full");
+        assert(rc == 0);
+        assert(cfg.family == MODEL_QWEN3_5);
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) == 0);
+        model_config_free(&cfg);
+    }
+
+    /* moe fixture -> family MOE -> reject */
+    {
+        model_config_t cfg;
+        int rc = model_config_load(
+            &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_moe");
+        assert(rc == 0);
+        assert(cfg.family == MODEL_QWEN3_5_MOE);
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        model_config_free(&cfg);
+    }
+
+    /* hybrid-dense (linear heads, num_experts==0) stays MODEL_QWEN3_5 under R1
+       but gate rejects linear attention */
+    {
+        model_config_t cfg;
+        int rc = model_config_load(
+            &cfg, MLXD_FIXTURES_DIR "/model_config_qwen3_5_hybrid_dense");
+        assert(rc == 0);
+        assert(cfg.family == MODEL_QWEN3_5);
+        assert(cfg.num_experts == 0);
+        assert(cfg.linear_num_key_heads > 0);
+        char err[256] = {0};
+        assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+        assert(strstr(err, "linear attention") != NULL);
+        model_config_free(&cfg);
     }
 }
 
@@ -285,6 +437,14 @@ static void test_gemma4_reject_proportional_factor_zero(void) {
     assert(strstr(err, "rope_proportional_factor") != NULL);
 }
 
+static void test_gemma4_reject_partial_rotary_plain(void) {
+    model_config_t cfg = make_gemma4_supported();
+    cfg.partial_rotary_factor = 0.5f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial rotary") != NULL);
+}
+
 static void test_gemma4_reject_partial_rotary_global_zero(void) {
     model_config_t cfg = make_gemma4_supported();
     cfg.partial_rotary_factor_global = 0.0f;
@@ -432,6 +592,9 @@ int main(void) {
     test_gemma4_reject_proportional_factor_zero();
     printf("  test_gemma4_reject_proportional_factor_zero: passed\n");
 
+    test_gemma4_reject_partial_rotary_plain();
+    printf("  test_gemma4_reject_partial_rotary_plain: passed\n");
+
     test_gemma4_reject_partial_rotary_global_zero();
     printf("  test_gemma4_reject_partial_rotary_global_zero: passed\n");
 
@@ -533,6 +696,33 @@ int main(void) {
 
     test_llama_llama3_valid_still_passes();
     printf("  test_llama_llama3_valid_still_passes: passed\n");
+
+    test_qwen3_5_pure_dense_passes();
+    printf("  test_qwen3_5_pure_dense_passes: passed\n");
+
+    test_qwen3_5_rejects_gate_off();
+    printf("  test_qwen3_5_rejects_gate_off: passed\n");
+
+    test_qwen3_5_full_attention_interval();
+    printf("  test_qwen3_5_full_attention_interval: passed\n");
+
+    test_qwen3_5_rejects_odd_rope_dims();
+    printf("  test_qwen3_5_rejects_odd_rope_dims: passed\n");
+
+    test_qwen3_5_moe_family_still_rejected();
+    printf("  test_qwen3_5_moe_family_still_rejected: passed\n");
+
+    test_qwen3_5_rejects_linear_heads();
+    printf("  test_qwen3_5_rejects_linear_heads: passed\n");
+
+    test_qwen3_5_rejects_experts();
+    printf("  test_qwen3_5_rejects_experts: passed\n");
+
+    test_qwen3_5_rejects_partial_rotary_out_of_range();
+    printf("  test_qwen3_5_rejects_partial_rotary_out_of_range: passed\n");
+
+    test_qwen3_5_loaded_boundary_fixtures();
+    printf("  test_qwen3_5_loaded_boundary_fixtures: passed\n");
 
     printf("test_emodel_gate: all passed\n");
     return 0;

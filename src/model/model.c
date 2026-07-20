@@ -355,7 +355,10 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         cfg->has_qk_norm          = true;
         cfg->hidden_act           = HIDDEN_ACT_SILU;
         cfg->has_sliding_window   = false;
-        cfg->attn_output_gate     = true;
+        /* Default true only when key absent; honor explicit false. Gate rejects
+           false later (no oracle / real checkpoint for gate-off). */
+        if (yyjson_obj_get(cfg_obj, "attn_output_gate") == NULL)
+            cfg->attn_output_gate = true;
         cfg->rope_scaling_factor  = 1.0f;
         cfg->rope_local_base_freq = cfg->rope_theta;
         if (yyjson_obj_get(cfg_obj, "head_dim") == NULL &&

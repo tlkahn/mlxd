@@ -26,7 +26,11 @@ family_id() {
         llama)   echo "mlx-community/TinyLlama-1.1B-Chat-v1.0-4bit" ;;
         mistral) echo "" ;;
         gemma4)  echo "mlx-community/gemma-4-e4b-it-4bit" ;;
-        qwen3_5) echo "" ;;
+        # D6 records the smallest dense 4-bit Qwen3.5 id. Real checkpoints are
+        # hybrid (linear + full attention). mlxd Stage D rejects linear
+        # attention; byte parity is Stage E. skip-if-absent still applies when
+        # the snapshot is not on disk.
+        qwen3_5) echo "mlx-community/Qwen3.5-0.8B-4bit" ;;
         *)       return 1 ;;
     esac
 }
@@ -73,6 +77,17 @@ run_one() {
 
     if [ ! -d "$_dir" ]; then
         printf 'skipped: checkpoint dir absent for %s (%s)\n' "$_fam" "$_dir"
+        return 0
+    fi
+
+    # qwen3_5: real checkpoints are hybrid (linear + full attention). Stage D
+    # rejects linear attention at the support gate, so the recorded canonical
+    # id cannot run parity yet. Hard-skip when resolved via the family table /
+    # MLXD_PARITY_CKPT_ROOT path. MLXD_PARITY_CKPT_QWEN3_5 remains an escape
+    # hatch for a future dense checkpoint (checked above via _override).
+    # Stage E deletes this branch.
+    if [ "$_fam" = "qwen3_5" ] && [ -z "$_override" ]; then
+        printf 'skipped: qwen3_5 hybrid parity deferred to Stage E\n'
         return 0
     fi
 

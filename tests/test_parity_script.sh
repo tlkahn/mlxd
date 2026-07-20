@@ -625,13 +625,33 @@ else
     fail "wrapper-unknown-family-lfm2" "expected exit 2 + usage (rc=$rc)"
 fi
 
-# --- wrapper: skip on TBD id (gemma4) ---
+# --- wrapper: skip when canonical id present but dir absent (gemma4, qwen3_5) ---
 
 out=$(MLXD_PARITY_CKPT_ROOT=/tmp sh "$WRAPPER" gemma4 2>&1) && rc=0 || rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped.*no canonical checkpoint id'; then
-    pass "wrapper-skip-tbd-gemma4"
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped.*checkpoint dir absent'; then
+    pass "wrapper-skip-absent-gemma4"
 else
-    fail "wrapper-skip-tbd-gemma4" "expected exit 0 + skipped:no canonical (rc=$rc)"
+    fail "wrapper-skip-absent-gemma4" "expected exit 0 + skipped:dir absent (rc=$rc)"
+fi
+
+out=$(MLXD_PARITY_CKPT_ROOT=/tmp sh "$WRAPPER" qwen3_5 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped.*checkpoint dir absent'; then
+    pass "wrapper-skip-absent-qwen3_5"
+else
+    fail "wrapper-skip-absent-qwen3_5" "expected exit 0 + skipped:dir absent (rc=$rc)"
+fi
+
+# --- wrapper: qwen3_5 hard-skips even when hybrid snapshot dir is present ---
+# Real Qwen3.5 checkpoints are hybrid; Stage D rejects them. Keep the recorded
+# canonical id but never invoke parity_temp0.sh via the root path.
+W_Q35_DIR=$(mktemp -d)
+mkdir -p "$W_Q35_DIR/root/mlx-community/Qwen3.5-0.8B-4bit"
+out=$(MLXD_PARITY_CKPT_ROOT="$W_Q35_DIR/root" sh "$WRAPPER" qwen3_5 2>&1) && rc=0 || rc=$?
+rm -rf "$W_Q35_DIR"
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'skipped: qwen3_5 hybrid parity deferred to Stage E'; then
+    pass "wrapper-skip-present-qwen3_5-hybrid"
+else
+    fail "wrapper-skip-present-qwen3_5-hybrid" "expected exit 0 + hybrid deferred skip (rc=$rc out=$out)"
 fi
 
 # --- wrapper: per-family override beats MLXD_PARITY_CKPT_ROOT (N3) ---

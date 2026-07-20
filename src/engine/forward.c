@@ -476,6 +476,22 @@ cleanup:
     return rc;
 }
 
+/* RoPE dims for partial_rotary_factor on the full-attention path (qwen3_5).
+   Does not consult partial_rotary_factor_global (gemma4 freqs path).
+   Mirrors mlx-lm int(head_dim * prf). Every family's gate constrains
+   partial_rotary_factor (qwen3/llama via reject_dense_common, gemma4
+   explicitly), so only qwen3_5 reaches the non-1.0 path; its gate also
+   rejects odd/degenerate products so dims here are even and >= 2. */
+static int fwd_rope_dims_partial(const model_config_t *cfg, int head_dim) {
+    float prf = cfg->partial_rotary_factor;
+    if (prf <= 0.0f || prf > 1.0f)
+        return head_dim;
+    int dims = (int)((float)head_dim * prf);
+    if (dims <= 0 || dims > head_dim)
+        return head_dim;
+    return dims;
+}
+
 int fwd_attention(mlx_array *out, mlx_array x, int layer,
                   const weights_t *w, const model_config_t *cfg,
                   kvcache_t *kv, mlx_array rope_freqs, mlx_stream s) {
@@ -493,6 +509,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
         cfg->attn_scale_one ? 1.0f : 1.0f / sqrtf((float)qpas);
     bool global = model_layer_is_global(cfg, layer);
     int kv_src = model_kv_source_layer(cfg, layer);
+    int rope_dims = fwd_rope_dims_partial(cfg, hd_l);
 
     mlx_array q = mlx_array_new();
     mlx_array k = mlx_array_new();
@@ -516,6 +533,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     mlx_array attn_reshaped = mlx_array_new();
     mlx_array result = mlx_array_new();
     mlx_array vnorm_w = mlx_array_new();
+    mlx_array gate = mlx_array_new();
 
     weight_triplet_t q_tri, k_tri, v_tri, o_tri;
     memset(&q_tri, 0, sizeof(q_tri));
@@ -523,14 +541,52 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     memset(&v_tri, 0, sizeof(v_tri));
     memset(&o_tri, 0, sizeof(o_tri));
 
-    /* Q projection (always present) */
+    /* Q projection (always present). With attn_output_gate, out features are
+       2*H*D and are split into queries + gate (mlx-lm Qwen3NextAttention). */
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.q_proj");
     if (weights_get_triplet(&q_tri, w, name) != 0) goto cleanup;
     if (fwd_linear(&q, x, &q_tri, cfg, s) != 0) goto cleanup;
     if (cfg->attention_bias && add_proj_bias(&q, w, name, s) != 0) goto cleanup;
 
-    int q_shape[] = {B, S, n_heads, hd_l};
-    if (!MLXB_CHECK(mlx_reshape(&q_reshaped, q, q_shape, 4, s))) goto cleanup;
+    if (cfg->attn_output_gate) {
+        int q_gate_shape[] = {B, S, n_heads, hd_l * 2};
+        if (!MLXB_CHECK(mlx_reshape(&q_reshaped, q, q_gate_shape, 4, s)))
+            goto cleanup;
+
+        mlx_vector_array split_vec = mlx_vector_array_new();
+        if (!MLXB_CHECK(mlx_split(&split_vec, q_reshaped, 2, -1, s))) {
+            mlx_vector_array_free(split_vec);
+            goto cleanup;
+        }
+        if (mlx_vector_array_size(split_vec) != 2) {
+            mlx_vector_array_free(split_vec);
+            goto cleanup;
+        }
+
+        mlx_array queries = mlx_array_new();
+        mlx_array gate_4d = mlx_array_new();
+        if (!MLXB_CHECK(mlx_vector_array_get(&queries, split_vec, 0)) ||
+            !MLXB_CHECK(mlx_vector_array_get(&gate_4d, split_vec, 1))) {
+            mlx_array_free(queries);
+            mlx_array_free(gate_4d);
+            mlx_vector_array_free(split_vec);
+            goto cleanup;
+        }
+        mlx_vector_array_free(split_vec);
+
+        mlx_array_free(q_reshaped);
+        q_reshaped = queries;
+
+        int gate_flat[] = {B, S, n_heads * hd_l};
+        if (!MLXB_CHECK(mlx_reshape(&gate, gate_4d, gate_flat, 3, s))) {
+            mlx_array_free(gate_4d);
+            goto cleanup;
+        }
+        mlx_array_free(gate_4d);
+    } else {
+        int q_shape[] = {B, S, n_heads, hd_l};
+        if (!MLXB_CHECK(mlx_reshape(&q_reshaped, q, q_shape, 4, s))) goto cleanup;
+    }
 
     /* Q norm */
     if (cfg->has_qk_norm) {
@@ -566,7 +622,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
            Rope offset for Q = source's offset - S (source ran earlier this forward). */
         int src_offset = kvcache_layer_offset(kv, kv_src) - S;
         if (src_offset < 0) src_offset = 0;
-        if (fwd_rope_apply(&q_roped, q_transposed, hd_l, cfg, layer,
+        if (fwd_rope_apply(&q_roped, q_transposed, rope_dims, cfg, layer,
                            src_offset, rope_freqs, s) != 0)
             goto cleanup;
 
@@ -579,7 +635,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
         /* K/V owning layer */
         int offset = kvcache_layer_offset(kv, layer);
         assert(offset >= 0);
-        if (fwd_rope_apply(&q_roped, q_transposed, hd_l, cfg, layer,
+        if (fwd_rope_apply(&q_roped, q_transposed, rope_dims, cfg, layer,
                            offset, rope_freqs, s) != 0)
             goto cleanup;
 
@@ -642,7 +698,7 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
             goto cleanup;
 
         /* RoPE on K */
-        if (fwd_rope_apply(&k_roped, k_transposed, hd_l, cfg, layer,
+        if (fwd_rope_apply(&k_roped, k_transposed, rope_dims, cfg, layer,
                            offset, rope_freqs, s) != 0)
             goto cleanup;
 
@@ -682,6 +738,21 @@ int fwd_attention(mlx_array *out, mlx_array x, int layer,
     if (!MLXB_CHECK(mlx_reshape(&attn_reshaped, attn_back, out_shape, 3, s)))
         goto cleanup;
 
+    /* Optional output gate: o_proj(attn * sigmoid(gate)) */
+    if (cfg->attn_output_gate) {
+        mlx_array gate_sig = mlx_array_new();
+        mlx_array gated = mlx_array_new();
+        if (!MLXB_CHECK(mlx_sigmoid(&gate_sig, gate, s)) ||
+            !MLXB_CHECK(mlx_multiply(&gated, attn_reshaped, gate_sig, s))) {
+            mlx_array_free(gate_sig);
+            mlx_array_free(gated);
+            goto cleanup;
+        }
+        mlx_array_free(gate_sig);
+        mlx_array_free(attn_reshaped);
+        attn_reshaped = gated;
+    }
+
     /* O projection */
     weights_tensor_name(name, sizeof(name), cfg, layer, "self_attn.o_proj");
     if (weights_get_triplet(&o_tri, w, name) != 0) goto cleanup;
@@ -697,6 +768,7 @@ cleanup:
     weights_triplet_free(&v_tri);
     weights_triplet_free(&k_tri);
     weights_triplet_free(&q_tri);
+    mlx_array_free(gate);
     mlx_array_free(vnorm_w);
     mlx_array_free(result);
     mlx_array_free(attn_reshaped);
