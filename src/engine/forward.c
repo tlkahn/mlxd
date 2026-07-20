@@ -1378,3 +1378,490 @@ cleanup:
     mlx_array_free(ln1_w);
     return rc;
 }
+
+/* ==========================================================================
+ * MoE block - family-agnostic router / switch GLU / shared experts
+ * Decisions R1-R5: see doc/plans/impl-107-e1-moe-block-fwd_moe.md
+ * ========================================================================== */
+
+static const mlx_array fwd_null_array = {.ctx = NULL};
+
+static bool fwd_triplet_present(const weight_triplet_t *tri) {
+    return tri && tri->weight.ctx != NULL;
+}
+
+int fwd_array_contiguous(mlx_array *out, mlx_array in, mlx_stream s) {
+    if (!out || !in.ctx) return -1;
+    mlx_array result = mlx_array_new();
+    if (!MLXB_CHECK(mlx_contiguous(&result, in, false, s))) {
+        mlx_array_free(result);
+        return -1;
+    }
+    mlx_array_free(*out);
+    *out = result;
+    return 0;
+}
+
+int fwd_moe_route_softmax(mlx_array *inds, mlx_array *scores,
+                          mlx_array router_logits, int top_k,
+                          bool norm_topk_prob, mlx_stream s) {
+    if (!inds || !scores || !router_logits.ctx || top_k < 1) return -1;
+
+    int ndim = (int)mlx_array_ndim(router_logits);
+    if (ndim < 1) return -1;
+    int E = mlx_array_dim(router_logits, ndim - 1);
+    if (top_k > E) return -1;
+
+    int rc = -1;
+    mlx_array neg = mlx_array_new();
+    mlx_array partitioned = mlx_array_new();
+    mlx_array inds_tmp = mlx_array_new();
+    mlx_array probs = mlx_array_new();
+    mlx_array top_w = mlx_array_new();
+    mlx_array scores_tmp = mlx_array_new();
+    mlx_array weight_sum = mlx_array_new();
+
+    /* Top-k largest: argpartition on negated logits, take first k. */
+    if (!MLXB_CHECK(mlx_negative(&neg, router_logits, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_argpartition_axis(&partitioned, neg, top_k - 1, -1, s)))
+        goto cleanup;
+
+    /* Slice [... , :top_k] */
+    {
+        int start[8], stop[8], strides[8];
+        if (ndim > 8) goto cleanup;
+        for (int d = 0; d < ndim; d++) {
+            start[d] = 0;
+            stop[d] = (d == ndim - 1) ? top_k : mlx_array_dim(partitioned, d);
+            strides[d] = 1;
+        }
+        if (!MLXB_CHECK(mlx_slice(&inds_tmp, partitioned, start, (size_t)ndim,
+                                  stop, (size_t)ndim, strides, (size_t)ndim, s)))
+            goto cleanup;
+    }
+
+    if (!MLXB_CHECK(mlx_softmax_axis(&probs, router_logits, -1, true, s)))
+        goto cleanup;
+    if (!MLXB_CHECK(mlx_take_along_axis(&top_w, probs, inds_tmp, -1, s)))
+        goto cleanup;
+
+    if (norm_topk_prob) {
+        if (!MLXB_CHECK(mlx_sum_axis(&weight_sum, top_w, -1, true, s)))
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_divide(&scores_tmp, top_w, weight_sum, s)))
+            goto cleanup;
+    } else {
+        /* Own a distinct array for scores (top_w freed on cleanup). */
+        if (!MLXB_CHECK(mlx_contiguous(&scores_tmp, top_w, false, s)))
+            goto cleanup;
+    }
+
+    mlx_array_free(*inds);
+    mlx_array_free(*scores);
+    *inds = inds_tmp;
+    *scores = scores_tmp;
+    inds_tmp = mlx_array_new();
+    scores_tmp = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(weight_sum);
+    mlx_array_free(scores_tmp);
+    mlx_array_free(top_w);
+    mlx_array_free(probs);
+    mlx_array_free(inds_tmp);
+    mlx_array_free(partitioned);
+    mlx_array_free(neg);
+    return rc;
+}
+
+int fwd_gather_expert_linear(mlx_array *out, mlx_array x, mlx_array inds,
+                             const weight_triplet_t *tri,
+                             mlx_array lhs_indices, bool sorted,
+                             const model_config_t *cfg, mlx_stream s) {
+    if (!out || !tri || !cfg || !x.ctx || !inds.ctx) return -1;
+    if (!tri->weight.ctx) return -1;
+
+    int rc = -1;
+    mlx_array result = mlx_array_new();
+    mlx_array lhs = lhs_indices.ctx ? lhs_indices : fwd_null_array;
+
+    if (tri->quantized) {
+        mlx_array biases = tri->biases.ctx ? tri->biases : fwd_null_array;
+        /* R4: gather_qmm honors sorted; transpose=true for [E,out,in]. */
+        if (!MLXB_CHECK(mlx_gather_qmm(
+                &result, x, tri->weight, tri->scales, biases,
+                lhs, inds, true,
+                (mlx_optional_int){.value = cfg->quant_group_size, .has_value = true},
+                (mlx_optional_int){.value = cfg->quant_bits, .has_value = true},
+                "affine", sorted, s))) {
+            goto cleanup;
+        }
+    } else {
+        /* R3/R4: bf16 weight is [E,in,out]; always sorted_indices=false
+           (mlx 0.31.2 dense sorted bug). */
+        (void)sorted;
+        if (!MLXB_CHECK(mlx_gather_mm(&result, x, tri->weight, lhs, inds,
+                                      false, s))) {
+            goto cleanup;
+        }
+    }
+
+    if (mlx_array_dtype(result) != MLX_BFLOAT16) {
+        mlx_array casted = mlx_array_new();
+        if (!MLXB_CHECK(mlx_astype(&casted, result, MLX_BFLOAT16, s))) {
+            mlx_array_free(casted);
+            goto cleanup;
+        }
+        mlx_array_free(result);
+        result = casted;
+    }
+
+    mlx_array_free(*out);
+    *out = result;
+    return 0;
+
+cleanup:
+    mlx_array_free(result);
+    return rc;
+}
+
+/* Dense SwiGLU from explicit triplets (shared-expert path). */
+static int fwd_swiglu_triplets(mlx_array *out, mlx_array x,
+                               const weight_triplet_t *gate_tri,
+                               const weight_triplet_t *up_tri,
+                               const weight_triplet_t *down_tri,
+                               const model_config_t *cfg, mlx_stream s) {
+    if (!out || !cfg) return -1;
+    if (!fwd_triplet_present(gate_tri) || !fwd_triplet_present(up_tri) ||
+        !fwd_triplet_present(down_tri))
+        return -1;
+
+    int rc = -1;
+    mlx_array gate = mlx_array_new();
+    mlx_array up = mlx_array_new();
+    mlx_array gate_sig = mlx_array_new();
+    mlx_array silu = mlx_array_new();
+    mlx_array down_in = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    if (fwd_linear(&gate, x, gate_tri, cfg, s) != 0) goto cleanup;
+    if (fwd_linear(&up, x, up_tri, cfg, s) != 0) goto cleanup;
+
+    if (cfg->hidden_act == HIDDEN_ACT_GELU_APPROX) {
+        if (fwd_gelu_approx(&silu, gate, s) != 0) goto cleanup;
+    } else {
+        if (!MLXB_CHECK(mlx_sigmoid(&gate_sig, gate, s))) goto cleanup;
+        if (!MLXB_CHECK(mlx_multiply(&silu, gate, gate_sig, s))) goto cleanup;
+    }
+    if (!MLXB_CHECK(mlx_multiply(&down_in, silu, up, s))) goto cleanup;
+    if (fwd_linear(&result, down_in, down_tri, cfg, s) != 0) goto cleanup;
+
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(down_in);
+    mlx_array_free(silu);
+    mlx_array_free(gate_sig);
+    mlx_array_free(up);
+    mlx_array_free(gate);
+    return rc;
+}
+
+/* silu(gate)*up (or gelu_approx) for already-projected gate/up tensors. */
+static int fwd_expert_act(mlx_array *out, mlx_array gate, mlx_array up,
+                          const model_config_t *cfg, mlx_stream s) {
+    int rc = -1;
+    mlx_array gate_sig = mlx_array_new();
+    mlx_array act = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    if (cfg->hidden_act == HIDDEN_ACT_GELU_APPROX) {
+        if (fwd_gelu_approx(&act, gate, s) != 0) goto cleanup;
+    } else {
+        if (!MLXB_CHECK(mlx_sigmoid(&gate_sig, gate, s))) goto cleanup;
+        if (!MLXB_CHECK(mlx_multiply(&act, gate, gate_sig, s))) goto cleanup;
+    }
+    if (!MLXB_CHECK(mlx_multiply(&result, act, up, s))) goto cleanup;
+
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(act);
+    mlx_array_free(gate_sig);
+    return rc;
+}
+
+int fwd_switch_glu(mlx_array *out, mlx_array x, mlx_array inds,
+                   const weight_triplet_t *gate,
+                   const weight_triplet_t *up,
+                   const weight_triplet_t *down,
+                   const model_config_t *cfg, mlx_stream s) {
+    if (!out || !cfg || !x.ctx || !inds.ctx) return -1;
+    if (!fwd_triplet_present(gate) || !fwd_triplet_present(up) ||
+        !fwd_triplet_present(down))
+        return -1;
+
+    int x_ndim = (int)mlx_array_ndim(x);
+    int i_ndim = (int)mlx_array_ndim(inds);
+    if (x_ndim != 3 || i_ndim != 3) return -1;
+
+    int B = mlx_array_dim(x, 0);
+    int S = mlx_array_dim(x, 1);
+    int H = mlx_array_dim(x, 2);
+    int K = mlx_array_dim(inds, 2);
+    if (mlx_array_dim(inds, 0) != B || mlx_array_dim(inds, 1) != S) return -1;
+    if (K < 1) return -1;
+
+    /* R2: sort when multi-position or total indices large. */
+    int total_inds = B * S * K;
+    bool do_sort = (S > 1) || (total_inds >= 64);
+
+    int rc = -1;
+    mlx_array down_out = mlx_array_new();
+    mlx_array gate_out = mlx_array_new();
+    mlx_array up_out = mlx_array_new();
+    mlx_array act = mlx_array_new();
+    mlx_array act_exp = mlx_array_new();
+    mlx_array gate_g = mlx_array_new();
+    mlx_array up_g = mlx_array_new();
+    mlx_array down_g = mlx_array_new();
+
+    if (do_sort) {
+        mlx_array flat_inds = mlx_array_new();
+        mlx_array order = mlx_array_new();
+        mlx_array inv_order = mlx_array_new();
+        mlx_array sorted_inds = mlx_array_new();
+        mlx_array k_arr = mlx_array_new_int(K);
+        mlx_array lhs_idx = mlx_array_new();
+        mlx_array x_flat = mlx_array_new();
+        mlx_array x_gathered = mlx_array_new();
+        mlx_array x_rep = mlx_array_new();
+        mlx_array down_squeezed = mlx_array_new();
+        mlx_array down_unsorted = mlx_array_new();
+
+        int flat_shape[] = {total_inds};
+        int bs_d_shape[] = {B * S, H};
+        int n1d_shape[] = {total_inds, 1, H};
+
+        if (!MLXB_CHECK(mlx_reshape(&flat_inds, inds, flat_shape, 1, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_argsort_axis(&order, flat_inds, 0, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_argsort_axis(&inv_order, order, 0, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_take_axis(&sorted_inds, flat_inds, order, 0, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_floor_divide(&lhs_idx, order, k_arr, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_reshape(&x_flat, x, bs_d_shape, 2, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_take_axis(&x_gathered, x_flat, lhs_idx, 0, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_reshape(&x_rep, x_gathered, n1d_shape, 3, s)))
+            goto sort_cleanup;
+
+        /* sorted=true for quant gather_qmm; bf16 forces false inside.
+           Squeeze only the gather singleton (-2), matching mlx-lm SwitchGLU
+           (full squeeze would collapse B=1/S=1 leading dims). */
+        if (fwd_gather_expert_linear(&gate_g, x_rep, sorted_inds, gate,
+                                     fwd_null_array, true, cfg, s) != 0)
+            goto sort_cleanup;
+        if (fwd_gather_expert_linear(&up_g, x_rep, sorted_inds, up,
+                                     fwd_null_array, true, cfg, s) != 0)
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_squeeze_axis(&gate_out, gate_g, -2, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_squeeze_axis(&up_out, up_g, -2, s)))
+            goto sort_cleanup;
+
+        if (fwd_expert_act(&act, gate_out, up_out, cfg, s) != 0)
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_expand_dims(&act_exp, act, -2, s)))
+            goto sort_cleanup;
+        if (fwd_gather_expert_linear(&down_g, act_exp, sorted_inds, down,
+                                     fwd_null_array, true, cfg, s) != 0)
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_squeeze_axis(&down_squeezed, down_g, -2, s)))
+            goto sort_cleanup;
+        if (!MLXB_CHECK(mlx_take_axis(&down_unsorted, down_squeezed,
+                                      inv_order, 0, s)))
+            goto sort_cleanup;
+
+        int hidden = mlx_array_dim(down_unsorted, 1);
+        int bskh[] = {B, S, K, hidden};
+        if (!MLXB_CHECK(mlx_reshape(&down_out, down_unsorted, bskh, 4, s)))
+            goto sort_cleanup;
+
+        rc = 0;
+sort_cleanup:
+        mlx_array_free(down_unsorted);
+        mlx_array_free(down_squeezed);
+        mlx_array_free(x_rep);
+        mlx_array_free(x_gathered);
+        mlx_array_free(x_flat);
+        mlx_array_free(lhs_idx);
+        mlx_array_free(k_arr);
+        mlx_array_free(sorted_inds);
+        mlx_array_free(inv_order);
+        mlx_array_free(order);
+        mlx_array_free(flat_inds);
+        if (rc != 0) goto cleanup;
+    } else {
+        /* Decode / small path: expand x to [B,S,1,1,H]. */
+        int exp_shape[] = {B, S, 1, 1, H};
+        mlx_array x_exp = mlx_array_new();
+        if (!MLXB_CHECK(mlx_reshape(&x_exp, x, exp_shape, 5, s))) {
+            mlx_array_free(x_exp);
+            goto cleanup;
+        }
+        if (fwd_gather_expert_linear(&gate_g, x_exp, inds, gate,
+                                     fwd_null_array, false, cfg, s) != 0) {
+            mlx_array_free(x_exp);
+            goto cleanup;
+        }
+        if (fwd_gather_expert_linear(&up_g, x_exp, inds, up,
+                                     fwd_null_array, false, cfg, s) != 0) {
+            mlx_array_free(x_exp);
+            goto cleanup;
+        }
+        mlx_array_free(x_exp);
+
+        /* Decode gather yields [B,S,K,1,inter]; squeeze only the singleton. */
+        if (!MLXB_CHECK(mlx_squeeze_axis(&gate_out, gate_g, -2, s)))
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_squeeze_axis(&up_out, up_g, -2, s)))
+            goto cleanup;
+        if (fwd_expert_act(&act, gate_out, up_out, cfg, s) != 0) goto cleanup;
+        if (!MLXB_CHECK(mlx_expand_dims(&act_exp, act, -2, s))) goto cleanup;
+        if (fwd_gather_expert_linear(&down_g, act_exp, inds, down,
+                                     fwd_null_array, false, cfg, s) != 0)
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_squeeze_axis(&down_out, down_g, -2, s)))
+            goto cleanup;
+        rc = 0;
+    }
+
+    if (rc != 0) goto cleanup;
+
+    mlx_array_free(*out);
+    *out = down_out;
+    down_out = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(down_g);
+    mlx_array_free(up_g);
+    mlx_array_free(gate_g);
+    mlx_array_free(act_exp);
+    mlx_array_free(act);
+    mlx_array_free(up_out);
+    mlx_array_free(gate_out);
+    mlx_array_free(down_out);
+    return rc;
+}
+
+int fwd_moe(mlx_array *out, mlx_array x,
+            const fwd_moe_weights_t *mw,
+            const fwd_moe_params_t *p,
+            const model_config_t *cfg,
+            mlx_stream s) {
+    if (!out || !mw || !p || !cfg || !x.ctx) return -1;
+    if (p->top_k < 1 || p->num_experts < 1 || p->top_k > p->num_experts)
+        return -1;
+    if (!fwd_triplet_present(&mw->router) ||
+        !fwd_triplet_present(&mw->switch_gate) ||
+        !fwd_triplet_present(&mw->switch_up) ||
+        !fwd_triplet_present(&mw->switch_down))
+        return -1;
+    if (mw->has_shared) {
+        if (!fwd_triplet_present(&mw->shared_gate) ||
+            !fwd_triplet_present(&mw->shared_up) ||
+            !fwd_triplet_present(&mw->shared_down))
+            return -1;
+        if (mw->has_shared_expert_gate &&
+            !fwd_triplet_present(&mw->shared_expert_gate))
+            return -1;
+    }
+
+    int rc = -1;
+    mlx_array logits = mlx_array_new();
+    mlx_array inds = mlx_array_new();
+    mlx_array scores = mlx_array_new();
+    mlx_array y_exp = mlx_array_new();
+    mlx_array scores_exp = mlx_array_new();
+    mlx_array weighted = mlx_array_new();
+    mlx_array routed = mlx_array_new();
+    mlx_array shared = mlx_array_new();
+    mlx_array gate_logit = mlx_array_new();
+    mlx_array gate_sig = mlx_array_new();
+    mlx_array shared_gated = mlx_array_new();
+    mlx_array result = mlx_array_new();
+
+    if (fwd_linear(&logits, x, &mw->router, cfg, s) != 0) goto cleanup;
+    if (fwd_moe_route_softmax(&inds, &scores, logits, p->top_k,
+                              p->norm_topk_prob, s) != 0)
+        goto cleanup;
+    if (fwd_switch_glu(&y_exp, x, inds, &mw->switch_gate, &mw->switch_up,
+                       &mw->switch_down, cfg, s) != 0)
+        goto cleanup;
+
+    /* (y_exp * scores[..., None]).sum(-2) */
+    if (!MLXB_CHECK(mlx_expand_dims(&scores_exp, scores, -1, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_multiply(&weighted, y_exp, scores_exp, s))) goto cleanup;
+    if (!MLXB_CHECK(mlx_sum_axis(&routed, weighted, -2, false, s)))
+        goto cleanup;
+
+    if (!mw->has_shared) {
+        mlx_array_free(*out);
+        *out = routed;
+        routed = mlx_array_new();
+        rc = 0;
+        goto cleanup;
+    }
+
+    if (fwd_swiglu_triplets(&shared, x, &mw->shared_gate, &mw->shared_up,
+                            &mw->shared_down, cfg, s) != 0)
+        goto cleanup;
+
+    if (mw->has_shared_expert_gate) {
+        if (fwd_linear(&gate_logit, x, &mw->shared_expert_gate, cfg, s) != 0)
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_sigmoid(&gate_sig, gate_logit, s))) goto cleanup;
+        if (!MLXB_CHECK(mlx_multiply(&shared_gated, gate_sig, shared, s)))
+            goto cleanup;
+        if (!MLXB_CHECK(mlx_add(&result, routed, shared_gated, s)))
+            goto cleanup;
+    } else {
+        /* Always-active shared residual. */
+        if (!MLXB_CHECK(mlx_add(&result, routed, shared, s))) goto cleanup;
+    }
+
+    mlx_array_free(*out);
+    *out = result;
+    result = mlx_array_new();
+    rc = 0;
+
+cleanup:
+    mlx_array_free(result);
+    mlx_array_free(shared_gated);
+    mlx_array_free(gate_sig);
+    mlx_array_free(gate_logit);
+    mlx_array_free(shared);
+    mlx_array_free(routed);
+    mlx_array_free(weighted);
+    mlx_array_free(scores_exp);
+    mlx_array_free(y_exp);
+    mlx_array_free(scores);
+    mlx_array_free(inds);
+    mlx_array_free(logits);
+    return rc;
+}
