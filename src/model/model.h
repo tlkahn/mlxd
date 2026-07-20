@@ -109,15 +109,19 @@ typedef struct {
     int moe_intermediate_size;
     int shared_expert_intermediate_size;
 
-    /* DeepSeek MoE extras (E2 / decision 11) */
+    /* DeepSeek MoE extras (E2 / decision 11)
+       Integer 0 = key absent / unset (R7). This intentionally diverges from
+       mlx-lm ModelArgs defaults (n_group/topk_group/moe_layer_freq default 1)
+       so callers can distinguish "not published" from "explicit 1".
+       #113 route wiring must not treat 0 as a ready-to-route group count. */
     int   n_routed_experts;
     int   n_shared_experts;
-    float routed_scaling_factor;
-    int   moe_layer_freq;
-    int   first_k_dense_replace;
-    int   n_group; /* MoE group count; NOT mamba_n_groups */
-    int   topk_group;
-    bool  norm_topk_prob;
+    float routed_scaling_factor; /* mlx-lm default 1.0 when absent on DeepSeek */
+    int   moe_layer_freq;        /* 0 = absent; mlx-lm default 1 */
+    int   first_k_dense_replace; /* 0 = absent; mlx-lm default 0 */
+    int   n_group;               /* 0 = absent; mlx-lm default 1. NOT mamba_n_groups */
+    int   topk_group;            /* 0 = absent; mlx-lm default 1 */
+    bool  norm_topk_prob;        /* mlx-lm default true when absent on DeepSeek */
 
     /* DeepSeek MLA */
     int q_lora_rank;

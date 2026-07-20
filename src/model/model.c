@@ -542,6 +542,18 @@ static int apply_family_defaults(model_config_t *cfg, yyjson_val *cfg_obj,
         if (set_llama_style_defaults(cfg, cfg_obj))
             return -1;
         cfg->hidden_act = HIDDEN_ACT_SILU;
+        /* mlx-lm defaults when keys absent; explicit values already parsed win.
+           Mirrors qwen3_5 attn_output_gate key-absence pattern. */
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "norm_topk_prob");
+            if (!v || yyjson_is_null(v))
+                cfg->norm_topk_prob = true;
+        }
+        {
+            yyjson_val *v = yyjson_obj_get(cfg_obj, "routed_scaling_factor");
+            if (!v || yyjson_is_null(v))
+                cfg->routed_scaling_factor = 1.0f;
+        }
         break;
 
     case MODEL_BERT:
@@ -685,9 +697,6 @@ int model_config_load(model_config_t *cfg, const char *model_dir) {
     cfg->mamba_mlp_act          = HIDDEN_ACT_RELU_SQ;
     cfg->layer_norm_eps         = 1e-12f;
     cfg->weight_prefix          = "model";
-    /* DeepSeek mlx-lm defaults (honored when keys absent; explicit values win). */
-    cfg->routed_scaling_factor = 1.0f;
-    cfg->norm_topk_prob       = true;
 
     char *path = path_join(model_dir, "config.json");
     if (!path)

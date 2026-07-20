@@ -1254,9 +1254,12 @@ static void test_gemma4_hidden_act_parsed(void) {
 
 /* --- E2 / #109: DeepSeek family split + config fields -------------------- */
 
-static void test_deepseek_config_fields_zero_init(void) {
+static void test_deepseek_fields_unset_on_non_deepseek(void) {
     model_config_t cfg;
-    memset(&cfg, 0, sizeof(cfg));
+    /* llama fixture has no DeepSeek keys; DeepSeek-oriented defaults must not
+       bleed into non-DeepSeek families after load. */
+    assert(model_config_load(&cfg, MLXD_FIXTURES_DIR "/model_config") == 0);
+    assert(cfg.family == MODEL_LLAMA);
     assert(cfg.q_lora_rank == 0);
     assert(cfg.kv_lora_rank == 0);
     assert(cfg.qk_rope_head_dim == 0);
@@ -1273,7 +1276,8 @@ static void test_deepseek_config_fields_zero_init(void) {
     assert(cfg.index_head_dim == 0);
     assert(cfg.index_n_heads == 0);
     assert(cfg.index_topk == 0);
-    assert(cfg.norm_topk_prob == false); /* pre-default; load sets true */
+    assert(cfg.norm_topk_prob == false);
+    model_config_free(&cfg);
 }
 
 static void test_deepseek_v3_config_fields(void) {
@@ -1393,6 +1397,17 @@ static void test_deepseek_num_experts_not_clobbered(void) {
     model_config_free(&cfg);
 }
 
+static void test_deepseek_norm_topk_prob_explicit_false(void) {
+    model_config_t cfg;
+    assert(model_config_load(
+               &cfg,
+               MLXD_FIXTURES_DIR "/model_config_deepseek_v3_norm_topk_false") ==
+           0);
+    assert(cfg.family == MODEL_DEEPSEEK_V3);
+    assert(cfg.norm_topk_prob == false); /* explicit false must not be forced true */
+    model_config_free(&cfg);
+}
+
 int main(void) {
     test_happy_path();
     test_kv_heads_default();
@@ -1435,12 +1450,13 @@ int main(void) {
     test_gemma4_hidden_act_parsed();
     test_gemma4_null_defaults();
 
-    test_deepseek_config_fields_zero_init();
+    test_deepseek_fields_unset_on_non_deepseek();
     test_deepseek_v3_config_fields();
     test_deepseek_v32_config_fields();
     test_deepseek_v4_config_intersection();
     test_deepseek_defaults_absent_keys();
     test_deepseek_num_experts_not_clobbered();
+    test_deepseek_norm_topk_prob_explicit_false();
 
     printf("test_model_config: all passed\n");
     return 0;
