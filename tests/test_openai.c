@@ -1056,6 +1056,296 @@ static void test_parse_top_k_integral_double(void) {
     yyjson_doc_free(doc);
 }
 
+/* --- Issue #126: message_content_text flatten helper --------------------- */
+
+static void test_message_content_text(void) {
+    /* 1. CONTENT_STRING "hello" -> "hello" */
+    {
+        message_content_t c = {.kind = CONTENT_STRING, .string = (char *)"hello"};
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "hello") == 0);
+        free(out);
+    }
+
+    /* 2. CONTENT_NONE -> NULL */
+    {
+        message_content_t c = {.kind = CONTENT_NONE};
+        char *out = message_content_text(&c);
+        assert(out == NULL);
+    }
+
+    /* 3. single text part -> "hello" */
+    {
+        content_part_t parts[1] = {{
+            .type = (char *)"text",
+            .text = (char *)"hello",
+        }};
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 1,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "hello") == 0);
+        free(out);
+    }
+
+    /* 4. two text parts -> "foobar" (no separator) */
+    {
+        content_part_t parts[2] = {
+            {.type = (char *)"text", .text = (char *)"foo"},
+            {.type = (char *)"text", .text = (char *)"bar"},
+        };
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 2,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "foobar") == 0);
+        free(out);
+    }
+
+    /* 5. text + image_url part -> text only */
+    {
+        content_part_t parts[2] = {
+            {.type = (char *)"text", .text = (char *)"see this"},
+            {
+                .type = (char *)"image_url",
+                .text = NULL,
+                .has_image_url = true,
+                .image_url = {.url = (char *)"https://example.com/x.png"},
+            },
+        };
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 2,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "see this") == 0);
+        free(out);
+    }
+
+    /* 6. image_url only -> "" */
+    {
+        content_part_t parts[1] = {{
+            .type = (char *)"image_url",
+            .text = NULL,
+            .has_image_url = true,
+            .image_url = {.url = (char *)"https://example.com/x.png"},
+        }};
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 1,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "") == 0);
+        free(out);
+    }
+
+    /* 7. empty part_count == 0 with CONTENT_PARTS -> "" */
+    {
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = NULL,
+            .part_count = 0,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "") == 0);
+        free(out);
+    }
+
+    /* 8. part with text == NULL skipped between real text parts */
+    {
+        content_part_t parts[3] = {
+            {.type = (char *)"text", .text = (char *)"a"},
+            {.type = (char *)"image_url", .text = NULL},
+            {.type = (char *)"text", .text = (char *)"b"},
+        };
+        message_content_t c = {
+            .kind = CONTENT_PARTS,
+            .parts = parts,
+            .part_count = 3,
+        };
+        char *out = message_content_text(&c);
+        assert(out != NULL);
+        assert(strcmp(out, "ab") == 0);
+        free(out);
+    }
+
+    /* NULL input -> NULL */
+    assert(message_content_text(NULL) == NULL);
+
+    /* CONTENT_STRING with NULL string -> NULL */
+    {
+        message_content_t c = {.kind = CONTENT_STRING, .string = NULL};
+        char *out = message_content_text(&c);
+        assert(out == NULL);
+    }
+
+    printf("  test_message_content_text: passed\n");
+}
+
+/* --- Issue #126: messages_template_serialize ------------------------------ */
+
+static void test_messages_template_serialize(void) {
+    /* Multi-turn mix: string, parts, null+tool_calls, tool role, name */
+    {
+        content_part_t user_parts[1] = {{
+            .type = (char *)"text",
+            .text = (char *)"hello",
+        }};
+        tool_call_t calls[1] = {{
+            .id = (char *)"call_1",
+            .function_name = (char *)"get_weather",
+            .arguments = (char *)"{\"city\":\"NYC\"}",
+        }};
+        message_t msgs[4] = {
+            {
+                .role = ROLE_USER,
+                .content = {.kind = CONTENT_STRING, .string = (char *)"plain"},
+                .name = (char *)"alice",
+            },
+            {
+                .role = ROLE_USER,
+                .content =
+                    {
+                        .kind = CONTENT_PARTS,
+                        .parts = user_parts,
+                        .part_count = 1,
+                    },
+            },
+            {
+                .role = ROLE_ASSISTANT,
+                .content = {.kind = CONTENT_NONE},
+                .tool_calls = calls,
+                .tool_call_count = 1,
+            },
+            {
+                .role = ROLE_TOOL,
+                .content = {.kind = CONTENT_STRING, .string = (char *)"72F"},
+                .tool_call_id = (char *)"call_1",
+            },
+        };
+
+        yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+        assert(mdoc != NULL);
+        yyjson_mut_val *arr = messages_template_serialize(msgs, 4, mdoc);
+        assert(arr != NULL);
+        yyjson_mut_doc_set_root(mdoc, arr);
+        char *json = yyjson_mut_write(mdoc, 0, NULL);
+        assert(json != NULL);
+        yyjson_mut_doc_free(mdoc);
+
+        yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+        free(json);
+        assert(doc != NULL);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        assert(yyjson_is_arr(root));
+        assert(yyjson_arr_size(root) == 4);
+
+        /* [0] user string + name */
+        yyjson_val *m0 = yyjson_arr_get(root, 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m0, "role")), "user") == 0);
+        assert(yyjson_is_str(yyjson_obj_get(m0, "content")));
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m0, "content")), "plain") == 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m0, "name")), "alice") == 0);
+
+        /* [1] user parts flattened to string (not array) */
+        yyjson_val *m1 = yyjson_arr_get(root, 1);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m1, "role")), "user") == 0);
+        yyjson_val *c1 = yyjson_obj_get(m1, "content");
+        assert(yyjson_is_str(c1));
+        assert(!yyjson_is_arr(c1));
+        assert(strcmp(yyjson_get_str(c1), "hello") == 0);
+
+        /* [2] assistant null content + tool_calls */
+        yyjson_val *m2 = yyjson_arr_get(root, 2);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m2, "role")), "assistant") == 0);
+        assert(yyjson_is_null(yyjson_obj_get(m2, "content")));
+        yyjson_val *tcs = yyjson_obj_get(m2, "tool_calls");
+        assert(yyjson_is_arr(tcs));
+        assert(yyjson_arr_size(tcs) == 1);
+        yyjson_val *tc0 = yyjson_arr_get(tcs, 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(tc0, "id")), "call_1") == 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(tc0, "type")), "function") == 0);
+        yyjson_val *fn = yyjson_obj_get(tc0, "function");
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(fn, "name")), "get_weather") == 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(fn, "arguments")),
+                      "{\"city\":\"NYC\"}") == 0);
+
+        /* [3] tool role with tool_call_id */
+        yyjson_val *m3 = yyjson_arr_get(root, 3);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m3, "role")), "tool") == 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m3, "content")), "72F") == 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m3, "tool_call_id")), "call_1") == 0);
+
+        yyjson_doc_free(doc);
+    }
+
+    /* Multi text parts flatten inside serialize */
+    {
+        content_part_t parts[2] = {
+            {.type = (char *)"text", .text = (char *)"hel"},
+            {.type = (char *)"text", .text = (char *)"lo"},
+        };
+        message_t msgs[1] = {{
+            .role = ROLE_USER,
+            .content =
+                {
+                    .kind = CONTENT_PARTS,
+                    .parts = parts,
+                    .part_count = 2,
+                },
+        }};
+
+        yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+        assert(mdoc != NULL);
+        yyjson_mut_val *arr = messages_template_serialize(msgs, 1, mdoc);
+        assert(arr != NULL);
+        yyjson_mut_doc_set_root(mdoc, arr);
+        char *json = yyjson_mut_write(mdoc, 0, NULL);
+        assert(json != NULL);
+        yyjson_mut_doc_free(mdoc);
+
+        yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+        free(json);
+        assert(doc != NULL);
+        yyjson_val *m0 = yyjson_arr_get(yyjson_doc_get_root(doc), 0);
+        assert(strcmp(yyjson_get_str(yyjson_obj_get(m0, "content")), "hello") == 0);
+        yyjson_doc_free(doc);
+    }
+
+    /* count == 0 -> [] */
+    {
+        yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+        assert(mdoc != NULL);
+        yyjson_mut_val *arr = messages_template_serialize(NULL, 0, mdoc);
+        assert(arr != NULL);
+        yyjson_mut_doc_set_root(mdoc, arr);
+        char *json = yyjson_mut_write(mdoc, 0, NULL);
+        assert(json != NULL);
+        yyjson_mut_doc_free(mdoc);
+
+        yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+        free(json);
+        assert(doc != NULL);
+        assert(yyjson_is_arr(yyjson_doc_get_root(doc)));
+        assert(yyjson_arr_size(yyjson_doc_get_root(doc)) == 0);
+        yyjson_doc_free(doc);
+    }
+
+    printf("  test_messages_template_serialize: passed\n");
+}
+
 int main(void) {
     test_helper_reads_and_parses_error_envelope();
     test_error_envelope_serialize();
@@ -1087,6 +1377,8 @@ int main(void) {
     test_chat_top_logprobs_rejected();
     test_completion_logprobs_rejected();
     test_parse_top_k_integral_double();
+    test_message_content_text();
+    test_messages_template_serialize();
     printf("  test_completion_logprobs_rejected: passed\n");
     printf("test_openai: all passed\n");
     return 0;

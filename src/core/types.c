@@ -83,6 +83,43 @@ void message_content_free(message_content_t *content) {
     free(content->parts);
 }
 
+char *message_content_text(const message_content_t *c) {
+    if (!c)
+        return NULL;
+
+    switch (c->kind) {
+    case CONTENT_NONE:
+        return NULL;
+
+    case CONTENT_STRING:
+        if (!c->string)
+            return NULL;
+        return strdup(c->string);
+
+    case CONTENT_PARTS: {
+        size_t total = 0;
+        for (int i = 0; i < c->part_count; i++) {
+            if (c->parts[i].text)
+                total += strlen(c->parts[i].text);
+        }
+        char *out = malloc(total + 1);
+        if (!out)
+            return NULL;
+        size_t off = 0;
+        for (int i = 0; i < c->part_count; i++) {
+            if (!c->parts[i].text)
+                continue;
+            size_t n = strlen(c->parts[i].text);
+            memcpy(out + off, c->parts[i].text, n);
+            off += n;
+        }
+        out[off] = '\0';
+        return out;
+    }
+    }
+    return NULL;
+}
+
 void message_free(message_t *msg) {
     if (!msg)
         return;

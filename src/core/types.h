@@ -109,6 +109,14 @@ typedef struct {
 void content_part_free(content_part_t *part);
 void message_content_free(message_content_t *content);
 
+/* Flatten message content to a single owned C string for chat-template input.
+ * CONTENT_NONE / NULL input / NULL string -> NULL.
+ * CONTENT_STRING -> strdup of the string.
+ * CONTENT_PARTS -> concatenation of every non-NULL part text (no separator);
+ *                 empty string if no text fragments contribute.
+ * Caller frees the result. */
+char *message_content_text(const message_content_t *c);
+
 /* --- Message -------------------------------------------------------------- */
 
 typedef struct {

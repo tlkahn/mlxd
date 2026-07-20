@@ -167,7 +167,35 @@ static void handle_chat_completions(const http_request_t *req,
         }
     }
 
-    char *messages_json = yyjson_val_write(yyjson_obj_get(root, "messages"), 0, NULL);
+    /* Serialize from parsed creq so content-part arrays are flattened to
+     * strings before Jinja render (issue #126). Raw yyjson_val_write would
+     * pass arrays through and break string-content HF templates. */
+    yyjson_mut_doc *msg_doc = yyjson_mut_doc_new(NULL);
+    if (!msg_doc) {
+        respond_json_error(resp, 500, "server_error", NULL, "out of memory");
+        chat_completion_request_free(&creq);
+        yyjson_doc_free(doc);
+        return;
+    }
+    yyjson_mut_val *msg_arr =
+        messages_template_serialize(creq.messages, creq.message_count, msg_doc);
+    if (!msg_arr) {
+        respond_json_error(resp, 500, "server_error", NULL, "out of memory");
+        yyjson_mut_doc_free(msg_doc);
+        chat_completion_request_free(&creq);
+        yyjson_doc_free(doc);
+        return;
+    }
+    yyjson_mut_doc_set_root(msg_doc, msg_arr);
+    char *messages_json = yyjson_mut_write(msg_doc, 0, NULL);
+    yyjson_mut_doc_free(msg_doc);
+    if (!messages_json) {
+        respond_json_error(resp, 500, "server_error", NULL, "out of memory");
+        chat_completion_request_free(&creq);
+        yyjson_doc_free(doc);
+        return;
+    }
+
     yyjson_val *tools_val = yyjson_obj_get(root, "tools");
     char *tools_json = tools_val ? yyjson_val_write(tools_val, 0, NULL) : NULL;
 

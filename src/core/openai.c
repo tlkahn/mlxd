@@ -426,6 +426,74 @@ void chat_completion_request_free(chat_completion_request_t *req) {
     free_str_array(req->params.stop, req->params.stop_count);
 }
 
+static yyjson_mut_val *tool_call_template_obj(const tool_call_t *tc, yyjson_mut_doc *doc) {
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    if (!o)
+        return NULL;
+    if (tc->id)
+        yyjson_mut_obj_add_strcpy(doc, o, "id", tc->id);
+    yyjson_mut_obj_add_strcpy(doc, o, "type", "function");
+    yyjson_mut_val *fn = yyjson_mut_obj(doc);
+    if (!fn)
+        return NULL;
+    if (tc->function_name)
+        yyjson_mut_obj_add_strcpy(doc, fn, "name", tc->function_name);
+    yyjson_mut_obj_add_strcpy(doc, fn, "arguments", tc->arguments ? tc->arguments : "");
+    yyjson_mut_obj_add_val(doc, o, "function", fn);
+    return o;
+}
+
+yyjson_mut_val *messages_template_serialize(const message_t *msgs, int count,
+                                            yyjson_mut_doc *doc) {
+    if (!doc || count < 0 || (count > 0 && !msgs))
+        return NULL;
+
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    if (!arr)
+        return NULL;
+
+    for (int i = 0; i < count; i++) {
+        const message_t *msg = &msgs[i];
+        yyjson_mut_val *o = yyjson_mut_obj(doc);
+        if (!o)
+            return NULL;
+
+        yyjson_mut_obj_add_strcpy(doc, o, "role", role_str(msg->role));
+
+        char *text = message_content_text(&msg->content);
+        if (text) {
+            yyjson_mut_obj_add_strcpy(doc, o, "content", text);
+            free(text);
+        } else {
+            /* CONTENT_NONE, NULL string, or OOM on flatten: emit JSON null.
+             * Serialize callers that need OOM distinction check kind first. */
+            yyjson_mut_obj_add_null(doc, o, "content");
+        }
+
+        if (msg->name)
+            yyjson_mut_obj_add_strcpy(doc, o, "name", msg->name);
+        if (msg->tool_call_id)
+            yyjson_mut_obj_add_strcpy(doc, o, "tool_call_id", msg->tool_call_id);
+
+        if (msg->tool_call_count > 0) {
+            yyjson_mut_val *tcs = yyjson_mut_arr(doc);
+            if (!tcs)
+                return NULL;
+            for (int j = 0; j < msg->tool_call_count; j++) {
+                yyjson_mut_val *tc = tool_call_template_obj(&msg->tool_calls[j], doc);
+                if (!tc)
+                    return NULL;
+                yyjson_mut_arr_add_val(tcs, tc);
+            }
+            yyjson_mut_obj_add_val(doc, o, "tool_calls", tcs);
+        }
+
+        yyjson_mut_arr_add_val(arr, o);
+    }
+
+    return arr;
+}
+
 yyjson_mut_val *chat_completion_response_serialize(const chat_completion_response_t *resp,
                                                    yyjson_mut_doc *doc) {
     yyjson_mut_val *root = yyjson_mut_obj(doc);

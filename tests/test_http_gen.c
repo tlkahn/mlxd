@@ -628,6 +628,57 @@ static void test_bos_token_override(void) {
     tokenizer_free(tok);
 }
 
+
+/* --- Issue #126: parts-normalized messages_json matches plain string ------ */
+
+static void test_chat_prompt_parts_normalized_matches_string(void) {
+    tokenizer_t *tok = tokenizer_load(MLXD_FIXTURES_DIR "/gpt2/tokenizer.json");
+    assert(tok != NULL);
+
+    const char *body =
+        "{\"model\":\"gpt2\",\"messages\":["
+        "{\"role\":\"user\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"hel\"},"
+        "{\"type\":\"text\",\"text\":\"lo world\"}"
+        "]}"
+        "]}";
+    yyjson_doc *doc = yyjson_read(body, strlen(body), 0);
+    assert(doc != NULL);
+    chat_completion_request_t creq = {0};
+    const char *perr = NULL;
+    assert(chat_completion_request_parse(&creq, yyjson_doc_get_root(doc), &perr) == 0);
+
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    assert(mdoc != NULL);
+    yyjson_mut_val *arr =
+        messages_template_serialize(creq.messages, creq.message_count, mdoc);
+    assert(arr != NULL);
+    yyjson_mut_doc_set_root(mdoc, arr);
+    char *messages_json = yyjson_mut_write(mdoc, 0, NULL);
+    assert(messages_json != NULL);
+    yyjson_mut_doc_free(mdoc);
+
+    int32_t *ids = NULL;
+    const char *err = NULL;
+    int n = gen_build_chat_prompt(tok, TRIVIAL_TMPL, messages_json, NULL, NULL,
+                                  &ids, &err);
+    assert(n > 0);
+    assert(err == NULL);
+
+    int32_t *direct_ids = NULL;
+    int direct_n =
+        tokenizer_encode_alloc(tok, "hello world", 11, false, &direct_ids);
+    assert(direct_n == n);
+    assert(memcmp(ids, direct_ids, (size_t)n * sizeof(int32_t)) == 0);
+
+    free(ids);
+    free(direct_ids);
+    free(messages_json);
+    chat_completion_request_free(&creq);
+    yyjson_doc_free(doc);
+    tokenizer_free(tok);
+}
+
 int main(void) {
     test_chat_prompt_matches_direct();
     test_completion_prompt();
@@ -660,6 +711,7 @@ int main(void) {
     test_extra_json_empty_string_ok();
     test_bos_token_seed();
     test_bos_token_override();
+    test_chat_prompt_parts_normalized_matches_string();
     printf("test_http_gen: all passed\n");
     return 0;
 }
