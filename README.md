@@ -10,12 +10,17 @@ A ground-up C11 rewrite of the inference core from [mlxd-zig](https://github.com
 - Server-Sent Events (SSE) streaming
 - Single-binary with subcommands: `serve`, `run`, `pull`, `list`
 - Single dedicated engine thread - all GPU work isolated from the event loop
-- BPE, WordPiece, and SentencePiece tokenizers (GPT-2, BERT, Gemma-style)
+- Real mlx-c inference: forward pass, KV cache, top-k/p sampling, temperature, repetition penalty
+- Thinking mode toggle (`enable_thinking` / `--no-think`) for reasoning models
+- Sliding-window attention (Mistral-style)
+- BPE, WordPiece, and SentencePiece tokenizers with NFC/NFKC Unicode normalization
+- Jinja2 chat template rendering (vendored jinja_cpp)
 - HuggingFace model download and local cache management
 
 ## Supported models
 
-Gemma 3/4, Qwen 2/3/3.5, LLaMA, Mistral, LFM-2, Nemotron-H, BERT, DeepSeek-V4.
+Dense: Gemma 3/4, Qwen 2/3/3.5, LLaMA, Mistral, LFM-2, Nemotron-H, BERT.
+MoE (in progress): DeepSeek-V3, DeepSeek-V3.2, DeepSeek-V4.
 
 ## Requirements
 
@@ -24,6 +29,7 @@ Gemma 3/4, Qwen 2/3/3.5, LLaMA, Mistral, LFM-2, Nemotron-H, BERT, DeepSeek-V4.
   - [mlx-c](https://github.com/ml-explore/mlx-c) >= 0.6.0 (and mlx >= 0.31.2)
   - libuv
   - llhttp
+  - libcurl
 - Clang with C11 support (ships with Xcode Command Line Tools)
 
 ## Build
@@ -114,33 +120,22 @@ Key design decisions:
 
 ## Performance
 
-Benchmark on Apple M4 Max (128 GB), Qwen3-0.6B-MLX (4-bit), 256 prompt tokens / 128 generated tokens:
-
-| Server | Prompt (tok/s) | Generation (tok/s) | Time to first token (ms) | Peak RSS (MB) |
-|--------|---------------:|--------------------|--------------------------|---------------|
-| mlxd | TBD | TBD | TBD | TBD |
-| [ollama](https://github.com/ollama/ollama) | TBD | TBD | TBD | TBD |
-| [llama.cpp](https://github.com/ggml-org/llama.cpp) | TBD | TBD | TBD | TBD |
-| [mlx-serve](https://github.com/ddalcucu/mlx-serve) | TBD | TBD | TBD | TBD |
-
-Methodology: each server warmed with one request, then measured over 10 runs. See `tools/bench.sh` for reproduction.
-
-> Numbers will be filled once the engine module is complete.
+Benchmarks pending ([#76](https://github.com/tlkahn/mlxd/issues/76)). The engine is functional for dense families; numbers will be published after Stage F (lifecycle hardening) is complete.
 
 ## Project status
 
-This project is an active rewrite from Zig to C11 ([tracking epic](https://github.com/tlkahn/mlxd/issues/9)). Current progress:
+The Zig-to-C11 migration is complete ([epic #9](https://github.com/tlkahn/mlxd/issues/9) - all 8 modules done). The server is functional end-to-end with real mlx inference for dense model families.
 
-| Module | Status |
-|--------|--------|
-| core | Done ([#1](https://github.com/tlkahn/mlxd/issues/1)) |
-| mlxbridge | Done ([#2](https://github.com/tlkahn/mlxd/issues/2)) |
-| chat | Done ([#3](https://github.com/tlkahn/mlxd/issues/3)) |
-| model/tokenizer | In progress ([#4](https://github.com/tlkahn/mlxd/issues/4)) - stages A-D complete, E-I remaining |
-| engine | Not started ([#5](https://github.com/tlkahn/mlxd/issues/5)) |
-| registry | Not started ([#6](https://github.com/tlkahn/mlxd/issues/6)) |
-| http | Not started ([#7](https://github.com/tlkahn/mlxd/issues/7)) |
-| cli | Not started ([#8](https://github.com/tlkahn/mlxd/issues/8)) |
+Current focus is the engine inference core ([#51](https://github.com/tlkahn/mlxd/issues/51)):
+
+| Stage | Scope | Status |
+|-------|-------|--------|
+| A | Loading foundations (safetensors, weight loader) | Done ([#52](https://github.com/tlkahn/mlxd/issues/52)) |
+| B | Qwen3 dense vertical slice (forward, KV cache, greedy decode) | Done ([#53](https://github.com/tlkahn/mlxd/issues/53)) |
+| C | Sampling + generation params (top-k/p, temperature, repetition penalty) | Done ([#54](https://github.com/tlkahn/mlxd/issues/54)) |
+| D | Dense family breadth (LLaMA, Mistral, Qwen2, Gemma 3/4, Qwen3.5) | Done ([#55](https://github.com/tlkahn/mlxd/issues/55)) |
+| E | MoE + hybrid families (DeepSeek V3/V3.2/V4, Qwen3.5-MoE, LFM-2, Nemotron-H) | In progress ([#56](https://github.com/tlkahn/mlxd/issues/56)) |
+| F | Lifecycle + memory hardening | Not started ([#57](https://github.com/tlkahn/mlxd/issues/57)) |
 
 ## License
 
