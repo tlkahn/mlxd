@@ -109,12 +109,36 @@ typedef struct {
     bool norm_topk_prob;
 } fwd_moe_params_t;
 
-/* Softmax top-k route. router_logits [..., E] -> owned inds [..., K] (int)
-   and scores [..., K]. Caller frees both on success. Index order within the
-   top-k set is partition-unstable (set equality only). */
+/* Softmax top-k route (qwen-style). router_logits [..., E] -> owned inds
+   [..., K] (int) and scores [..., K]. Caller frees both on success. Index
+   order within the top-k set is partition-unstable (set equality only). */
 int fwd_moe_route_softmax(mlx_array *inds, mlx_array *scores,
                           mlx_array router_logits, int top_k,
                           bool norm_topk_prob, mlx_stream s);
+
+/* DeepSeek / noaux_tc MoE gate (sigmoid + group top-k + correction bias).
+   Family-agnostic: callers pass precomputed router logits [..., E] and
+   e_score_correction_bias rank-1 [E] (required; pass zeros when absent;
+   multi-rank bias is rejected even if last dim is E).
+   Selection uses biased sigmoid scores; returned weights are gathered from
+   pre-bias sigmoid (orig_scores), then optional norm (only if top_k > 1)
+   and * routed_scaling_factor. Out: owned inds [..., K] (int), scores
+   [..., K] (f32). Caller frees both on success. Index order within the
+   top-k set is partition-unstable (set equality only). */
+typedef struct {
+    int   top_k;                 /* K = num_experts_per_tok */
+    int   n_group;               /* G */
+    int   topk_group;            /* number of groups to keep */
+    float routed_scaling_factor; /* multiply final scores */
+    bool  norm_topk_prob;        /* renormalize only if top_k > 1 */
+} fwd_moe_route_deepseek_params_t;
+
+int fwd_moe_route_deepseek(mlx_array *inds,
+                           mlx_array *scores,
+                           mlx_array router_logits,
+                           mlx_array e_score_correction_bias,
+                           const fwd_moe_route_deepseek_params_t *p,
+                           mlx_stream s);
 
 /* Gathered expert linear: x @ expert[inds]. Quant uses gather_qmm
    (transpose=true); bf16 uses gather_mm (sorted_indices forced false).
