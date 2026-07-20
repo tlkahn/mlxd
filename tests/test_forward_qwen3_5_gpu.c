@@ -4,35 +4,17 @@
 #include "mlxbridge/mlxbridge.h"
 #include "model/model.h"
 #include "model/weights.h"
+#include "gpu_test_util.h"
 
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define FIXTURES MLXD_FIXTURES_DIR
 
 static mlx_stream gpu;
-
-static int is_finite_f32(mlx_array a, mlx_stream s) {
-    mlx_array f32 = mlx_array_new();
-    if (!MLXB_CHECK(mlx_astype(&f32, a, MLX_FLOAT32, s))) {
-        mlx_array_free(f32);
-        return 0;
-    }
-    if (!MLXB_CHECK(mlx_array_eval(f32))) {
-        mlx_array_free(f32);
-        return 0;
-    }
-    size_t n = mlx_array_size(f32);
-    const float *d = mlx_array_data_float32(f32);
-    if (!d) { mlx_array_free(f32); return 0; }
-    for (size_t i = 0; i < n; i++) {
-        if (!isfinite(d[i])) { mlx_array_free(f32); return 0; }
-    }
-    mlx_array_free(f32);
-    return 1;
-}
 
 static void test_qwen3_5_config_flags(engine_model_t *em) {
     assert(em->cfg.family == MODEL_QWEN3_5);
@@ -157,6 +139,8 @@ static void test_qwen3_5_incremental_equals_full(engine_model_t *em) {
     }
     assert(argmax_a == argmax_b);
 
+    /* Compare: argmax match + max-abs-diff < 5e-2. bf16 prefill-vs-decode
+       accumulation drift; same tolerance as sibling GPU tests. */
     float maxdiff = 0.0f;
     for (int i = 0; i < vocab; i++) {
         float d = fabsf(da[i] - db[i]);
@@ -191,7 +175,7 @@ static void run_suite(const char *label, const char *path,
     char err[256] = {0};
     if (engine_model_load(&em, path, err, sizeof(err)) != 0) {
         fprintf(stderr, "failed to load %s: %s\n", path, err);
-        assert(0);
+        abort();
     }
 
     config_test(&em);

@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define FIXTURES MLXD_FIXTURES_DIR
@@ -102,7 +103,7 @@ static void test_fixture_golden(const char *relpath,
     char err[256] = {0};
     if (engine_model_load(&em, path, err, sizeof(err)) != 0) {
         fprintf(stderr, "failed to load %s: %s\n", path, err);
-        assert(0);
+        abort();
     }
 
     assert(em.cfg.family == MODEL_QWEN3_5);

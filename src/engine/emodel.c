@@ -95,6 +95,10 @@ int engine_model_check_supported(const model_config_t *cfg,
         REJECT(cfg->partial_rotary_factor_global <= 0.0f ||
                cfg->partial_rotary_factor_global > 1.0f,
                "partial_rotary_factor_global must be in (0, 1]");
+        /* Plain partial_rotary_factor is the full-attn dims path (qwen3_5).
+           gemma4 uses partial_rotary_factor_global via the freqs path instead. */
+        REJECT(cfg->partial_rotary_factor != 1.0f,
+               "partial rotary embedding not supported (gemma4 uses rope_parameters.full_attention)");
         /* Reject configs where a KV-shared layer has no same-type source */
         for (int i = 0; i < cfg->num_hidden_layers; i++) {
             if (model_layer_kv_shared(cfg, i) &&

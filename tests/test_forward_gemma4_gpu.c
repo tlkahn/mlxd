@@ -4,6 +4,7 @@
 #include "mlxbridge/mlxbridge.h"
 #include "model/model.h"
 #include "model/weights.h"
+#include "gpu_test_util.h"
 
 #include <assert.h>
 #include <math.h>
@@ -17,26 +18,6 @@
 #define FIXTURES MLXD_FIXTURES_DIR
 
 static mlx_stream gpu;
-
-static int is_finite_f32(mlx_array a, mlx_stream s) {
-    mlx_array f32 = mlx_array_new();
-    if (!MLXB_CHECK(mlx_astype(&f32, a, MLX_FLOAT32, s))) {
-        mlx_array_free(f32);
-        return 0;
-    }
-    if (!MLXB_CHECK(mlx_array_eval(f32))) {
-        mlx_array_free(f32);
-        return 0;
-    }
-    size_t n = mlx_array_size(f32);
-    const float *d = mlx_array_data_float32(f32);
-    if (!d) { mlx_array_free(f32); return 0; }
-    for (size_t i = 0; i < n; i++) {
-        if (!isfinite(d[i])) { mlx_array_free(f32); return 0; }
-    }
-    mlx_array_free(f32);
-    return 1;
-}
 
 static float max_abs_diff_arr(mlx_array a, mlx_array b, mlx_stream s) {
     mlx_array af = mlx_array_new();

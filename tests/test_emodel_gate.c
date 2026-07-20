@@ -437,6 +437,14 @@ static void test_gemma4_reject_proportional_factor_zero(void) {
     assert(strstr(err, "rope_proportional_factor") != NULL);
 }
 
+static void test_gemma4_reject_partial_rotary_plain(void) {
+    model_config_t cfg = make_gemma4_supported();
+    cfg.partial_rotary_factor = 0.5f;
+    char err[256] = {0};
+    assert(engine_model_check_supported(&cfg, err, sizeof(err)) != 0);
+    assert(strstr(err, "partial rotary") != NULL);
+}
+
 static void test_gemma4_reject_partial_rotary_global_zero(void) {
     model_config_t cfg = make_gemma4_supported();
     cfg.partial_rotary_factor_global = 0.0f;
@@ -583,6 +591,9 @@ int main(void) {
 
     test_gemma4_reject_proportional_factor_zero();
     printf("  test_gemma4_reject_proportional_factor_zero: passed\n");
+
+    test_gemma4_reject_partial_rotary_plain();
+    printf("  test_gemma4_reject_partial_rotary_plain: passed\n");
 
     test_gemma4_reject_partial_rotary_global_zero();
     printf("  test_gemma4_reject_partial_rotary_global_zero: passed\n");
