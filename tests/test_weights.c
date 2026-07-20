@@ -732,7 +732,8 @@ static void test_expected_names_other_families_zero(void) {
         MODEL_FAMILY_UNKNOWN, MODEL_GEMMA3,
         MODEL_QWEN2, MODEL_QWEN3_5_MOE,
         MODEL_LFM2,
-        MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V4, MODEL_BERT,
+        MODEL_NEMOTRON_H, MODEL_DEEPSEEK_V3, MODEL_DEEPSEEK_V32,
+        MODEL_DEEPSEEK_V4, MODEL_BERT,
     };
 
     for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
