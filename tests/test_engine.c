@@ -1292,6 +1292,125 @@ static void test_stub_no_logprobs(void) {
     engine_destroy(&eng);
 }
 
+/* ---- #46: gen hooks API (CPU; stub path ignores hooks) ------------------ */
+
+static void dummy_prefill_hook(void *ud, int pos, int chunk_len) {
+    (void)pos;
+    (void)chunk_len;
+    int *n = ud;
+    (*n)++;
+}
+
+static void dummy_decode_hook(void *ud, int step) {
+    (void)step;
+    int *n = ud;
+    (*n)++;
+}
+
+static void dummy_seed_hook(void *ud) {
+    int *n = ud;
+    (*n)++;
+}
+
+static void test_gen_hooks_default_null(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    assert(eng.gen_hooks.on_prefill_chunk == NULL);
+    assert(eng.gen_hooks.on_decode_step == NULL);
+    assert(eng.gen_hooks.on_before_seed == NULL);
+    assert(eng.gen_hooks.ud == NULL);
+
+    int counter = 0;
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = dummy_prefill_hook,
+        .on_decode_step = dummy_decode_hook,
+        .on_before_seed = dummy_seed_hook,
+        .ud = &counter,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+    assert(eng.gen_hooks.on_prefill_chunk == dummy_prefill_hook);
+    assert(eng.gen_hooks.on_decode_step == dummy_decode_hook);
+    assert(eng.gen_hooks.on_before_seed == dummy_seed_hook);
+    assert(eng.gen_hooks.ud == &counter);
+
+    engine_set_gen_hooks(&eng, NULL);
+    assert(eng.gen_hooks.on_prefill_chunk == NULL);
+    assert(eng.gen_hooks.on_decode_step == NULL);
+    assert(eng.gen_hooks.on_before_seed == NULL);
+    assert(eng.gen_hooks.ud == NULL);
+
+    /* NULL hooks: stub generate still completes. */
+    assert(engine_post_load(&eng, strdup(MLXD_STUB_MODEL_PATH)) == 0);
+    assert(engine_wait_load(&eng, 2000) == 0);
+
+    stream_t *s = stream_create(16);
+    stream_retain(s);
+    int32_t ids[] = {1, 2, 3};
+    engine_cmd_t *gen = calloc(1, sizeof(*gen));
+    assert(gen);
+    gen->tag = CMD_GENERATE;
+    gen->generate.token_ids = malloc(sizeof(ids));
+    memcpy(gen->generate.token_ids, ids, sizeof(ids));
+    gen->generate.token_count = 3;
+    gen->generate.params.max_tokens = 3;
+    gen->generate.stream = s;
+    engine_post(&eng, gen);
+
+    chunk_t out;
+    for (int i = 0; i < 3; i++) {
+        assert(stream_next(s, &out, -1));
+        assert(out.tag == CHUNK_TOKEN);
+    }
+    assert(stream_next(s, &out, -1));
+    assert(out.tag == CHUNK_DONE);
+
+    stream_release(s);
+    engine_destroy(&eng);
+}
+
+/* Hooks apply only to handle_generate_real; stub path must not invoke them. */
+static void test_gen_hooks_stub_ignores(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    assert(engine_post_load(&eng, strdup(MLXD_STUB_MODEL_PATH)) == 0);
+    assert(engine_wait_load(&eng, 2000) == 0);
+
+    int counter = 0;
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = dummy_prefill_hook,
+        .on_decode_step = dummy_decode_hook,
+        .on_before_seed = dummy_seed_hook,
+        .ud = &counter,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    stream_t *s = stream_create(16);
+    stream_retain(s);
+    int32_t ids[] = {9, 8, 7, 6};
+    engine_cmd_t *gen = calloc(1, sizeof(*gen));
+    assert(gen);
+    gen->tag = CMD_GENERATE;
+    gen->generate.token_ids = malloc(sizeof(ids));
+    memcpy(gen->generate.token_ids, ids, sizeof(ids));
+    gen->generate.token_count = 4;
+    gen->generate.params.max_tokens = 4;
+    gen->generate.stream = s;
+    engine_post(&eng, gen);
+
+    chunk_t out;
+    for (int i = 0; i < 4; i++) {
+        assert(stream_next(s, &out, -1));
+        assert(out.tag == CHUNK_TOKEN);
+    }
+    assert(stream_next(s, &out, -1));
+    assert(out.tag == CHUNK_DONE);
+
+    assert(counter == 0);
+
+    stream_release(s);
+    engine_destroy(&eng);
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(void) {
@@ -1336,6 +1455,8 @@ int main(void) {
     test_sampling_resolve();
     test_stub_logprobs();
     test_stub_no_logprobs();
+    test_gen_hooks_default_null();
+    test_gen_hooks_stub_ignores();
     printf("test_engine: all passed\n");
     return 0;
 }

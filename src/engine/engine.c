@@ -400,10 +400,14 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     }
     kv_inited = true;
 
+    /* stable for this generate; eng->gen_hooks may change */
+    engine_gen_hooks_t hooks = eng->gen_hooks;
+
     /* ---- chunked prefill of prompt[:-1] ---- */
     int pos = 0;
     int prefix_end = n > 0 ? n - 1 : 0;
     while (pos < prefix_end) {
+        /* poll -> hook -> re-poll: cancel during a blocked hook skips forward */
         if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
             stream_finish_cancelled(s);
             goto out_free;
@@ -412,6 +416,12 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
         if (chunk_end > prefix_end)
             chunk_end = prefix_end;
         int chunk_len = chunk_end - pos;
+        if (hooks.on_prefill_chunk)
+            hooks.on_prefill_chunk(hooks.ud, pos, chunk_len);
+        if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
+            stream_finish_cancelled(s);
+            goto out_free;
+        }
         mlx_array ids = make_ids_array(token_ids + pos, chunk_len);
         if (model_forward(em, ids, &kv, false, NULL) != 0) {
             mlx_array_free(ids);
@@ -425,6 +435,16 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
 
     /* ---- seed logits from last prompt token ---- */
     {
+        if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
+            stream_finish_cancelled(s);
+            goto out_free;
+        }
+        if (hooks.on_before_seed)
+            hooks.on_before_seed(hooks.ud);
+        if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
+            stream_finish_cancelled(s);
+            goto out_free;
+        }
         mlx_array last = make_ids_array(&token_ids[n - 1], 1);
         if (model_forward(em, last, &kv, true, &pending_logits) != 0) {
             mlx_array_free(last);
@@ -437,6 +457,13 @@ static void handle_generate_real(engine_t *eng, engine_cmd_t *cmd) {
     /* ---- pipelined greedy decode ---- */
     int emitted = 0;
     while (emitted < max_new) {
+        /* poll -> hook -> re-poll (same contract as prefill) */
+        if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
+            stream_finish_cancelled(s);
+            goto out_free;
+        }
+        if (hooks.on_decode_step)
+            hooks.on_decode_step(hooks.ud, emitted);
         if (atomic_load(&eng->shutdown) || atomic_load(&s->cancelled)) {
             stream_finish_cancelled(s);
             goto out_free;
@@ -713,6 +740,7 @@ int engine_init(engine_t *eng) {
     eng->load_error[0] = '\0';
     eng->loaded_model = NULL;
     eng->inflight = NULL;
+    memset(&eng->gen_hooks, 0, sizeof(eng->gen_hooks));
 
     if (pthread_create(&eng->thread, NULL, engine_thread_main, eng) != 0) {
         free(eng->model);
@@ -779,6 +807,13 @@ void engine_post(engine_t *eng, engine_cmd_t *cmd) {
     }
     mailbox_enqueue_locked(eng, cmd);
     pthread_mutex_unlock(&eng->mailbox_mtx);
+}
+
+void engine_set_gen_hooks(engine_t *eng, const engine_gen_hooks_t *hooks) {
+    if (hooks)
+        eng->gen_hooks = *hooks;
+    else
+        memset(&eng->gen_hooks, 0, sizeof(eng->gen_hooks));
 }
 
 int engine_post_load(engine_t *eng, char *model_path) {

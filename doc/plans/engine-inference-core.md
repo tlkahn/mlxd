@@ -271,7 +271,7 @@ Real resource lifecycle and closing [#46](https://github.com/tlkahn/mlxd/issues/
 - [ ] `CMD_UNLOAD`: free weights and caches on the engine thread; loading model B over model A frees A first
 - [ ] `CMD_RECLAIM`: release per-request cache state
 - [ ] Wired-memory limit at load (`mlx_set_wired_limit`, sized from the device recommendation) + cache limit; `mlx_clear_cache` every N decode steps and after each request; active/peak memory logging
-- [ ] #46 verification: tests asserting engine release within the drain deadline when cancelled mid-prefill and mid-decode; close #46
+- [x] #46 verification: tests asserting engine release within the drain deadline when cancelled mid-prefill and mid-decode; close #46
 - [ ] `make test-tsan` pass with the real engine; ASan/UBSan pass on GPU tests; `make analyze` clean on all new files
 - [ ] Update CLAUDE.md: engine module layout (forward/kvcache/sampler files), stub mode, parity script usage
 

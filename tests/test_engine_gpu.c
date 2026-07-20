@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,7 +68,8 @@ static void test_oversized_prompt(void) {
     stream_t *s = stream_create(16);
     stream_retain(s);
 
-    int n = 513;
+    /* tiny_qwen3 max_position_embeddings is 2048 (#46 multi-chunk grain). */
+    int n = 2049;
     int32_t *ids = calloc((size_t)n, sizeof(int32_t));
     assert(ids);
 
@@ -84,8 +86,8 @@ static void test_oversized_prompt(void) {
     assert(stream_next(s, &out, 5000));
     assert(out.tag == CHUNK_ERROR);
     assert(out.error_kind == GEN_ERR_CONTEXT_LENGTH);
-    assert(strstr(out.error, "513") != NULL);
-    assert(strstr(out.error, "512") != NULL);
+    assert(strstr(out.error, "2049") != NULL);
+    assert(strstr(out.error, "2048") != NULL);
     free(out.error);
 
     assert(stream_next(s, &out, 5000));
@@ -646,6 +648,691 @@ static void test_generate_multi_eos(void) {
     engine_destroy(&eng);
 }
 
+/* ---- #46: bound shutdown drain (hooks + deadlines) ---------------------- */
+
+/* Control-plane drain bound for tiny_qwen3 fixture (ms).
+   Cancel/shutdown is issued while the engine is blocked in a test hook
+   (before the next mlx op). After barrier_release, re-poll takes the
+   cancel path; almost no GPU work runs. Proves: flag observed at poll
+   site -> FINISH_CANCELLED + stream release is fast. Does NOT prove a
+   512-token prefill chunk or pipelined decode step on a real checkpoint
+   finishes inside 2000 ms / HTTP drain_deadline_ms. Wall-clock residual
+   still scales with model size; second SIGINT remains the hard escape.
+   Stricter than HTTP default (5000) so a stuck loop cannot hide. */
+#define MLXD_TEST_DRAIN_BOUND_MS 2000
+
+typedef struct {
+    pthread_mutex_t mtx;
+    pthread_cond_t  cond;
+    int             entered; /* times the target barrier site was hit */
+    int             release; /* non-zero => hook may return */
+    int             trip_at; /* fire barrier when entered reaches this */
+    /* optional counters / last-seen values */
+    int             prefill_calls;
+    int             last_pos;
+    int             last_chunk_len;
+    int             decode_calls;
+    int             seed_calls;
+    /* for multi-chunk position pin */
+    int             prefill_pos[8];
+    int             prefill_len[8];
+} cancel_barrier_t;
+
+static void barrier_init(cancel_barrier_t *b) {
+    memset(b, 0, sizeof(*b));
+    pthread_mutex_init(&b->mtx, NULL);
+    pthread_cond_init(&b->cond, NULL);
+    b->trip_at = 1;
+}
+
+static void barrier_destroy(cancel_barrier_t *b) {
+    pthread_mutex_destroy(&b->mtx);
+    pthread_cond_destroy(&b->cond);
+}
+
+/* Block in hook until test thread signals release (after trip_at hits). */
+static void barrier_maybe_block(cancel_barrier_t *b) {
+    pthread_mutex_lock(&b->mtx);
+    b->entered++;
+    if (b->entered == b->trip_at) {
+        pthread_cond_broadcast(&b->cond);
+        while (!b->release)
+            pthread_cond_wait(&b->cond, &b->mtx);
+    }
+    pthread_mutex_unlock(&b->mtx);
+}
+
+static void barrier_wait_entered(cancel_barrier_t *b) {
+    pthread_mutex_lock(&b->mtx);
+    while (b->entered < b->trip_at)
+        pthread_cond_wait(&b->cond, &b->mtx);
+    pthread_mutex_unlock(&b->mtx);
+}
+
+static void barrier_release(cancel_barrier_t *b) {
+    pthread_mutex_lock(&b->mtx);
+    b->release = 1;
+    pthread_cond_broadcast(&b->cond);
+    pthread_mutex_unlock(&b->mtx);
+}
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Wait until stream_sole_owner or timeout_ms. Returns elapsed ms from T0. */
+static int64_t wait_sole_owner_ms(stream_t *s, int64_t t0, int timeout_ms) {
+    for (;;) {
+        if (stream_sole_owner(s))
+            return mono_ms() - t0;
+        if (mono_ms() - t0 > timeout_ms)
+            return mono_ms() - t0;
+        usleep(200);
+    }
+}
+
+static int count_tokens_drained(stream_t *s, finish_reason_t *reason_out) {
+    int n = 0;
+    chunk_t out;
+    *reason_out = FINISH_STOP;
+    while (stream_next(s, &out, 0)) {
+        if (out.tag == CHUNK_TOKEN)
+            n++;
+        else if (out.tag == CHUNK_DONE)
+            *reason_out = out.done;
+        else if (out.tag == CHUNK_ERROR)
+            free(out.error);
+    }
+    return n;
+}
+
+static void hook_prefill_count(void *ud, int pos, int chunk_len) {
+    cancel_barrier_t *b = ud;
+    pthread_mutex_lock(&b->mtx);
+    if (b->prefill_calls < 8) {
+        b->prefill_pos[b->prefill_calls] = pos;
+        b->prefill_len[b->prefill_calls] = chunk_len;
+    }
+    b->last_pos = pos;
+    b->last_chunk_len = chunk_len;
+    b->prefill_calls++;
+    pthread_mutex_unlock(&b->mtx);
+    barrier_maybe_block(b);
+}
+
+static void hook_prefill_count_only(void *ud, int pos, int chunk_len) {
+    cancel_barrier_t *b = ud;
+    pthread_mutex_lock(&b->mtx);
+    if (b->prefill_calls < 8) {
+        b->prefill_pos[b->prefill_calls] = pos;
+        b->prefill_len[b->prefill_calls] = chunk_len;
+    }
+    b->last_pos = pos;
+    b->last_chunk_len = chunk_len;
+    b->prefill_calls++;
+    pthread_mutex_unlock(&b->mtx);
+}
+
+static void hook_decode_barrier(void *ud, int step) {
+    cancel_barrier_t *b = ud;
+    pthread_mutex_lock(&b->mtx);
+    b->decode_calls++;
+    pthread_mutex_unlock(&b->mtx);
+    (void)step;
+    barrier_maybe_block(b);
+}
+
+static void hook_decode_count_only(void *ud, int step) {
+    cancel_barrier_t *b = ud;
+    (void)step;
+    pthread_mutex_lock(&b->mtx);
+    b->decode_calls++;
+    pthread_mutex_unlock(&b->mtx);
+}
+
+static void hook_seed_barrier(void *ud) {
+    cancel_barrier_t *b = ud;
+    pthread_mutex_lock(&b->mtx);
+    b->seed_calls++;
+    pthread_mutex_unlock(&b->mtx);
+    barrier_maybe_block(b);
+}
+
+static stream_t *post_generate_prompt(engine_t *eng, const int32_t *ids, int n,
+                                      int max_tokens) {
+    stream_t *s = stream_create(32);
+    stream_retain(s);
+    engine_cmd_t *gen = calloc(1, sizeof(*gen));
+    assert(gen);
+    gen->tag = CMD_GENERATE;
+    gen->generate.token_ids = malloc((size_t)n * sizeof(int32_t));
+    assert(gen->generate.token_ids);
+    memcpy(gen->generate.token_ids, ids, (size_t)n * sizeof(int32_t));
+    gen->generate.token_count = n;
+    gen->generate.params.max_tokens = max_tokens;
+    gen->generate.params.sampling.temperature = 0.0f;
+    gen->generate.params.sampling_set = SAMPLING_SET_TEMPERATURE;
+    gen->generate.stream = s;
+    engine_post(eng, gen);
+    return s;
+}
+
+static int32_t *make_prompt(int n, int32_t fill) {
+    int32_t *ids = malloc((size_t)n * sizeof(int32_t));
+    assert(ids);
+    for (int i = 0; i < n; i++)
+        ids[i] = fill + (i & 7);
+    return ids;
+}
+
+/* Cycle 2: short prompt fires prefill hook once. */
+static void test_prefill_hook_fires_once_short_prompt(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 0; /* never block */
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = hook_prefill_count_only,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int32_t prompt[] = {1, 2, 3, 4}; /* prefill len 3 */
+    stream_t *s = post_generate_prompt(&eng, prompt, 4, 1);
+
+    finish_reason_t reason;
+    int32_t got[8];
+    int n = collect_tokens(s, got, 8, &reason);
+    assert(n == 1);
+    assert(reason == FINISH_LENGTH);
+
+    assert(b.prefill_calls == 1);
+    assert(b.last_pos == 0);
+    assert(b.last_chunk_len == 3);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 3: decode hook fires once per emitted step. */
+static void test_decode_hook_fires_per_step(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 0;
+    engine_gen_hooks_t hooks = {
+        .on_decode_step = hook_decode_count_only,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int32_t prompt[] = {1, 2};
+    int max_new = 4;
+    stream_t *s = post_generate_prompt(&eng, prompt, 2, max_new);
+
+    finish_reason_t reason;
+    int32_t got[8];
+    int n = collect_tokens(s, got, 8, &reason);
+    assert(n == max_new);
+    assert(reason == FINISH_LENGTH);
+    assert(b.decode_calls == max_new);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 4: cancel at decode step 0 within deadline. */
+static void test_cancel_mid_decode_within_deadline(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 1; /* first decode step */
+    engine_gen_hooks_t hooks = {
+        .on_decode_step = hook_decode_barrier,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int32_t prompt[] = {1, 2};
+    stream_t *s = post_generate_prompt(&eng, prompt, 2, 1000);
+
+    barrier_wait_entered(&b);
+    int64_t t0 = mono_ms();
+    stream_cancel(s);
+    barrier_release(&b);
+
+    int64_t dt = wait_sole_owner_ms(s, t0, MLXD_TEST_DRAIN_BOUND_MS + 500);
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+    assert(stream_sole_owner(s));
+
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 5: shutdown at decode step 0 within deadline. */
+static void test_shutdown_mid_decode_within_deadline(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 1;
+    engine_gen_hooks_t hooks = {
+        .on_decode_step = hook_decode_barrier,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int32_t prompt[] = {1, 2};
+    stream_t *s = post_generate_prompt(&eng, prompt, 2, 1000);
+
+    barrier_wait_entered(&b);
+    int64_t t0 = mono_ms();
+    engine_signal_shutdown(&eng);
+    barrier_release(&b);
+
+    int64_t dt = wait_sole_owner_ms(s, t0, MLXD_TEST_DRAIN_BOUND_MS + 500);
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+    assert(stream_sole_owner(s));
+
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 6: cancel mid-prefill within deadline; zero tokens emitted. */
+static void test_cancel_mid_prefill_within_deadline(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 1; /* first prefill chunk */
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = hook_prefill_count,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int n_prompt = 64;
+    int32_t *prompt = make_prompt(n_prompt, 1);
+    stream_t *s = post_generate_prompt(&eng, prompt, n_prompt, 8);
+    free(prompt);
+
+    barrier_wait_entered(&b);
+    int64_t t0 = mono_ms();
+    stream_cancel(s);
+    barrier_release(&b);
+
+    int64_t dt = wait_sole_owner_ms(s, t0, MLXD_TEST_DRAIN_BOUND_MS + 500);
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+    assert(stream_sole_owner(s));
+
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 7: shutdown mid-prefill within deadline. */
+static void test_shutdown_mid_prefill_within_deadline(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 1;
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = hook_prefill_count,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int n_prompt = 64;
+    int32_t *prompt = make_prompt(n_prompt, 1);
+    stream_t *s = post_generate_prompt(&eng, prompt, n_prompt, 8);
+    free(prompt);
+
+    barrier_wait_entered(&b);
+    int64_t t0 = mono_ms();
+    engine_signal_shutdown(&eng);
+    barrier_release(&b);
+
+    int64_t dt = wait_sole_owner_ms(s, t0, MLXD_TEST_DRAIN_BOUND_MS + 500);
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+    assert(stream_sole_owner(s));
+
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 8: cancel between prefill and seed forward. */
+static void test_cancel_between_prefill_and_seed(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 1;
+    engine_gen_hooks_t hooks = {
+        .on_before_seed = hook_seed_barrier,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int n_prompt = 16;
+    int32_t *prompt = make_prompt(n_prompt, 1);
+    stream_t *s = post_generate_prompt(&eng, prompt, n_prompt, 8);
+    free(prompt);
+
+    barrier_wait_entered(&b);
+    int64_t t0 = mono_ms();
+    stream_cancel(s);
+    barrier_release(&b);
+
+    int64_t dt = wait_sole_owner_ms(s, t0, MLXD_TEST_DRAIN_BOUND_MS + 500);
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+    assert(stream_sole_owner(s));
+
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+    assert(b.seed_calls == 1);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Shutdown twin of cancel-between-prefill-and-seed. */
+static void test_shutdown_between_prefill_and_seed(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 1;
+    engine_gen_hooks_t hooks = {
+        .on_before_seed = hook_seed_barrier,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int n_prompt = 16;
+    int32_t *prompt = make_prompt(n_prompt, 1);
+    stream_t *s = post_generate_prompt(&eng, prompt, n_prompt, 8);
+    free(prompt);
+
+    barrier_wait_entered(&b);
+    int64_t t0 = mono_ms();
+    engine_signal_shutdown(&eng);
+    barrier_release(&b);
+
+    int64_t dt = wait_sole_owner_ms(s, t0, MLXD_TEST_DRAIN_BOUND_MS + 500);
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+    assert(stream_sole_owner(s));
+
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+    assert(b.seed_calls == 1);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 9: multi-chunk prefill grain (max_pos=2048, chunk=512). */
+static void test_prefill_multi_chunk_hook_positions(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 0; /* never block */
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = hook_prefill_count_only,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    /* prefill len = CHUNK + 32; prompt = prefill + 1 seed token */
+    int n_prompt = MLXD_PREFILL_CHUNK + 32 + 1;
+    int32_t *prompt = make_prompt(n_prompt, 1);
+    stream_t *s = post_generate_prompt(&eng, prompt, n_prompt, 1);
+    free(prompt);
+
+    finish_reason_t reason;
+    int32_t got[4];
+    int n = collect_tokens(s, got, 4, &reason);
+    assert(n == 1);
+    assert(reason == FINISH_LENGTH);
+
+    assert(b.prefill_calls == 2);
+    assert(b.prefill_pos[0] == 0);
+    assert(b.prefill_len[0] == MLXD_PREFILL_CHUNK);
+    assert(b.prefill_pos[1] == MLXD_PREFILL_CHUNK);
+    assert(b.prefill_len[1] == 32);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Cycle 9: cancel on second prefill chunk. */
+static void test_cancel_after_first_prefill_chunk(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 2; /* second prefill chunk */
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = hook_prefill_count,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int n_prompt = MLXD_PREFILL_CHUNK + 32 + 1;
+    int32_t *prompt = make_prompt(n_prompt, 1);
+    stream_t *s = post_generate_prompt(&eng, prompt, n_prompt, 8);
+    free(prompt);
+
+    barrier_wait_entered(&b);
+    assert(b.prefill_pos[0] == 0);
+    assert(b.prefill_pos[1] == MLXD_PREFILL_CHUNK);
+
+    int64_t t0 = mono_ms();
+    stream_cancel(s);
+    barrier_release(&b);
+
+    int64_t dt = wait_sole_owner_ms(s, t0, MLXD_TEST_DRAIN_BOUND_MS + 500);
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+    assert(stream_sole_owner(s));
+
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+
+    stream_release(s);
+    barrier_destroy(&b);
+    engine_destroy(&eng);
+}
+
+/* Snapshot stability: prefill clears eng->gen_hooks mid-generate; seed and
+   decode must still fire via the local copy taken at generate start. */
+typedef struct {
+    engine_t *eng;
+    int prefill_calls;
+    int seed_calls;
+    int decode_calls;
+} hooks_snap_t;
+
+static void hook_prefill_clear_hooks(void *ud, int pos, int chunk_len) {
+    hooks_snap_t *h = ud;
+    (void)pos;
+    (void)chunk_len;
+    h->prefill_calls++;
+    engine_set_gen_hooks(h->eng, NULL);
+}
+
+static void hook_seed_count(void *ud) {
+    hooks_snap_t *h = ud;
+    h->seed_calls++;
+}
+
+static void hook_decode_count_snap(void *ud, int step) {
+    hooks_snap_t *h = ud;
+    (void)step;
+    h->decode_calls++;
+}
+
+static void test_gen_hooks_stable_for_duration_of_generate(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    hooks_snap_t h = {.eng = &eng};
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = hook_prefill_clear_hooks,
+        .on_before_seed = hook_seed_count,
+        .on_decode_step = hook_decode_count_snap,
+        .ud = &h,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    /* prompt len >= 2 hits prefill + seed; max_tokens >= 1 hits decode */
+    int32_t prompt[] = {1, 2, 3, 4};
+    int max_new = 2;
+    stream_t *s = post_generate_prompt(&eng, prompt, 4, max_new);
+
+    finish_reason_t reason;
+    int32_t got[8];
+    int n = collect_tokens(s, got, 8, &reason);
+    assert(n == max_new);
+    assert(reason == FINISH_LENGTH);
+
+    assert(h.prefill_calls == 1);
+    assert(h.seed_calls == 1);
+    assert(h.decode_calls == max_new);
+
+    stream_release(s);
+    engine_destroy(&eng);
+}
+
+/* Cycle 10 helper: release barrier shortly after destroy starts joining. */
+typedef struct {
+    cancel_barrier_t *b;
+    int delay_ms;
+} release_after_arg_t;
+
+static void *release_after_fn(void *arg) {
+    release_after_arg_t *a = arg;
+    usleep((useconds_t)a->delay_ms * 1000);
+    barrier_release(a->b);
+    return NULL;
+}
+
+/* Cycle 10: engine_destroy joins within deadline while blocked in prefill. */
+static void test_destroy_joins_within_deadline_mid_prefill(void) {
+    engine_t eng;
+    assert(engine_init(&eng) == 0);
+    post_load(&eng, FIXTURES "/tiny_qwen3");
+    assert(poll_load_terminal(&eng, 30000) == LOAD_OK);
+
+    cancel_barrier_t b;
+    barrier_init(&b);
+    b.trip_at = 1;
+    engine_gen_hooks_t hooks = {
+        .on_prefill_chunk = hook_prefill_count,
+        .ud = &b,
+    };
+    engine_set_gen_hooks(&eng, &hooks);
+
+    int n_prompt = 64;
+    int32_t *prompt = make_prompt(n_prompt, 1);
+    stream_t *s = post_generate_prompt(&eng, prompt, n_prompt, 8);
+    free(prompt);
+
+    barrier_wait_entered(&b);
+
+    /* Helper releases the hook barrier so join cannot deadlock. */
+    release_after_arg_t ra = {.b = &b, .delay_ms = 20};
+    pthread_t thr;
+    assert(pthread_create(&thr, NULL, release_after_fn, &ra) == 0);
+
+    int64_t t0 = mono_ms();
+    engine_destroy(&eng);
+    int64_t dt = mono_ms() - t0;
+    assert(dt < MLXD_TEST_DRAIN_BOUND_MS);
+
+    pthread_join(thr, NULL);
+
+    assert(stream_sole_owner(s));
+    finish_reason_t reason = FINISH_STOP;
+    int tokens = count_tokens_drained(s, &reason);
+    assert(tokens == 0);
+    assert(reason == FINISH_CANCELLED);
+
+    stream_release(s);
+    barrier_destroy(&b);
+}
+
 int main(void) {
     test_load_tiny_qwen3_ok();
     printf("  test_load_tiny_qwen3_ok: passed\n");
@@ -679,6 +1366,42 @@ int main(void) {
 
     test_generate_multi_eos();
     printf("  test_generate_multi_eos: passed\n");
+
+    test_prefill_hook_fires_once_short_prompt();
+    printf("  test_prefill_hook_fires_once_short_prompt: passed\n");
+
+    test_decode_hook_fires_per_step();
+    printf("  test_decode_hook_fires_per_step: passed\n");
+
+    test_cancel_mid_decode_within_deadline();
+    printf("  test_cancel_mid_decode_within_deadline: passed\n");
+
+    test_shutdown_mid_decode_within_deadline();
+    printf("  test_shutdown_mid_decode_within_deadline: passed\n");
+
+    test_cancel_mid_prefill_within_deadline();
+    printf("  test_cancel_mid_prefill_within_deadline: passed\n");
+
+    test_shutdown_mid_prefill_within_deadline();
+    printf("  test_shutdown_mid_prefill_within_deadline: passed\n");
+
+    test_cancel_between_prefill_and_seed();
+    printf("  test_cancel_between_prefill_and_seed: passed\n");
+
+    test_shutdown_between_prefill_and_seed();
+    printf("  test_shutdown_between_prefill_and_seed: passed\n");
+
+    test_prefill_multi_chunk_hook_positions();
+    printf("  test_prefill_multi_chunk_hook_positions: passed\n");
+
+    test_cancel_after_first_prefill_chunk();
+    printf("  test_cancel_after_first_prefill_chunk: passed\n");
+
+    test_gen_hooks_stable_for_duration_of_generate();
+    printf("  test_gen_hooks_stable_for_duration_of_generate: passed\n");
+
+    test_destroy_joins_within_deadline_mid_prefill();
+    printf("  test_destroy_joins_within_deadline_mid_prefill: passed\n");
 
     printf("test_engine_gpu: all passed\n");
     return 0;

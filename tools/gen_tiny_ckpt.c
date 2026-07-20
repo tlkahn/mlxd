@@ -222,7 +222,8 @@ static const recipe_t QWEN3 = {
     .vocab = 256, .hidden = 64, .heads = 4, .kv_heads = 2,
     .head_dim = 16, .inter = 128, .layers = 2,
     .group_size = 32, .quant_bits = 4,
-    .max_position_embeddings = 512,
+    /* 2048 enables multi-chunk prefill tests at MLXD_PREFILL_CHUNK=512 (#46). */
+    .max_position_embeddings = 2048,
     .rms_norm_eps = 1e-6, .rope_theta = 1000000.0,
     .sliding_window = 0, .sliding_window_pattern = 0,
     .query_pre_attn_scalar = 0, .rope_local_base_freq = 0,
